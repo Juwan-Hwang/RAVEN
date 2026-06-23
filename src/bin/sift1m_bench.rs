@@ -82,14 +82,17 @@ fn main() {
     let (mut train, dim, n) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
     let (gt, gt_k, gt_nq) = read_ivecs("data/sift/sift_groundtruth.ivecs");
+    // 加载 sift_learn（100K）用于 AVQ 训练，比用 1M base 快 10 倍
+    let (mut learn, _, n_learn) = read_fvecs("data/sift/sift_learn.fvecs");
     println!("数据加载: {}s", t0.elapsed().as_secs_f64());
-    println!("SIFT1M: dim={}, base={}, query={}, gt_nq={}, gt_k={}", dim, n, nq, gt_nq, gt_k);
+    println!("SIFT1M: dim={}, base={}, query={}, gt_nq={}, gt_k={}, learn={}", dim, n, nq, gt_nq, gt_k, n_learn);
     println!();
 
     // 归一化到 [0,1]（SIFT 原始 0-255，AVQ 训练需要）
     let max_val = 255.0f32;
     for v in train.iter_mut() { *v /= max_val; }
     for v in test.iter_mut() { *v /= max_val; }
+    for v in learn.iter_mut() { *v /= max_val; }
 
     // 2. f32 建图（Vamana two passes: α=1.0→1.2, rayon 并行）
     println!("=== f32 建图（Vamana α=1.2, r_max=32, l_build=100, max_iter=2, rayon 并行）===");
@@ -132,11 +135,11 @@ fn main() {
         recall_f32, qps_f32, search_time * 1000.0 / nq as f64);
     println!();
 
-    // 4. AVQ 训练（α=0.30，Week 6 最优）
-    println!("=== AVQ 训练（K=256, sub_dim=8, α=0.30, iter=25）===");
+    // 4. AVQ 训练（用 sift_learn 100K + iter=5 加速，工业标准）
+    println!("=== AVQ 训练（sift_learn 100K, K=256, sub_dim=8, α=0.30, iter=5）===");
     let t0 = Instant::now();
     let cb = AVQCodebook::train_full(
-        &train, dim, 256, TrainingSignal::BatchHighScorePairs, 25, 8, 0.30,
+        &learn, dim, 256, TrainingSignal::BatchHighScorePairs, 5, 8, 0.30,
     );
     let avq_train_time = t0.elapsed().as_secs_f64();
     println!("AVQ 训练时间: {:.2}s", avq_train_time);
