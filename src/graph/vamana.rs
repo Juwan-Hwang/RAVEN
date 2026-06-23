@@ -553,14 +553,17 @@ impl<'a> GraphSearcher<'a> {
     /// 搜索最近邻
     ///
     /// 返回 (节点ID, 距离) 列表，按距离升序
+    ///
+    /// 使用 explore 模式（跳过但扩展），escape 局部最优
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
-        let candidates = VamanaGraph::greedy_search_vec(
+        let candidates = VamanaGraph::greedy_search_vec_explore(
             self.vectors,
             self.dim,
             self.graph.storage(),
             self.graph.entry_point(),
             query,
             self.ef_search,
+            self.ef_search * 500,
         );
 
         // 按距离排序，取 top-k
