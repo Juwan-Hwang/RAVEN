@@ -80,7 +80,7 @@ fn quantized_recall(codebook: &AVQCodebook, train: &[f32], test: &[f32], gt: &[i
         l_build: 100,
         r_max: 32,
         r_soft: 48,
-        max_iterations: 1,
+        max_iterations: 2,
     };
     let graph = VamanaGraph::build(&quantized, dim, &config, &mut rng);
 
@@ -124,7 +124,7 @@ fn adc_recall(
         l_build: 100,
         r_max: 32,
         r_soft: 48,
-        max_iterations: 1,
+        max_iterations: 2,
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
 
@@ -178,7 +178,7 @@ fn adc_recall_rerank(
         l_build: 100,
         r_soft: 48,
         r_max: 32,
-        max_iterations: 1,
+        max_iterations: 2,
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
 
@@ -246,59 +246,7 @@ fn main() {
     let recall_f32 = f32_recall(&train, &test, &gt, dim, n, nq, 10);
     println!("f32 baseline（图+搜索全 f32）: recall@10={:.4}", recall_f32);
     println!();
-
-    // α 扫描消融（固定 sub_dim=8, K=256）
-    let sub_dim = 8;
-    let k = 256;
-    println!("=== α 消融实验（sub_dim={}, K={}）===", sub_dim, k);
-    println!("{:>8} {:>12} {:>12} {:>12} {:>12}",
-        "alpha", "MSE", "recon_loss", "ret_loss", "recall@10");
-
-    for alpha in [0.0, 0.3, 0.5, 0.7, 1.0] {
-        let cb = AVQCodebook::train_full(
-            &train, dim, k, TrainingSignal::BatchHighScorePairs, 25, sub_dim, alpha,
-        );
-
-        // 重建 MSE
-        let mut mse = 0.0f64;
-        for i in 0..n {
-            let orig = &train[i * dim..(i + 1) * dim];
-            let decoded = cb.decode(&cb.encode(orig));
-            for d in 0..dim {
-                let diff = orig[d] - decoded[d];
-                mse += (diff * diff) as f64;
-            }
-        }
-        mse /= (n * dim) as f64;
-
-        // ADC recall（f32 建图 + 量化距离搜索）
-        let recall = adc_recall(&cb, &train, &test, &gt, dim, n, nq, 10);
-
-        // loss 指标
-        let recon_loss = AVQCodebook::reconstruction_loss(
-            &cb.centers, &train, dim, cb.m, cb.k, cb.sub_dim,
-        );
-        let ret_loss = cb.retrieval_aware_loss(&train);
-
-        println!("{:>8.2} {:>12.6} {:>12.4} {:>12.4} {:>12.4}",
-            alpha, mse, recon_loss, ret_loss, recall);
-    }
-
-    // Reranking 验证（用 α=0.3，粗筛 top-100 + f32 精排 top-10）
-    println!();
-    println!("=== Reranking 验证（α=0.30, top-100 → f32 rerank → top-10）===");
-    let cb_rerank = AVQCodebook::train_full(
-        &train, dim, k, TrainingSignal::BatchHighScorePairs, 25, sub_dim, 0.30,
-    );
-    let recall_rerank = adc_recall_rerank(&cb_rerank, &train, &test, &gt, dim, n, nq, 10, 100);
-    println!("ADC + rerank(top-100): recall@10={:.4}", recall_rerank);
-
-    println!();
-    println!("=== 结论判定 ===");
-    println!("f32 baseline recall={:.4}", recall_f32);
-    println!("AVQ ADC recall={:.4} (α=0.30)", 0.7240);
-    println!("AVQ ADC+rerank recall={:.4}", recall_rerank);
-    println!("目标：recall@10 > 0.95");
+    println!("目标：recall@10 > 0.95（跳过 α 消融加速验证）");
 }
 
 /// f32 建图 + f32 查询（不量化）
@@ -307,14 +255,25 @@ fn f32_recall(train: &[f32], test: &[f32], gt: &[i32], dim: usize, n: usize, nq:
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
         alpha: 1.2,
-        l_build: 100,
-        r_max: 32,
-        r_soft: 48,
-        max_iterations: 1,
+        l_build: 200,
+        r_max: 64,
+        r_soft: 96,
+        max_iterations: 2,
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
     let searcher = GraphSearcher::new(train, &graph, 100);
 
+    // 诊断：打印第一个查询的搜索候选数 + 图平均度数
+    if nq > 0 {
+        let query = &test[0..dim];
+        let (candidates, visited) = VamanaGraph::greedy_search_vec(
+            train, dim, graph.storage(), graph.entry_point(), query, 100,
+        );
+        eprintln!("[diag] ef=100 top={}, visited={}", candidates.len(), visited.len());
+        let mut total_deg = 0usize;
+        for i in 0..n { total_deg += graph.storage().degree(i as u32); }
+        eprintln!("[diag] 图平均度数={:.1}", total_deg as f64 / n as f64);
+    }
     // 诊断：打印第一个查询的结果 vs groundtruth
     if nq > 0 {
         let query = &test[0..dim];

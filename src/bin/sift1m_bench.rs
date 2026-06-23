@@ -96,11 +96,11 @@ fn main() {
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
-        alpha: 1.2,
+        alpha: 1.0,
         l_build: 100,
         r_soft: 48,
         r_max: 32,
-        max_iterations: 2,
+        max_iterations: 1,
     };
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();

@@ -73,6 +73,14 @@ impl VisitedTracker {
         self.history.len()
     }
 
+    /// 获取所有已访问节点的 ID 列表
+    ///
+    /// Vamana/DiskANN 论文要求：BuildVamana 用 GreedySearch 返回的整个 visited set
+    /// 做 RobustPrune，而不是只用 top-L。此方法暴露 history 供建图使用。
+    pub fn visited_nodes(&self) -> &[u32] {
+        &self.history
+    }
+
     /// 节点总数
     pub fn len(&self) -> usize {
         self.visited.len()
