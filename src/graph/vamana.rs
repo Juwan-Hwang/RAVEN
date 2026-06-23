@@ -80,8 +80,10 @@ impl VamanaGraph {
         eprintln!("[build] rayon threads: {}", rayon::current_num_threads());
 
         // 1. 初始化图：随机连接（设计文档上层导航：保留随机层级）
-        let entry_point = Self::init_random_graph(&mut storage, n, config, rng);
-        eprintln!("[build] init_random_graph done, entry={}", entry_point);
+        let _random_entry = Self::init_random_graph(&mut storage, n, config, rng);
+        // Vamana/DiskANN 论文：entry_point 用 medoid（离质心最近的点），不是随机点
+        let entry_point = Self::compute_medoid(vectors, dim, n);
+        eprintln!("[build] init_random_graph done, entry=medoid[{}]", entry_point);
 
         // 2. 迭代优化：并行 greedy_search + RobustPrune，顺序写入
         // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
@@ -154,7 +156,9 @@ impl VamanaGraph {
         assert_eq!(vectors.len(), n * dim);
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
 
-        let entry_point = Self::init_random_graph(&mut storage, n, config, rng);
+        let _random_entry = Self::init_random_graph(&mut storage, n, config, rng);
+        // Vamana/DiskANN 论文：entry_point 用 medoid
+        let entry_point = Self::compute_medoid(vectors, dim, n);
 
         for _iter in 0..config.max_iterations {
             let order = Self::permutation(n, rng);
@@ -214,6 +218,39 @@ impl VamanaGraph {
             }
         }
         entry
+    }
+
+    /// 计算 medoid（离质心最近的点）
+    ///
+    /// Vamana/DiskANN 论文要求 entry_point 用 medoid，不是随机点。
+    /// 质心法：先算所有向量的均值（质心），再找离质心最近的点。
+    /// 复杂度 O(n*dim)，1M 向量也很快。
+    fn compute_medoid(vectors: &[f32], dim: usize, n: usize) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        // 1. 计算质心（所有向量的均值）
+        let mut centroid = vec![0.0f32; dim];
+        for i in 0..n {
+            let v = &vectors[i * dim..(i + 1) * dim];
+            for d in 0..dim {
+                centroid[d] += v[d];
+            }
+        }
+        for d in 0..dim {
+            centroid[d] /= n as f32;
+        }
+        // 2. 找离质心最近的点
+        let mut best_id = 0u32;
+        let mut best_dist = f32::MAX;
+        for i in 0..n {
+            let dist = l2_simd(&centroid, &vectors[i * dim..(i + 1) * dim]);
+            if dist < best_dist {
+                best_dist = dist;
+                best_id = i as u32;
+            }
+        }
+        best_id
     }
 
     /// 生成 0..n 的随机排列
