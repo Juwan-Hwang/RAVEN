@@ -1,0 +1,8 @@
+/target
+/data
+*.fvecs
+*.ivecs
+*.bvecs
+*.tgz
+*.h5
+Cargo.lock

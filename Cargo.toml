@@ -1,0 +1,71 @@
+[package]
+name = "raven"
+version = "0.1.0"
+edition = "2021"
+description = "Retrieval-Aware Vector Engine with Navigation - high-performance ANN search"
+license = "MIT"
+
+[lib]
+name = "raven"
+path = "src/lib.rs"
+
+[features]
+# 批量查询模式：feature-gate 隔离，不污染单查询主路径（设计文档第二层）
+# 不同查询强行共享 visited 会改变搜索语义，直接损害召回率
+batch_mode = []
+# AVX-512 内核（Week 7-8，当前预留）
+avx512 = []
+# big-ann SSD 扩展路径（Week 9+，当前仅预留接口）
+big_ann = []
+
+[dependencies]
+# 构建可复现性：ChaCha8 速度快、质量足够、跨平台结果一致（设计文档第四层 F.7）
+rand = "0.8"
+rand_chacha = "0.3"
+# 日志：度数分位数钩子等（设计文档第二层）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 锁实现：优先选择无竞争路径更短的锁实现（设计文档第四层）
+parking_lot = "0.12"
+# 构建期临时候选集 arena（设计文档 F.2，仅构建期使用）
+bumpalo = "3"
+# 序列化：CRC32 校验和（设计文档第二层 F.1）
+crc32fast = "1.4"
+# 配置文件解析（设计文档第六层）
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# 错误处理
+thiserror = "1"
+# 内存对齐（设计文档第二层，GEMM 缓冲区对齐）
+aligned-vec = "0.5"
+# 零拷贝字节转换（ann-benchmarks 数据读取）
+bytemuck = "1"
+# JSON 输出（ann-benchmarks 结果格式）
+serde_json = "1"
+# 并行建图（Vamana build 并行化，greedy_search 只读可并行）
+rayon = "1.10"
+
+[dev-dependencies]
+# 微基准：日常迭代用 divan，正式回归用 criterion（设计文档第六层）
+divan = "0.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "distance_kernels"
+harness = false
+path = "benches/distance_kernels.rs"
+
+[[bench]]
+name = "graph_build"
+harness = false
+path = "benches/graph_build.rs"
+
+[profile.release]
+# 性能优化：启用 LTO 与 codegen-units=1 以获得最佳向量化效果
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1

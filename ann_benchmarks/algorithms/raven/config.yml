@@ -1,0 +1,41 @@
+# ann-benchmarks 参数扫描空间
+# 设计文档第六层模式一：ann-benchmarks（主战场）
+# 参数空间参考设计文档第 449-458 行
+
+# 数据集列表（ann-benchmarks 标准数据集）
+# fashion-mnist: 60k × 784
+# sift: 1M × 128
+# gist: 1M × 960
+# glove-25: 1.2M × 25
+# glove-50: 1.2M × 50
+# glove-100: 1.2M × 100
+# glove-200: 1.2M × 200
+
+# 运行列表：每个组合一个 benchmark run
+runs:
+  - name: raven-fashion-mnist
+    algorithm: raven
+    dataset: fashion-mnist
+    arguments:
+      alpha: [1.0, 1.2, 1.5]
+      l_build: [100, 200]
+      r_max: [32, 64]
+      ef_search: [50, 100, 200, 400]
+
+  - name: raven-sift
+    algorithm: raven
+    dataset: sift-128-euclidean
+    arguments:
+      alpha: [1.0, 1.2, 1.5]
+      l_build: [200, 400]
+      r_max: [32, 64]
+      ef_search: [50, 100, 200, 400]
+
+  - name: raven-glove-100
+    algorithm: raven
+    dataset: glove-100-angular
+    arguments:
+      alpha: [1.0, 1.2, 1.5]
+      l_build: [200, 400]
+      r_max: [32, 64]
+      ef_search: [50, 100, 200, 400]
