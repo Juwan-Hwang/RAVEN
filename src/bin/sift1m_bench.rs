@@ -91,16 +91,16 @@ fn main() {
     for v in train.iter_mut() { *v /= max_val; }
     for v in test.iter_mut() { *v /= max_val; }
 
-    // 2. f32 建图（Vamana α=1.0，完整参数 + rayon 并行）
-    println!("=== f32 建图（Vamana α=1.0, r_max=32, l_build=100, rayon 并行）===");
+    // 2. f32 建图（Vamana two passes: α=1.0→1.2, rayon 并行）
+    println!("=== f32 建图（Vamana α=1.2, r_max=32, l_build=100, max_iter=2, rayon 并行）===");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
-        alpha: 1.0,
+        alpha: 1.2,
         l_build: 100,
         r_soft: 48,
         r_max: 32,
-        max_iterations: 1,
+        max_iterations: 2,
     };
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();
