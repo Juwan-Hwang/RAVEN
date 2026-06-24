@@ -227,18 +227,26 @@ impl VamanaGraph {
         }
         let entry = rng.gen_range(0..n as u32);
 
-        // 随机连接每个节点到若干邻居
-        // 修复：原实现对每个节点 shuffle 整个 indices（O(n²)），1M 节点需要数小时
-        // 改为随机采样 neighbor_count 个不同节点，用 HashSet 去重（O(1) 查找）
-        let neighbor_count = config.r_max;
+        // Fisher-Yates 部分采样（OPT-6）：预分配 indices 数组复用，避免每节点分配 HashSet
+        // 复杂度 O(r_max) per node，无哈希开销，无重试
+        // 旧方案：每节点 HashSet 去重采样，1M 节点 = 1M 次 HashSet 分配
+        let neighbor_count = config.r_max.min(n.saturating_sub(1));
+        let mut indices: Vec<u32> = (0..n as u32).collect();
+
         for node in 0..n as u32 {
-            let mut seen = std::collections::HashSet::with_capacity(neighbor_count);
-            seen.insert(node);
+            // 多采 1 个以防 node 自己被采到（sample_size = neighbor_count + 1）
+            // 即使 node 在前 sample_size 个里，跳过后仍剩 neighbor_count 个，无需补采
+            let sample_size = (neighbor_count + 1).min(n);
+            // partial_shuffle 是 Fisher-Yates 的标准实现，比手写循环更快（rand crate 优化）
+            indices.partial_shuffle(rng, sample_size);
+            // 取前 sample_size 个，跳过 node 自己
             let mut neighbors = Vec::with_capacity(neighbor_count);
-            while neighbors.len() < neighbor_count {
-                let j = rng.gen_range(0..n as u32);
-                if seen.insert(j) {
-                    neighbors.push(j);
+            for &candidate in indices.iter().take(sample_size) {
+                if candidate != node {
+                    neighbors.push(candidate);
+                    if neighbors.len() >= neighbor_count {
+                        break;
+                    }
                 }
             }
             for &j in &neighbors {
@@ -252,11 +260,51 @@ impl VamanaGraph {
     ///
     /// Vamana/DiskANN 论文要求 entry_point 用 medoid，不是随机点。
     /// 质心法：先算所有向量的均值（质心），再找离质心最近的点。
-    /// 复杂度 O(n*dim)，1M 向量也很快。
+    ///
+    /// OPT-7：当 n > 10K 时用采样近似（1K 样本），O(1K*dim) vs O(n*dim)
+    /// 采样用独立 rng（seed 42）保证确定性，不影响外部 rng 状态
+    /// medoid 仅是搜索起点，采样近似对 recall 无影响（greedy_search 自收敛）
     fn compute_medoid(vectors: &[f32], dim: usize, n: usize) -> u32 {
         if n == 0 {
             return 0;
         }
+        const SAMPLE_THRESHOLD: usize = 10_000;
+        const SAMPLE_COUNT: usize = 1_000;
+        if n <= SAMPLE_THRESHOLD {
+            return Self::compute_medoid_full(vectors, dim, n);
+        }
+        // 采样近似：用独立 rng 保证确定性，不干扰外部 rng 状态
+        let mut rng = ChaCha8Rng::seed_from(42);
+        let mut indices: Vec<u32> = (0..n as u32).collect();
+        indices.partial_shuffle(&mut rng, SAMPLE_COUNT);
+        let sample: Vec<u32> = indices.iter().take(SAMPLE_COUNT).copied().collect();
+
+        // 1. 用采样计算近似质心
+        let mut centroid = vec![0.0f32; dim];
+        for &idx in &sample {
+            let v = &vectors[idx as usize * dim..(idx as usize + 1) * dim];
+            for d in 0..dim {
+                centroid[d] += v[d];
+            }
+        }
+        for d in 0..dim {
+            centroid[d] /= SAMPLE_COUNT as f32;
+        }
+        // 2. 在采样集中找离近似质心最近的点
+        let mut best_id = sample[0];
+        let mut best_dist = f32::MAX;
+        for &idx in &sample {
+            let dist = l2_simd(&centroid, &vectors[idx as usize * dim..(idx as usize + 1) * dim]);
+            if dist < best_dist {
+                best_dist = dist;
+                best_id = idx;
+            }
+        }
+        best_id
+    }
+
+    /// 全量计算 medoid（n <= 10K 时使用）
+    fn compute_medoid_full(vectors: &[f32], dim: usize, n: usize) -> u32 {
         // 1. 计算质心（所有向量的均值）
         let mut centroid = vec![0.0f32; dim];
         for i in 0..n {

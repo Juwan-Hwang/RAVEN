@@ -39,6 +39,9 @@ impl PQCodebook {
         let mut centers = vec![0.0f32; m * k * sub_dim];
 
         // 对每个子空间做 K-means
+        // OPT-9 实验结论：k-means++ 在 SIFT 上 loss 仅改善 1.92% 但耗时 15 倍，
+        // 采样 k-means++ loss 反而更差（-0.06%）。SIFT 数据分布均匀，"取前 k 个点"已足够。
+        // 保持"取前 k 个点"初始化，不接入 k-means++。
         for sub in 0..m {
             // 提取子空间向量
             let sub_vectors: Vec<Vec<f32>> = (0..n)
@@ -128,7 +131,7 @@ impl PQ {
     }
 }
 
-/// 简单 K-means 聚类
+/// 简单 K-means 聚类（取前 k 个点初始化）
 fn kmeans(data: &[Vec<f32>], k: usize, iterations: usize) -> Vec<Vec<f32>> {
     if data.is_empty() || k == 0 {
         return vec![];

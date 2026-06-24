@@ -72,6 +72,22 @@ fn recall_at_k(found: &[u32], gt_slice: &[i32], k: usize) -> f64 {
     hits as f64 / k as f64
 }
 
+/// 计算延迟分位数（OPT-15）
+///
+/// 输入：延迟数组（纳秒），返回 (p50, p99, p999) 毫秒
+fn latency_percentiles(latencies_ns: &[u64]) -> (f64, f64, f64) {
+    if latencies_ns.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut sorted = latencies_ns.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let p50 = sorted[n / 2] as f64 / 1_000_000.0;
+    let p99 = sorted[(n as f64 * 0.99) as usize] as f64 / 1_000_000.0;
+    let p999 = sorted[(n as f64 * 0.999) as usize] as f64 / 1_000_000.0;
+    (p50, p99, p999)
+}
+
 fn main() {
     println!("=== SIFT1M 端到端基准测试 ===");
     println!();
@@ -109,16 +125,19 @@ fn main() {
     println!("建图时间: {:.2}s ({:.0} vec/s)", build_time, n as f64 / build_time);
     println!();
 
-    // 3. f32 搜索 QPS + recall
+    // 3. f32 搜索 QPS + recall + 延迟分位数（OPT-15）
     println!("=== f32 搜索（ef_search=100, k=10）===");
     let mut searcher = GraphSearcher::new(&train, &graph, 100);
     let t0 = Instant::now();
     let gt_stride = gt_k;
     let k = 10;
     let mut recall_sum = 0.0f64;
+    let mut latencies_f32: Vec<u64> = Vec::with_capacity(nq);
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
+        let tq = Instant::now();
         let result = searcher.search(query, k);
+        latencies_f32.push(tq.elapsed().as_nanos() as u64);
         let found: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
         recall_sum += recall_at_k(&found, gt_slice, k);
@@ -126,8 +145,9 @@ fn main() {
     let search_time = t0.elapsed().as_secs_f64();
     let recall_f32 = recall_sum / nq as f64;
     let qps_f32 = nq as f64 / search_time;
-    println!("f32 recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms",
-        recall_f32, qps_f32, search_time * 1000.0 / nq as f64);
+    let (p50, p99, p999) = latency_percentiles(&latencies_f32);
+    println!("f32 recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms, p50={:.2}ms, p99={:.2}ms, p999={:.2}ms",
+        recall_f32, qps_f32, search_time * 1000.0 / nq as f64, p50, p99, p999);
     println!();
 
     // 4. AVQ 训练（用 sift_learn 100K + iter=5 加速，工业标准）
@@ -151,15 +171,18 @@ fn main() {
         .collect();
     println!("量化数据库构造: {:.2}s", t0.elapsed().as_secs_f64());
 
-    // 6. ADC 搜索 QPS（无 rerank）
+    // 6. ADC 搜索 QPS（无 rerank）+ 延迟分位数（OPT-15）
     println!();
     println!("=== ADC 搜索（量化距离, ef_search=100, k=10）===");
     let mut searcher_q = GraphSearcher::new(&quantized_db, &graph, 100);
     let t0 = Instant::now();
     let mut recall_sum = 0.0f64;
+    let mut latencies_adc: Vec<u64> = Vec::with_capacity(nq);
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
+        let tq = Instant::now();
         let result = searcher_q.search(query, k);
+        latencies_adc.push(tq.elapsed().as_nanos() as u64);
         let found: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
         recall_sum += recall_at_k(&found, gt_slice, k);
@@ -167,17 +190,20 @@ fn main() {
     let adc_time = t0.elapsed().as_secs_f64();
     let recall_adc = recall_sum / nq as f64;
     let qps_adc = nq as f64 / adc_time;
-    println!("ADC recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms",
-        recall_adc, qps_adc, adc_time * 1000.0 / nq as f64);
+    let (p50_adc, p99_adc, p999_adc) = latency_percentiles(&latencies_adc);
+    println!("ADC recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms, p50={:.2}ms, p99={:.2}ms, p999={:.2}ms",
+        recall_adc, qps_adc, adc_time * 1000.0 / nq as f64, p50_adc, p99_adc, p999_adc);
     println!();
 
-    // 7. ADC + rerank QPS + recall（top-100 → f32 rerank → top-10）
+    // 7. ADC + rerank QPS + recall + 延迟分位数（top-100 → f32 rerank → top-10）
     println!("=== ADC + rerank（top-100 粗筛 → f32 精排 → top-10）===");
     let top_n = 100;
     let t0 = Instant::now();
     let mut recall_sum = 0.0f64;
+    let mut latencies_rerank: Vec<u64> = Vec::with_capacity(nq);
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
+        let tq = Instant::now();
         let candidates = searcher_q.search(query, top_n);
         // f32 rerank（SIMD 加速）
         let mut reranked: Vec<(u32, f32)> = candidates
@@ -188,6 +214,7 @@ fn main() {
             })
             .collect();
         reranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        latencies_rerank.push(tq.elapsed().as_nanos() as u64);
         let found: Vec<u32> = reranked.iter().take(k).map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
         recall_sum += recall_at_k(&found, gt_slice, k);
@@ -195,17 +222,21 @@ fn main() {
     let rerank_time = t0.elapsed().as_secs_f64();
     let recall_rerank = recall_sum / nq as f64;
     let qps_rerank = nq as f64 / rerank_time;
-    println!("ADC+rerank recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms",
-        recall_rerank, qps_rerank, rerank_time * 1000.0 / nq as f64);
+    let (p50_rr, p99_rr, p999_rr) = latency_percentiles(&latencies_rerank);
+    println!("ADC+rerank recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms, p50={:.2}ms, p99={:.2}ms, p999={:.2}ms",
+        recall_rerank, qps_rerank, rerank_time * 1000.0 / nq as f64, p50_rr, p99_rr, p999_rr);
     println!();
 
     // 8. 汇总
     println!("=== 汇总 ===");
-    println!("{:<20} {:>10} {:>10} {:>12}", "方法", "recall@10", "QPS", "latency_ms");
-    println!("{:-<52}", "");
-    println!("{:<20} {:>10.4} {:>10.0} {:>12.2}", "f32 baseline", recall_f32, qps_f32, search_time * 1000.0 / nq as f64);
-    println!("{:<20} {:>10.4} {:>10.0} {:>12.2}", "AVQ ADC", recall_adc, qps_adc, adc_time * 1000.0 / nq as f64);
-    println!("{:<20} {:>10.4} {:>10.0} {:>12.2}", "AVQ ADC+rerank", recall_rerank, qps_rerank, rerank_time * 1000.0 / nq as f64);
+    println!("{:<20} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}", "方法", "recall@10", "QPS", "avg_ms", "p50_ms", "p99_ms", "p999_ms");
+    println!("{:-<82}", "");
+    println!("{:<20} {:>10.4} {:>10.0} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
+        "f32 baseline", recall_f32, qps_f32, search_time * 1000.0 / nq as f64, p50, p99, p999);
+    println!("{:<20} {:>10.4} {:>10.0} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
+        "AVQ ADC", recall_adc, qps_adc, adc_time * 1000.0 / nq as f64, p50_adc, p99_adc, p999_adc);
+    println!("{:<20} {:>10.4} {:>10.0} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
+        "AVQ ADC+rerank", recall_rerank, qps_rerank, rerank_time * 1000.0 / nq as f64, p50_rr, p99_rr, p999_rr);
     println!();
     println!("建图时间: {:.2}s | AVQ 训练: {:.2}s", build_time, avq_train_time);
 }
