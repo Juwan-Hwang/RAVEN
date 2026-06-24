@@ -117,13 +117,8 @@ fn search_reuse(
         ef_search,
         visited,
     );
-    let mut results: Vec<(u32, f32)> = candidates
-        .into_iter()
-        .map(|id| {
-            let v = &vectors[id as usize * dim..(id as usize + 1) * dim];
-            (id, l2_simd(query, v))
-        })
-        .collect();
+    // 距离已在 greedy_search_vec_reuse 中计算，只需排序取 top-k
+    let mut results = candidates;
     results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(k);
     results
