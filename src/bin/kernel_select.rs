@@ -24,7 +24,6 @@ fn main() {
     let mut dim: usize = 768;
     let mut stability_duration_secs: u64 = 300; // 设计文档 F.10：5 分钟
     let mut skip_stability = false;
-    let mut verbose = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -38,7 +37,6 @@ fn main() {
                 stability_duration_secs = args[i].parse().expect("invalid duration");
             }
             "--skip-stability" => skip_stability = true,
-            "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => {
                 print_help();
                 return;

@@ -63,51 +63,6 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
     (gt, 100, n)
 }
 
-/// ADC + Reranking recall
-fn adc_recall_rerank(
-    codebook: &AVQCodebook,
-    train: &[f32],
-    test: &[f32],
-    gt: &[i32],
-    dim: usize,
-    n: usize,
-    nq: usize,
-    k: usize,
-    top_n: usize,
-    graph: &VamanaGraph,
-) -> f64 {
-    let quantized_db: Vec<f32> = (0..n)
-        .flat_map(|i| {
-            let v = &train[i * dim..(i + 1) * dim];
-            codebook.decode(&codebook.encode(v))
-        })
-        .collect();
-
-    let mut searcher = GraphSearcher::new(&quantized_db, graph, 100);
-    let mut hits = 0usize;
-    let gt_stride = 100;
-    for q in 0..nq {
-        let query = &test[q * dim..(q + 1) * dim];
-        let candidates = searcher.search(query, top_n);
-        let mut reranked: Vec<(u32, f32)> = candidates
-            .iter()
-            .map(|(id, _)| {
-                let v = &train[*id as usize * dim..(*id as usize + 1) * dim];
-                (*id, l2_simd(query, v))
-            })
-            .collect();
-        reranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let found: Vec<u32> = reranked.iter().take(k).map(|(id, _)| *id).collect();
-        let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
-        for &g in gt_slice {
-            if found.contains(&(g as u32)) {
-                hits += 1;
-            }
-        }
-    }
-    hits as f64 / (nq * k) as f64
-}
-
 /// ADC recall（无 rerank）
 fn adc_recall(
     codebook: &AVQCodebook,

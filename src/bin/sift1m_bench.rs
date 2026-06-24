@@ -16,7 +16,6 @@ use std::time::Instant;
 use raven::quant::avq::{AVQCodebook, TrainingSignal};
 use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
 use raven::build::ChaCha8Rng;
-use rand::Rng;
 use raven::l2_simd;
 
 /// 读取 fvecs 文件
@@ -114,22 +113,18 @@ fn main() {
     println!("=== f32 搜索（ef_search=100, k=10）===");
     let mut searcher = GraphSearcher::new(&train, &graph, 100);
     let t0 = Instant::now();
-    let mut hits = 0usize;
     let gt_stride = gt_k;
     let k = 10;
+    let mut recall_sum = 0.0f64;
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
         let result = searcher.search(query, k);
         let found: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
-        for &g in gt_slice {
-            if found.contains(&(g as u32)) {
-                hits += 1;
-            }
-        }
+        recall_sum += recall_at_k(&found, gt_slice, k);
     }
     let search_time = t0.elapsed().as_secs_f64();
-    let recall_f32 = hits as f64 / (nq * k) as f64;
+    let recall_f32 = recall_sum / nq as f64;
     let qps_f32 = nq as f64 / search_time;
     println!("f32 recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms",
         recall_f32, qps_f32, search_time * 1000.0 / nq as f64);
@@ -161,20 +156,16 @@ fn main() {
     println!("=== ADC 搜索（量化距离, ef_search=100, k=10）===");
     let mut searcher_q = GraphSearcher::new(&quantized_db, &graph, 100);
     let t0 = Instant::now();
-    let mut hits = 0usize;
+    let mut recall_sum = 0.0f64;
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
         let result = searcher_q.search(query, k);
         let found: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
-        for &g in gt_slice {
-            if found.contains(&(g as u32)) {
-                hits += 1;
-            }
-        }
+        recall_sum += recall_at_k(&found, gt_slice, k);
     }
     let adc_time = t0.elapsed().as_secs_f64();
-    let recall_adc = hits as f64 / (nq * k) as f64;
+    let recall_adc = recall_sum / nq as f64;
     let qps_adc = nq as f64 / adc_time;
     println!("ADC recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms",
         recall_adc, qps_adc, adc_time * 1000.0 / nq as f64);
@@ -184,7 +175,7 @@ fn main() {
     println!("=== ADC + rerank（top-100 粗筛 → f32 精排 → top-10）===");
     let top_n = 100;
     let t0 = Instant::now();
-    let mut hits = 0usize;
+    let mut recall_sum = 0.0f64;
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
         let candidates = searcher_q.search(query, top_n);
@@ -199,14 +190,10 @@ fn main() {
         reranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let found: Vec<u32> = reranked.iter().take(k).map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_stride..q * gt_stride + k];
-        for &g in gt_slice {
-            if found.contains(&(g as u32)) {
-                hits += 1;
-            }
-        }
+        recall_sum += recall_at_k(&found, gt_slice, k);
     }
     let rerank_time = t0.elapsed().as_secs_f64();
-    let recall_rerank = hits as f64 / (nq * k) as f64;
+    let recall_rerank = recall_sum / nq as f64;
     let qps_rerank = nq as f64 / rerank_time;
     println!("ADC+rerank recall@10={:.4}, QPS={:.0}, avg_latency={:.2}ms",
         recall_rerank, qps_rerank, rerank_time * 1000.0 / nq as f64);

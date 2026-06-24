@@ -9,7 +9,6 @@ use std::io::Read;
 use raven::quant::avq::{AVQCodebook, TrainingSignal};
 use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
 use raven::build::ChaCha8Rng;
-use rand::Rng;
 use raven::l2_simd;
 
 /// 读取 fvecs 文件（siftsmall 格式）
@@ -246,7 +245,37 @@ fn main() {
     let recall_f32 = f32_recall(&train, &test, &gt, dim, n, nq, 10);
     println!("f32 baseline（图+搜索全 f32）: recall@10={:.4}", recall_f32);
     println!();
-    println!("目标：recall@10 > 0.95（跳过 α 消融加速验证）");
+
+    // 训练 AVQ codebook（K=256, sub_dim=8, α=0.30）
+    println!("=== AVQ 训练（K=256, sub_dim=8, α=0.30, iter=25）===");
+    let mut avq_rng = ChaCha8Rng::seed_from(42);
+    let codebook = AVQCodebook::train_full(
+        &train, dim, 256, TrainingSignal::BatchHighScorePairs, 25, 8, 0.30, avq_rng.inner(),
+    );
+    println!("AVQ codebook 训练完成");
+    println!();
+
+    // 对比实验 1：quantized_recall（错误用法 — 用量化向量建图）
+    // 验证"用量化向量建图"是否真的差（违反 ADC 原则）
+    let recall_quantized = quantized_recall(&codebook, &train, &test, &gt, dim, n, nq, 10);
+    println!("quantized_recall（错误：量化向量建图）: recall@10={:.4}", recall_quantized);
+    println!();
+
+    // 对比实验 2：adc_recall（正确 ADC — f32 建图，量化距离搜索）
+    let recall_adc = adc_recall(&codebook, &train, &test, &gt, dim, n, nq, 10);
+    println!("adc_recall（正确：f32 建图 + 量化距离）: recall@10={:.4}", recall_adc);
+    println!();
+
+    // 对比实验 3：adc_recall_rerank（ADC + f32 rerank）
+    let recall_rerank = adc_recall_rerank(&codebook, &train, &test, &gt, dim, n, nq, 10, 100);
+    println!("adc_recall_rerank（ADC + f32 rerank top-100）: recall@10={:.4}", recall_rerank);
+    println!();
+
+    println!("=== 结论 ===");
+    println!("f32 baseline:    recall@10={:.4}", recall_f32);
+    println!("quantized (错):  recall@10={:.4}  ← 用量化向量建图，违反 ADC 原则", recall_quantized);
+    println!("adc (正确):      recall@10={:.4}  ← f32 建图 + 量化距离", recall_adc);
+    println!("adc+rerank:      recall@10={:.4}  ← 两阶段，目标 >0.95", recall_rerank);
 }
 
 /// f32 建图 + f32 查询（不量化）

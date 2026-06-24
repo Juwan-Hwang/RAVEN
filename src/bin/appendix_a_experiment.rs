@@ -237,11 +237,13 @@ fn main() {
             let recall_ok = recall_drop < 0.005;  // recall 下降 < 0.5%
             let qps_ok = qps_drop < 0.03;  // QPS 下降 < 3%
 
-            println!("  α={:.1}: recall_drop={:.4} ({}), qps_drop={:.2}%, {}",
+            println!("  α={:.1}: recall_drop={:.4} ({}), qps_drop={:.2}%, build_time: {}={:.3}s vs {}={:.3}s, {}",
                 rebuild.alpha,
                 recall_drop,
                 if recall_ok { "PASS" } else { "FAIL" },
                 qps_drop * 100.0,
+                rebuild.method, rebuild.build_time_s,
+                rp.method, rp.build_time_s,
                 if qps_ok { "PASS" } else { "FAIL" }
             );
 

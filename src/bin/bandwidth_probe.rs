@@ -66,7 +66,6 @@ fn measure_bandwidth(n_pairs: usize, dim: usize, iterations: usize) -> Bandwidth
         bandwidth_gbs,
         gflops,
         latency_ns,
-        elapsed_us: elapsed.as_micros() as f64,
     }
 }
 
@@ -78,7 +77,6 @@ struct BandwidthResult {
     bandwidth_gbs: f64,
     gflops: f64,
     latency_ns: f64,
-    elapsed_us: f64,
 }
 
 impl BandwidthResult {
