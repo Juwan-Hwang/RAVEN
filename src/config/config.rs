@@ -144,14 +144,14 @@ impl Config {
                 self.m = m;
             }
         }
+        if let Ok(v) = std::env::var("RAVEN_EF_CONSTRUCTION") {
+            if let Ok(e) = v.parse() {
+                self.ef_construction = e;
+            }
+        }
         if let Ok(v) = std::env::var("RAVEN_ALPHA") {
             if let Ok(a) = v.parse() {
                 self.alpha = a;
-            }
-        }
-        if let Ok(v) = std::env::var("RAVEN_BETA") {
-            if let Ok(b) = v.parse() {
-                self.beta = b;
             }
         }
         if let Ok(v) = std::env::var("RAVEN_KERNEL") {
@@ -160,8 +160,73 @@ impl Config {
         if let Ok(v) = std::env::var("RAVEN_PQ_MODE") {
             self.pq_mode = v;
         }
+        if let Ok(v) = std::env::var("RAVEN_PREFETCH_WINDOW") {
+            if let Ok(p) = v.parse() {
+                self.prefetch_window = p;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_BETA") {
+            if let Ok(b) = v.parse() {
+                self.beta = b;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_R_SOFT_RATIO") {
+            if let Ok(r) = v.parse() {
+                self.r_soft_ratio = r;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_GEMM_THRESHOLD") {
+            if let Ok(g) = v.parse() {
+                self.gemm_threshold = g;
+            }
+        }
         if let Ok(v) = std::env::var("RAVEN_AVX512") {
             self.avx512 = v == "1" || v == "true";
+        }
+        if let Ok(v) = std::env::var("RAVEN_BATCH_MODE") {
+            self.batch_mode = v == "1" || v == "true";
+        }
+        if let Ok(v) = std::env::var("RAVEN_AVQ") {
+            self.avq = v == "1" || v == "true";
+        }
+        if let Ok(v) = std::env::var("RAVEN_GEMM_PATH") {
+            self.gemm_path = v == "1" || v == "true";
+        }
+        if let Ok(v) = std::env::var("RAVEN_CANDIDATE_COUNT") {
+            if let Ok(c) = v.parse() {
+                self.candidate_count = c;
+            }
+        }
+        // Week 7-8 新增参数（评估报告 M6：原缺失环境变量入口）
+        if let Ok(v) = std::env::var("RAVEN_DIM") {
+            if let Ok(d) = v.parse() {
+                self.dim = d;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_K") {
+            if let Ok(k) = v.parse() {
+                self.k = k;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_TOP_N") {
+            if let Ok(t) = v.parse() {
+                self.top_n = t;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_CODEBOOK_K") {
+            if let Ok(c) = v.parse() {
+                self.codebook_k = c;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_SUB_DIM") {
+            if let Ok(s) = v.parse() {
+                self.sub_dim = s;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_AVQ_ALPHA") {
+            if let Ok(a) = v.parse() {
+                self.avq_alpha = a;
+            }
         }
     }
 
@@ -267,5 +332,34 @@ mod tests {
         cli.avq = false; // 避免违反 avq_l2_conflict
         let cfg = merge_config(None, Some(&cli), false).unwrap();
         assert_eq!(cfg.m, 64);
+    }
+
+    #[test]
+    fn apply_env_covers_new_fields() {
+        // 评估报告 M6：验证 Week 7-8 新增参数的环境变量入口
+        std::env::set_var("RAVEN_DIM", "768");
+        std::env::set_var("RAVEN_K", "20");
+        std::env::set_var("RAVEN_TOP_N", "200");
+        std::env::set_var("RAVEN_CODEBOOK_K", "512");
+        std::env::set_var("RAVEN_SUB_DIM", "16");
+        std::env::set_var("RAVEN_AVQ_ALPHA", "0.5");
+
+        let mut cfg = Config::default();
+        cfg.apply_env();
+
+        assert_eq!(cfg.dim, 768);
+        assert_eq!(cfg.k, 20);
+        assert_eq!(cfg.top_n, 200);
+        assert_eq!(cfg.codebook_k, 512);
+        assert_eq!(cfg.sub_dim, 16);
+        assert_eq!(cfg.avq_alpha, 0.5);
+
+        // 清理环境变量
+        std::env::remove_var("RAVEN_DIM");
+        std::env::remove_var("RAVEN_K");
+        std::env::remove_var("RAVEN_TOP_N");
+        std::env::remove_var("RAVEN_CODEBOOK_K");
+        std::env::remove_var("RAVEN_SUB_DIM");
+        std::env::remove_var("RAVEN_AVQ_ALPHA");
     }
 }
