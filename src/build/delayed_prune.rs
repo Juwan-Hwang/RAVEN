@@ -12,6 +12,7 @@
 //!   RobustPrune 调用次数显著降低，建图速度预期大幅提升
 
 use crate::memory::HybridBlockedCsr;
+use crate::graph::RobustPrune;
 
 /// 延迟剪枝控制器
 ///
@@ -54,7 +55,14 @@ impl DelayedPruneController {
     /// 执行全局 final prune
     ///
     /// 设计文档：整个数据集插入完成后，freeze 前做一次全局 final prune
-    pub fn final_prune(&mut self, storage: &mut HybridBlockedCsr) {
+    /// 设计文档硬约束：final_prune must use RobustPrune (not truncate)
+    pub fn final_prune(
+        &mut self,
+        storage: &mut HybridBlockedCsr,
+        vectors: &[f32],
+        dim: usize,
+        alpha: f32,
+    ) {
         self.final_prune_count += 1;
         for node in 0..storage.len() as u32 {
             let (main, overflow) = storage.neighbors_full(node);
@@ -62,11 +70,11 @@ impl DelayedPruneController {
             if total <= self.r_max {
                 continue;
             }
-            // 合并主块和 overflow，截断到 r_max
             let mut all: Vec<u32> = main.to_vec();
             all.extend_from_slice(overflow);
-            all.truncate(self.r_max);
-            storage.set_neighbors(node, &all);
+            // 用 RobustPrune 替代 truncate（设计文档硬约束）
+            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, self.r_max);
+            storage.set_neighbors(node, &pruned);
         }
     }
 
@@ -105,7 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn final_prune_truncates_to_r_max() {
+    fn final_prune_uses_robust_prune() {
+        // 10 个节点，dim=4
+        let vectors: Vec<f32> = (0..40).map(|i| i as f32).collect();
+        let dim = 4;
         let mut storage = HybridBlockedCsr::new(10, 100);
         let mut c = DelayedPruneController::new(4);
         // 添加超过 r_max 的邻居
@@ -113,7 +124,7 @@ mod tests {
             storage.add_edge(0, i);
         }
         assert!(storage.degree(0) > c.r_max);
-        c.final_prune(&mut storage);
+        c.final_prune(&mut storage, &vectors, dim, 1.0);
         assert!(storage.degree(0) <= c.r_max);
         assert_eq!(c.final_prune_count, 1);
     }

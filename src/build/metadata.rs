@@ -30,6 +30,8 @@ pub struct BuildConfig {
     pub r_max: usize,
     /// R_soft 软上限（设计文档：1.5 × R_max）
     pub r_soft: usize,
+    /// β 量化感知剪枝权重（设计文档：β=0.0 为标准 RobustPrune）
+    pub beta: f32,
 }
 
 impl Default for BuildConfig {
@@ -44,6 +46,7 @@ impl Default for BuildConfig {
             l_build: 200,
             r_max,
             r_soft: (r_max as f32 * 1.5) as usize,
+            beta: 0.0,
         }
     }
 }

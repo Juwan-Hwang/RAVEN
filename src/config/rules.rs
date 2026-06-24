@@ -59,6 +59,9 @@ pub struct Rule {
     pub violation_reason: String,
     /// 严重级别
     pub severity: RuleSeverity,
+    /// 依赖的规则名列表（DAG 校验用）
+    /// 设计文档：含 DAG 冲突校验
+    pub depends_on: Vec<String>,
 }
 
 impl Rule {
@@ -75,6 +78,7 @@ impl Rule {
             check,
             violation_reason: violation_reason.to_string(),
             severity: RuleSeverity::Error,
+            depends_on: Vec::new(),
         }
     }
 
@@ -91,7 +95,15 @@ impl Rule {
             check,
             violation_reason: violation_reason.to_string(),
             severity: RuleSeverity::Warning,
+            depends_on: Vec::new(),
         }
+    }
+
+    /// 设置依赖规则（DAG 校验用）
+    /// 设计文档：含 DAG 冲突校验
+    pub fn with_depends_on(mut self, deps: &[&str]) -> Self {
+        self.depends_on = deps.iter().map(|s| s.to_string()).collect();
+        self
     }
 }
 
@@ -200,11 +212,75 @@ impl RuleEngine {
         self.rules.push(rule);
     }
 
+    /// 创建空引擎（用于自定义规则集）
+    pub fn new_empty() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// DAG 冲突校验（设计文档：含 DAG 冲突校验）
+    ///
+    /// 检测规则依赖关系是否存在环（循环依赖）
+    /// 如果存在环，返回错误
+    pub fn validate_dag(&self) -> Result<(), ConflictError> {
+        use std::collections::{HashMap, VecDeque};
+
+        // 构建规则名到索引的映射
+        let name_to_idx: HashMap<&str, usize> = self.rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.name.as_str(), i))
+            .collect();
+
+        // 构建邻接表
+        let n = self.rules.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, rule) in self.rules.iter().enumerate() {
+            for dep in &rule.depends_on {
+                if let Some(&dep_idx) = name_to_idx.get(dep.as_str()) {
+                    adj[dep_idx].push(i);
+                }
+            }
+        }
+
+        // 拓扑排序检测环（Kahn 算法）
+        let mut in_degree = vec![0usize; n];
+        for edges in &adj {
+            for &v in edges {
+                in_degree[v] += 1;
+            }
+        }
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for i in 0..n {
+            if in_degree[i] == 0 {
+                queue.push_back(i);
+            }
+        }
+        let mut visited = 0;
+        while let Some(u) = queue.pop_front() {
+            visited += 1;
+            for &v in &adj[u] {
+                in_degree[v] -= 1;
+                if in_degree[v] == 0 {
+                    queue.push_back(v);
+                }
+            }
+        }
+        if visited != n {
+            return Err(ConflictError::RuleViolated {
+                rule: "dag_cycle".to_string(),
+                reason: "规则依赖关系存在环（循环依赖）".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// 校验 Error 规则
     ///
     /// 设计文档：合并完成后统一校验一次
     /// 只检查 Error 级别规则，Warning 级别用 check_warnings()
     pub fn validate(&self, cfg: &Config) -> Result<(), ConflictError> {
+        // 设计文档：含 DAG 冲突校验
+        self.validate_dag()?;
         for rule in &self.rules {
             if rule.severity == RuleSeverity::Error && !(rule.check)(cfg) {
                 return Err(ConflictError::RuleViolated {
@@ -555,5 +631,38 @@ mod tests {
         assert!(!is_power_of_two(0));
         assert!(!is_power_of_two(3));
         assert!(!is_power_of_two(255));
+    }
+
+    // === DAG 冲突校验测试（设计文档：含 DAG 冲突校验）===
+
+    #[test]
+    fn dag_no_cycle_default_rules() {
+        let engine = RuleEngine::default();
+        assert!(engine.validate_dag().is_ok());
+    }
+
+    #[test]
+    fn dag_cycle_detected() {
+        let mut engine = RuleEngine::new_empty();
+        engine.add_rule(
+            Rule::new("rule_a", "A", |_| true, "ok")
+                .with_depends_on(&["rule_b"])
+        );
+        engine.add_rule(
+            Rule::new("rule_b", "B", |_| true, "ok")
+                .with_depends_on(&["rule_a"])
+        );
+        assert!(engine.validate_dag().is_err());
+    }
+
+    #[test]
+    fn dag_no_cycle_with_deps() {
+        let mut engine = RuleEngine::new_empty();
+        engine.add_rule(Rule::new("rule_a", "A", |_| true, "ok"));
+        engine.add_rule(
+            Rule::new("rule_b", "B", |_| true, "ok")
+                .with_depends_on(&["rule_a"])
+        );
+        assert!(engine.validate_dag().is_ok());
     }
 }

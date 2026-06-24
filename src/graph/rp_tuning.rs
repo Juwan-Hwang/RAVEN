@@ -115,10 +115,16 @@ impl RPTuning {
                     // 方案 A：候选集 = 当前邻域（设计文档：不保留原始候选集）
                     let candidates = match config.scheme {
                         RPTuningStorageScheme::SchemeA => neighbors.clone(),
-                        // 方案 B/C 需要额外存储，当前实现 A 方案
-                        // B/C 的实现需要构建期保留候选集，这里回退到 A
+                        // 方案 B/C 需要构建期保留候选集，当前未实现
+                        // 显式回退到 A 方案并发出警告（避免静默回退）
                         RPTuningStorageScheme::SchemeB
-                        | RPTuningStorageScheme::SchemeC => neighbors.clone(),
+                        | RPTuningStorageScheme::SchemeC => {
+                            eprintln!(
+                                "[rp_tuning] 警告：{:?} 未实现，回退到 SchemeA",
+                                config.scheme
+                            );
+                            neighbors.clone()
+                        }
                     };
                     let pruned = RobustPrune::prune(
                         &candidates,

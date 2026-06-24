@@ -12,7 +12,11 @@
 
 use crate::build::BuildConfig;
 use crate::build::ChaCha8Rng;
-use crate::graph::{VamanaGraph, VamanaBuildConfig};
+use crate::graph::{
+    VamanaGraph, VamanaBuildConfig, RobustPrune,
+    QuantAwareRobustPrune, QuantAwarePruneConfig, NormalizationScheme,
+};
+use crate::graph::quant_aware_prune::EPSILON;
 use crate::quant::{OPQRotation, AVQCodebook, QuantizationMode};
 
 /// Pipeline 阶段标识
@@ -154,7 +158,7 @@ impl BuildPipeline {
             l_build: self.config.l_build,
             r_max: self.config.r_max,
             r_soft: self.config.r_soft,
-            max_iterations: 1,
+            max_iterations: 2,
         };
         let graph = VamanaGraph::build(&state.vectors, state.dim, &vamana_config, &mut rng);
         PipelineState {
@@ -165,15 +169,66 @@ impl BuildPipeline {
 
     /// 量化感知 RobustPrune 阶段
     ///
-    /// 设计文档：量化误差反向影响图剪枝决策的图网络结构
-    fn quant_aware_prune(&self, state: PipelineState) -> PipelineState {
-        // 当前实现：量化感知 prune 在 RP-Tuning 阶段通过 β 参数体现
-        // 完整实现需要 AVQ codebook 提供误差函数
-        // 这里保留 Pipeline 结构，实际量化感知剪枝在 RP-Tuning 中应用
-        state
+    /// 设计文档：量化误差反向影响图剪枝决策
+    /// 对已建好的图，用 QuantAwareRobustPrune 重新剪枝每个节点的邻居
+    /// β=0.0 时退化为标准 RobustPrune，已在 vamana_build 阶段应用，跳过
+    fn quant_aware_prune(&self, mut state: PipelineState) -> PipelineState {
+        if self.config.beta == 0.0 {
+            return state;
+        }
+
+        if state.avq.is_none() || state.graph.is_none() {
+            return state;
+        }
+
+        // 解构以避免借用冲突
+        let PipelineState { vectors, dim, opq, avq, graph, stage } = state;
+        let avq = avq.unwrap();
+        let mut graph = graph.unwrap();
+
+        // 预计算每个节点的量化误差（设计文档 F.3：error(u,v) = mean(avq_error(u), avq_error(v))）
+        let n = graph.len();
+        let node_errors: Vec<f32> = (0..n)
+            .map(|i| avq.node_error(i as u32, &vectors))
+            .collect();
+
+        let error_fn = |u: u32, v: u32| (node_errors[u as usize] + node_errors[v as usize]) / 2.0;
+
+        let qa_config = QuantAwarePruneConfig {
+            alpha: self.config.alpha,
+            beta: self.config.beta,
+            epsilon: EPSILON,
+            r_max: self.config.r_max,
+            normalization: NormalizationScheme::default(),
+        };
+
+        // 对每个节点重新剪枝
+        let storage = graph.storage_mut();
+        for node in 0..n as u32 {
+            let (main, overflow) = storage.neighbors_full(node);
+            let mut all: Vec<u32> = main.to_vec();
+            all.extend_from_slice(overflow);
+            if all.len() <= self.config.r_max {
+                continue;
+            }
+            let pruned = QuantAwareRobustPrune::prune(
+                &all, node, &vectors, dim,
+                &error_fn, &qa_config,
+            );
+            storage.set_neighbors(node, &pruned);
+        }
+
+        PipelineState {
+            vectors, dim, opq,
+            avq: Some(avq),
+            graph: Some(graph),
+            stage,
+        }
     }
 
     /// 全局 final prune 到 R_max 阶段
+    ///
+    /// 设计文档硬约束：final_prune must use RobustPrune (not truncate)
     fn final_prune(&self, mut state: PipelineState) -> PipelineState {
         if let Some(ref mut graph) = state.graph {
             let storage = graph.storage_mut();
@@ -185,8 +240,12 @@ impl BuildPipeline {
                 }
                 let mut all: Vec<u32> = main.to_vec();
                 all.extend_from_slice(overflow);
-                all.truncate(self.config.r_max);
-                storage.set_neighbors(node, &all);
+                // 用 RobustPrune 替代 truncate（设计文档硬约束）
+                let pruned = RobustPrune::prune(
+                    &all, node, &state.vectors, state.dim,
+                    self.config.alpha, self.config.r_max,
+                );
+                storage.set_neighbors(node, &pruned);
             }
         }
         state
