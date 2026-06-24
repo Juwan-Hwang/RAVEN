@@ -365,7 +365,6 @@ impl VamanaGraph {
 
     /// 贪心搜索（复用 VisitedTracker，零分配热路径）
     ///
-    /// 设计文档 F.2：bumpalo arena 作用域——构建期临时候选集
     /// 此方法复用外部传入的 VisitedTracker，避免每次搜索分配 1MB visited 数组
     /// 适用于查询热路径（GraphSearcher::search）
     pub fn greedy_search_vec_reuse(

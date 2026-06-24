@@ -27,8 +27,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 锁实现：优先选择无竞争路径更短的锁实现（设计文档第四层）
 parking_lot = "0.12"
-# 构建期临时候选集 arena（设计文档 F.2，仅构建期使用）
-bumpalo = "3"
 # 序列化：CRC32 校验和（设计文档第二层 F.1）
 crc32fast = "1.4"
 # 配置文件解析（设计文档第六层）
