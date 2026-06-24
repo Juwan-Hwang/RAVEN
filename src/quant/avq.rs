@@ -389,16 +389,24 @@ impl AVQCodebook {
     /// 选项二：预采样近邻对
     ///
     /// 设计文档附录 B：需先用 f32 或粗量化跑一个近似近邻图，再采样
-    /// 当前简化实现：用 L2 距离找近邻对
+    /// 评估报告 M3：原 O(n²) 暴力扫描，改为随机采样候选 O(n * sample_size)
     fn sample_neighbor_pairs(vectors: &[f32], dim: usize, n: usize) -> Vec<(u32, u32, f32)> {
+        use rand::seq::index::sample;
+
         let mut pairs = Vec::new();
         let max_pairs = 1000;
         let k_neighbors = 10;
+        // 评估报告 M3：随机采样候选，避免 O(n²) 暴力扫描
+        // sample_size = min(n, 1000)，时间复杂度 O(n * 1000 * dim)
+        let sample_size = n.min(1000).saturating_sub(1);
+        let mut rng = crate::build::ChaCha8Rng::seed_from(42);
 
         for i in 0..n {
             let vi = &vectors[i * dim..(i + 1) * dim];
-            // 找最近的 k 个邻居
-            let mut dists: Vec<(f32, usize)> = (0..n)
+            // 用 index::sample 直接采样索引，避免先收集成 Vec
+            let indices = sample(&mut rng, n, sample_size);
+            let mut dists: Vec<(f32, usize)> = indices
+                .iter()
                 .filter(|&j| j != i)
                 .map(|j| {
                     let vj = &vectors[j * dim..(j + 1) * dim];
