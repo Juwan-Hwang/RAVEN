@@ -87,13 +87,14 @@ class RAVEN:
         """查询 k 近邻。
 
         ann-benchmarks 框架调用此方法进行单次查询。
-        为提高效率，实际批量查询使用 query_batch。
+        通过 --output 参数输出邻居 ID（raw binary, i32），与 query_batch 一致。
         """
         if not self._built:
             raise RuntimeError("index not built")
 
         q = np.ascontiguousarray(q, dtype=np.float32)
         test_file = tempfile.mktemp(suffix=".bin", prefix="raven_test_")
+        output_file = tempfile.mktemp(suffix=".bin", prefix="raven_output_")
         q.tofile(test_file)
 
         try:
@@ -101,6 +102,7 @@ class RAVEN:
                 self.raven_bin,
                 "--train", self._train_file,
                 "--test", test_file,
+                "--output", output_file,
                 "--dim", str(self.dim),
                 "--n", str(self.n),
                 "--nq", "1",
@@ -114,12 +116,14 @@ class RAVEN:
             if result.returncode != 0:
                 raise RuntimeError(f"RAVEN query failed: {result.stderr}")
 
-            data = json.loads(result.stdout)
-            # raven_ann_bench 输出 JSON，但不含具体邻居列表
-            # 实际使用时需要修改 Rust 二进制输出邻居 ID
-            return []
+            # 读取邻居 ID（raw binary, i32），与 query_batch 一致
+            neighbors = np.fromfile(output_file, dtype=np.int32).reshape(1, k)
+            return neighbors[0].tolist()
         finally:
-            os.unlink(test_file)
+            if os.path.exists(test_file):
+                os.unlink(test_file)
+            if os.path.exists(output_file):
+                os.unlink(output_file)
 
     def query_batch(self, Q, k):
         """批量查询。
