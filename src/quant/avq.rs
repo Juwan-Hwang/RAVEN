@@ -390,7 +390,6 @@ impl AVQCodebook {
     ///
     /// 设计文档附录 B：需先用 f32 或粗量化跑一个近似近邻图，再采样
     /// 当前简化实现：用 L2 距离找近邻对
-    #[allow(dead_code)]
     fn sample_neighbor_pairs(vectors: &[f32], dim: usize, n: usize) -> Vec<(u32, u32, f32)> {
         let mut pairs = Vec::new();
         let max_pairs = 1000;
@@ -547,59 +546,6 @@ impl AVQ {
     }
 }
 
-/// 加权 K-means（简单初始化）
-fn weighted_kmeans(data: &[Vec<f32>], weights: &[f32], k: usize, iterations: usize) -> Vec<Vec<f32>> {
-    if data.is_empty() || k == 0 {
-        return vec![];
-    }
-    let dim = data[0].len();
-    let n = data.len();
-    let k = k.min(n);
-
-    let mut centers: Vec<Vec<f32>> = data[..k].to_vec();
-    if centers.is_empty() {
-        return vec![vec![0.0; dim]];
-    }
-
-    for _ in 0..iterations {
-        let mut assignments = vec![0usize; n];
-        for (i, point) in data.iter().enumerate() {
-            let mut best = 0;
-            let mut best_dist = f32::MAX;
-            for (j, center) in centers.iter().enumerate() {
-                let d = l2_sq(point, center);
-                if d < best_dist {
-                    best_dist = d;
-                    best = j;
-                }
-            }
-            assignments[i] = best;
-        }
-
-        let mut new_centers = vec![vec![0.0f32; dim]; k];
-        let mut weight_sums = vec![0.0f32; k];
-        for (i, &a) in assignments.iter().enumerate() {
-            let w = weights.get(i).copied().unwrap_or(1.0);
-            for d in 0..dim {
-                new_centers[a][d] += w * data[i][d];
-            }
-            weight_sums[a] += w;
-        }
-        for j in 0..k {
-            if weight_sums[j] > 0.0 {
-                for d in 0..dim {
-                    new_centers[j][d] /= weight_sums[j];
-                }
-            } else {
-                new_centers[j] = centers[j].clone();
-            }
-        }
-        centers = new_centers;
-    }
-
-    centers
-}
-
 /// 加权 K-means++（k-means++ 初始化 + 收敛判定）
 ///
 /// Week 6 改进：
@@ -655,7 +601,7 @@ fn weighted_kmeans_pp(
         let r: f32 = rng.gen();
         let mut cum = 0.0f32;
         let mut chosen = 0;
-        for (i, point) in data.iter().enumerate() {
+        for (i, _point) in data.iter().enumerate() {
             cum += dists[i] * weights.get(i).copied().unwrap_or(1.0) / total;
             if cum >= r {
                 chosen = i;

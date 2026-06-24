@@ -32,13 +32,10 @@ pub enum KernelVariant {
     /// f32 标量核（Week 1-2 主线）
     Scalar,
     /// AVX2 核（Week 3-4）
-    #[allow(dead_code)]
     Avx2,
     /// AVX-512 核（Week 7-8）
-    #[allow(dead_code)]
     Avx512,
     /// NEON 核（Week 7-8，ARM 平台）
-    #[allow(dead_code)]
     Neon,
 }
 
