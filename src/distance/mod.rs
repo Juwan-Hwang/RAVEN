@@ -14,6 +14,7 @@ pub mod kernel;
 pub mod aligned;
 pub mod avx2;
 pub mod avx512;
+pub mod f16;
 
 /// 距离度量类型
 ///
@@ -49,6 +50,7 @@ pub use kernel::{KernelVariant, select_kernel, validate_kernel_stability};
 pub use aligned::AlignedVec;
 pub use avx2::{l2_avx2, l2_dispatch, Avx2Kernel, is_avx2_supported};
 pub use avx512::{l2_avx512, Avx512Kernel, is_avx512_supported};
+pub use f16::{F16, l2_f16, l2_f16_packed, l2_f16_mixed, f32_to_f16_slice, f16_to_f32_slice};
 
 /// 统一 SIMD 分发：AVX-512 > AVX2 > 动态兜底
 ///

@@ -115,7 +115,7 @@ impl LocalBenchmark {
         let n = self.vectors.len() / self.dim;
         let mut rng = ChaCha8Rng::new();
         let graph = VamanaGraph::build(&self.vectors, self.dim, config, &mut rng);
-        let searcher = GraphSearcher::new(&self.vectors, &graph, ef_search);
+        let mut searcher = GraphSearcher::new(&self.vectors, &graph, ef_search);
 
         let mut latencies: Vec<Duration> = Vec::with_capacity(self.queries.len());
         let mut recall_sum = 0.0f64;

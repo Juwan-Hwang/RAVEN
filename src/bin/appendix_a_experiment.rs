@@ -98,7 +98,7 @@ fn run_queries(
     k: usize,
     ef_search: usize,
 ) -> (f64, f64) {
-    let searcher = GraphSearcher::new(train, graph, ef_search);
+    let mut searcher = GraphSearcher::new(train, graph, ef_search);
     let start = Instant::now();
     let mut hits = 0usize;
     for q in 0..nq {

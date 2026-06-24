@@ -84,7 +84,7 @@ fn quantized_recall(codebook: &AVQCodebook, train: &[f32], test: &[f32], gt: &[i
     };
     let graph = VamanaGraph::build(&quantized, dim, &config, &mut rng);
 
-    let searcher = GraphSearcher::new(&quantized, &graph, 100);
+    let mut searcher = GraphSearcher::new(&quantized, &graph, 100);
     let mut hits = 0usize;
     let gt_stride = 100; // siftsmall groundtruth 每个查询 100 个邻居
     for q in 0..nq {
@@ -137,7 +137,7 @@ fn adc_recall(
         .collect();
 
     // 3. 搜索时用量化重建向量算距离，query 保持 f32
-    let searcher = GraphSearcher::new(&quantized_db, &graph, 100);
+    let mut searcher = GraphSearcher::new(&quantized_db, &graph, 100);
     let mut hits = 0usize;
     let gt_stride = 100; // siftsmall groundtruth 每个查询 100 个邻居
     for q in 0..nq {
@@ -191,7 +191,7 @@ fn adc_recall_rerank(
         .collect();
 
     // 3. 搜索 top-N 候选 + f32 rerank
-    let searcher = GraphSearcher::new(&quantized_db, &graph, 100);
+    let mut searcher = GraphSearcher::new(&quantized_db, &graph, 100);
     let mut hits = 0usize;
     let gt_stride = 100;
     for q in 0..nq {
@@ -261,7 +261,7 @@ fn f32_recall(train: &[f32], test: &[f32], gt: &[i32], dim: usize, n: usize, nq:
         max_iterations: 2,
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
-    let searcher = GraphSearcher::new(train, &graph, 100);
+    let mut searcher = GraphSearcher::new(train, &graph, 100);
 
     // 诊断：打印第一个查询的搜索候选数 + 图平均度数
     if nq > 0 {

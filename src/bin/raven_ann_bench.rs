@@ -147,7 +147,7 @@ fn main() {
     }
 
     eprintln!("running {} queries...", nq);
-    let searcher = GraphSearcher::new(&train, &graph, ef_search);
+    let mut searcher = GraphSearcher::new(&train, &graph, ef_search);
     let query_start = Instant::now();
     let mut results: Vec<Vec<u32>> = Vec::with_capacity(nq);
     for q in 0..nq {

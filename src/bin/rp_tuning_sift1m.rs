@@ -68,7 +68,7 @@ fn eval_variant(
     ef_search: usize,
 ) -> (f64, f64) {
     let graph = VamanaGraph::from_storage(storage.clone(), entry_point, dim);
-    let searcher = GraphSearcher::new(vectors, &graph, ef_search);
+    let mut searcher = GraphSearcher::new(vectors, &graph, ef_search);
     let gt_stride = 100;
 
     let t0 = Instant::now();

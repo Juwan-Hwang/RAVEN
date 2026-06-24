@@ -83,7 +83,7 @@ fn adc_recall_rerank(
         })
         .collect();
 
-    let searcher = GraphSearcher::new(&quantized_db, graph, 100);
+    let mut searcher = GraphSearcher::new(&quantized_db, graph, 100);
     let mut hits = 0usize;
     let gt_stride = 100;
     for q in 0..nq {
@@ -127,7 +127,7 @@ fn adc_recall(
         })
         .collect();
 
-    let searcher = GraphSearcher::new(&quantized_db, graph, 100);
+    let mut searcher = GraphSearcher::new(&quantized_db, graph, 100);
     let mut hits = 0usize;
     let gt_stride = 100;
     for q in 0..nq {
@@ -165,8 +165,9 @@ fn main() {
     let k = 256;
     let avq_alpha = 0.30;
     println!("训练 AVQ codebook (AVQ α={}, K={}, sub_dim={})...", avq_alpha, k, sub_dim);
+    let mut avq_rng = ChaCha8Rng::seed_from(42);
     let codebook = AVQCodebook::train_full(
-        &train, dim, k, TrainingSignal::BatchHighScorePairs, 25, sub_dim, avq_alpha,
+        &train, dim, k, TrainingSignal::BatchHighScorePairs, 25, sub_dim, avq_alpha, avq_rng.inner(),
     );
     println!("codebook 训练完成");
     println!();
@@ -221,7 +222,7 @@ fn main() {
             let recall_adc = adc_recall(&codebook, &train, &test, &gt, dim, n, nq, 10, &graph);
 
             // QPS + rerank recall（计时）
-            let searcher = GraphSearcher::new(&quantized_db, &graph, 100);
+            let mut searcher = GraphSearcher::new(&quantized_db, &graph, 100);
             let gt_stride = 100;
             let top_n = 100;
             let k_ret = 10;

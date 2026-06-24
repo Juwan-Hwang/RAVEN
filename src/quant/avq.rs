@@ -15,6 +15,8 @@
 //!   须在论文方法节说明选择理由并讨论合理性与局限性。
 
 use crate::distance::l2_simd;
+use rand_chacha::ChaCha8Rng;
+use rand::{SeedableRng, Rng};
 
 /// 量化模式
 ///
@@ -97,7 +99,8 @@ impl AVQCodebook {
         _mode: QuantizationMode,
         signal: TrainingSignal,
     ) -> Self {
-        Self::train_full(vectors, dim, k, signal, 25, 16, 0.5)
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        Self::train_full(vectors, dim, k, signal, 25, 16, 0.5, &mut rng)
     }
 
     /// 完整训练（Week 6：混合目标 retrieval-aware loss 对齐）
@@ -121,6 +124,7 @@ impl AVQCodebook {
         iterations: usize,
         target_sub_dim: usize,
         alpha: f32,
+        rng: &mut ChaCha8Rng,
     ) -> Self {
         // 设计文档：M = dim / target_sub_dim
         let m = (dim / target_sub_dim).max(1);
@@ -147,7 +151,7 @@ impl AVQCodebook {
                 })
                 .collect();
             let weights = Self::compute_retrieval_weights(&high_score_pairs, n, sub);
-            let sub_centers = weighted_kmeans_pp(&sub_vectors, &weights, k, iterations);
+            let sub_centers = weighted_kmeans_pp(&sub_vectors, &weights, k, iterations, rng);
             for (ki, center) in sub_centers.iter().enumerate() {
                 for (d, &v) in center.iter().enumerate() {
                     centers[sub * k * sub_dim + ki * sub_dim + d] = v;
@@ -601,7 +605,13 @@ fn weighted_kmeans(data: &[Vec<f32>], weights: &[f32], k: usize, iterations: usi
 /// Week 6 改进：
 ///   1. k-means++ 初始化：概率正比于 D(x)² / weight
 ///   2. 收敛判定：中心移动 < ε 时提前终止
-fn weighted_kmeans_pp(data: &[Vec<f32>], weights: &[f32], k: usize, iterations: usize) -> Vec<Vec<f32>> {
+fn weighted_kmeans_pp(
+    data: &[Vec<f32>],
+    weights: &[f32],
+    k: usize,
+    iterations: usize,
+    rng: &mut ChaCha8Rng,
+) -> Vec<Vec<f32>> {
     if data.is_empty() || k == 0 {
         return vec![];
     }
@@ -635,13 +645,14 @@ fn weighted_kmeans_pp(data: &[Vec<f32>], weights: &[f32], k: usize, iterations: 
             .map(|(i, _)| dists[i] * weights.get(i).copied().unwrap_or(1.0))
             .sum();
         if total <= 0.0 {
-            // 所有点都是中心，随机选一个
+            // 所有点都是中心，顺序选下一个
             if centers.len() < n {
                 centers.push(data[centers.len()].clone());
             }
             continue;
         }
-        let r: f32 = rand::random();
+        // 设计文档约束：使用固定种子 ChaCha8 RNG，保证确定性
+        let r: f32 = rng.gen();
         let mut cum = 0.0f32;
         let mut chosen = 0;
         for (i, point) in data.iter().enumerate() {

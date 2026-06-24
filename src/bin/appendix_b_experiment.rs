@@ -97,7 +97,7 @@ fn quantized_recall(
     let graph = VamanaGraph::build(&quantized, dim, &config, &mut rng);
 
     // 用量化向量查询
-    let searcher = GraphSearcher::new(&quantized, &graph, 100);
+    let mut searcher = GraphSearcher::new(&quantized, &graph, 100);
     let start = Instant::now();
     let mut hits = 0usize;
     for q in 0..nq {

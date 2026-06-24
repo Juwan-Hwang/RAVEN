@@ -363,6 +363,64 @@ impl VamanaGraph {
         (top_results, all_visited)
     }
 
+    /// 贪心搜索（复用 VisitedTracker，零分配热路径）
+    ///
+    /// 设计文档 F.2：bumpalo arena 作用域——构建期临时候选集
+    /// 此方法复用外部传入的 VisitedTracker，避免每次搜索分配 1MB visited 数组
+    /// 适用于查询热路径（GraphSearcher::search）
+    pub fn greedy_search_vec_reuse(
+        vectors: &[f32],
+        dim: usize,
+        storage: &HybridBlockedCsr,
+        entry_point: u32,
+        query: &[f32],
+        l: usize,
+        visited: &mut VisitedTracker,
+    ) -> Vec<u32> {
+        // 复用 visited：reset 是 O(V) 而非 O(N)
+        visited.reset();
+
+        // 候选集：最小堆
+        use std::cmp::Reverse;
+        let mut candidates: BinaryHeap<Reverse<(OrderedF32, u32)>> = BinaryHeap::with_capacity(l * 2);
+        // 结果集：最大堆
+        let mut results: BinaryHeap<(OrderedF32, u32)> = BinaryHeap::with_capacity(l + 1);
+
+        let entry_dist = l2_simd(
+            query,
+            &vectors[entry_point as usize * dim..(entry_point as usize + 1) * dim],
+        );
+        candidates.push(Reverse((OrderedF32(entry_dist), entry_point)));
+        visited.visit(entry_point);
+
+        while let Some(Reverse((dist, node))) = candidates.pop() {
+            if results.len() >= l {
+                if let Some(&(worst, _)) = results.peek() {
+                    if dist.0 > worst.0 {
+                        break;
+                    }
+                }
+            }
+
+            results.push((dist, node));
+            if results.len() > l {
+                results.pop();
+            }
+
+            for &neighbor in storage.neighbors(node) {
+                if visited.visit(neighbor) {
+                    let d = l2_simd(
+                        query,
+                        &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim],
+                    );
+                    candidates.push(Reverse((OrderedF32(d), neighbor)));
+                }
+            }
+        }
+
+        results.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// 贪心搜索（探索模式，建图期第一轮用）
     ///
     /// 与 greedy_search_vec 的区别：候选 > worst 时不 break，而是跳过插入继续扩展邻居
@@ -618,12 +676,25 @@ pub struct GraphSearcher<'a> {
     dim: usize,
     graph: &'a VamanaGraph,
     ef_search: usize,
+    /// 预分配的 VisitedTracker，避免每次搜索分配 1MB visited 数组
+    /// 设计文档 F.2：热路径零分配
+    visited: VisitedTracker,
 }
 
 impl<'a> GraphSearcher<'a> {
     /// 创建搜索器
+    ///
+    /// 预分配 VisitedTracker（O(N) 一次性分配），后续搜索复用
     pub fn new(vectors: &'a [f32], graph: &'a VamanaGraph, ef_search: usize) -> Self {
-        Self { vectors, dim: graph.dim(), graph, ef_search }
+        let dim = graph.dim();
+        let n = vectors.len() / dim;
+        Self {
+            vectors,
+            dim,
+            graph,
+            ef_search,
+            visited: VisitedTracker::new(n, ef_search),
+        }
     }
 
     /// 搜索最近邻
@@ -631,14 +702,16 @@ impl<'a> GraphSearcher<'a> {
     /// 返回 (节点ID, 距离) 列表，按距离升序
     ///
     /// 使用标准 break 模式（Vamana 论文标准 greedy search）
-    pub fn search(&self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
-        let (candidates, _visited) = VamanaGraph::greedy_search_vec(
+    /// 复用预分配的 VisitedTracker，零堆分配热路径
+    pub fn search(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let candidates = VamanaGraph::greedy_search_vec_reuse(
             self.vectors,
             self.dim,
             self.graph.storage(),
             self.graph.entry_point(),
             query,
             self.ef_search,
+            &mut self.visited,
         );
 
         // 按距离排序，取 top-k
@@ -719,7 +792,7 @@ mod tests {
             max_iterations: 1,
         };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
-        let searcher = GraphSearcher::new(&vectors, &graph, 20);
+        let mut searcher = GraphSearcher::new(&vectors, &graph, 20);
         let query = vectors[0..dim].to_vec();
         let results = searcher.search(&query, 5);
         assert!(!results.is_empty());

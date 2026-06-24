@@ -112,7 +112,7 @@ fn main() {
 
     // 3. f32 搜索 QPS + recall
     println!("=== f32 搜索（ef_search=100, k=10）===");
-    let searcher = GraphSearcher::new(&train, &graph, 100);
+    let mut searcher = GraphSearcher::new(&train, &graph, 100);
     let t0 = Instant::now();
     let mut hits = 0usize;
     let gt_stride = gt_k;
@@ -138,8 +138,9 @@ fn main() {
     // 4. AVQ 训练（用 sift_learn 100K + iter=5 加速，工业标准）
     println!("=== AVQ 训练（sift_learn 100K, K=256, sub_dim=8, α=0.30, iter=5）===");
     let t0 = Instant::now();
+    let mut avq_rng = ChaCha8Rng::seed_from(42);
     let cb = AVQCodebook::train_full(
-        &learn, dim, 256, TrainingSignal::BatchHighScorePairs, 5, 8, 0.30,
+        &learn, dim, 256, TrainingSignal::BatchHighScorePairs, 5, 8, 0.30, avq_rng.inner(),
     );
     let avq_train_time = t0.elapsed().as_secs_f64();
     println!("AVQ 训练时间: {:.2}s", avq_train_time);
@@ -158,7 +159,7 @@ fn main() {
     // 6. ADC 搜索 QPS（无 rerank）
     println!();
     println!("=== ADC 搜索（量化距离, ef_search=100, k=10）===");
-    let searcher_q = GraphSearcher::new(&quantized_db, &graph, 100);
+    let mut searcher_q = GraphSearcher::new(&quantized_db, &graph, 100);
     let t0 = Instant::now();
     let mut hits = 0usize;
     for q in 0..nq {
