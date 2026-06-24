@@ -150,31 +150,58 @@ impl VamanaGraph {
         rng: &mut ChaCha8Rng,
     ) -> Self
     where
-        F: Fn(u32, u32) -> f32,
+        F: Fn(u32, u32) -> f32 + Sync,
     {
         let n = vectors.len() / dim;
         assert_eq!(vectors.len(), n * dim);
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
 
+        eprintln!("[build_qa] rayon threads: {}", rayon::current_num_threads());
+
         let _random_entry = Self::init_random_graph(&mut storage, n, config, rng);
         // Vamana/DiskANN 论文：entry_point 用 medoid
         let entry_point = Self::compute_medoid(vectors, dim, n);
+        eprintln!("[build_qa] init_random_graph done, entry=medoid[{}]", entry_point);
 
-        for _iter in 0..config.max_iterations {
+        // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
+        for iter in 0..config.max_iterations {
             let order = Self::permutation(n, rng);
-            for &node_id in &order {
-                let (_top, visited) = Self::greedy_search(
-                    vectors, dim, &storage, entry_point, node_id, config.l_build,
-                );
-                // 量化感知剪枝（β > 0 时考虑量化误差），用 visited set
-                let pruned = QuantAwareRobustPrune::prune(
-                    &visited,
-                    node_id,
-                    vectors,
-                    dim,
-                    &|u, v| error_fn(u, v),
-                    qa_config,
-                );
+            let alpha = if iter == 0 { 1.0 } else { config.alpha };
+            let progress = AtomicUsize::new(0);
+            let progress_interval = (n / 20).max(1);
+            eprintln!("[build_qa] iter {}/{} alpha={} beta={}", iter + 1, config.max_iterations, alpha, qa_config.beta);
+
+            // 并行计算每个节点的新邻居（storage 只读，安全并行）
+            let new_neighbors: Vec<(u32, Vec<u32>)> = order
+                .par_iter()
+                .map(|&node_id| {
+                    let idx = progress.fetch_add(1, Ordering::Relaxed);
+                    if idx > 0 && idx % progress_interval == 0 {
+                        eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
+                    }
+                    let (_top, visited) = Self::greedy_search(
+                        vectors, dim, &storage, entry_point, node_id, config.l_build,
+                    );
+                    // 量化感知剪枝（β > 0 时考虑量化误差），用 visited set
+                    // two-pass: iter 0 用 α=1.0，iter 1 用 config.alpha
+                    let iter_qa_config = QuantAwarePruneConfig {
+                        alpha,
+                        ..*qa_config
+                    };
+                    let pruned = QuantAwareRobustPrune::prune(
+                        &visited,
+                        node_id,
+                        vectors,
+                        dim,
+                        &error_fn,
+                        &iter_qa_config,
+                    );
+                    (node_id, pruned)
+                })
+                .collect();
+
+            // 顺序写入邻接表（避免锁竞争）+ 真正的延迟剪枝
+            for (node_id, pruned) in new_neighbors {
                 Self::connect_bidirectional(
                     &mut storage, node_id, &pruned, vectors, dim, config,
                 );
