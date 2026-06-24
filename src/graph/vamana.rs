@@ -13,6 +13,7 @@
 use crate::distance::l2_simd;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
 use crate::build::ChaCha8Rng;
+use crate::graph::navigation::NavigationLayer;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rayon::prelude::*;
@@ -678,10 +679,14 @@ pub struct GraphSearcher<'a> {
     /// 预分配的 VisitedTracker，避免每次搜索分配 1MB visited 数组
     /// 设计文档 F.2：热路径零分配
     visited: VisitedTracker,
+    /// 可选的 NavigationLayer（centroid overlay）
+    /// 设计文档第三层：可选层，√N 个 centroid overlay 锚点节点
+    /// 启用后搜索从最近 centroid 开始，而非默认 medoid
+    navigation: Option<&'a NavigationLayer>,
 }
 
 impl<'a> GraphSearcher<'a> {
-    /// 创建搜索器
+    /// 创建搜索器（默认 medoid entry_point）
     ///
     /// 预分配 VisitedTracker（O(N) 一次性分配），后续搜索复用
     pub fn new(vectors: &'a [f32], graph: &'a VamanaGraph, ef_search: usize) -> Self {
@@ -693,6 +698,29 @@ impl<'a> GraphSearcher<'a> {
             graph,
             ef_search,
             visited: VisitedTracker::new(n, ef_search),
+            navigation: None,
+        }
+    }
+
+    /// 创建搜索器（启用 NavigationLayer centroid overlay）
+    ///
+    /// 设计文档第三层：可选层，√N 个 centroid overlay 锚点节点
+    /// 启用后搜索从最近 centroid 开始
+    pub fn new_with_navigation(
+        vectors: &'a [f32],
+        graph: &'a VamanaGraph,
+        ef_search: usize,
+        navigation: &'a NavigationLayer,
+    ) -> Self {
+        let dim = graph.dim();
+        let n = vectors.len() / dim;
+        Self {
+            vectors,
+            dim,
+            graph,
+            ef_search,
+            visited: VisitedTracker::new(n, ef_search),
+            navigation: Some(navigation),
         }
     }
 
@@ -702,12 +730,20 @@ impl<'a> GraphSearcher<'a> {
     ///
     /// 使用标准 break 模式（Vamana 论文标准 greedy search）
     /// 复用预分配的 VisitedTracker，零堆分配热路径
+    /// 若启用 NavigationLayer，从最近 centroid 开始搜索
     pub fn search(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        // 选择 entry_point：若启用 NavigationLayer，找最近 centroid；否则用 medoid
+        let entry_point = if let Some(nav) = self.navigation {
+            Self::nearest_centroid(nav.centroids(), self.vectors, self.dim, query)
+        } else {
+            self.graph.entry_point()
+        };
+
         let candidates = VamanaGraph::greedy_search_vec_reuse(
             self.vectors,
             self.dim,
             self.graph.storage(),
-            self.graph.entry_point(),
+            entry_point,
             query,
             self.ef_search,
             &mut self.visited,
@@ -724,6 +760,23 @@ impl<'a> GraphSearcher<'a> {
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
         results
+    }
+
+    /// 找最近的 centroid 作为 entry_point
+    /// O(√N * dim)，对 SIFT1M 约 1000*128 = 128K 次浮点运算
+    #[inline]
+    fn nearest_centroid(centroids: &[u32], vectors: &[f32], dim: usize, query: &[f32]) -> u32 {
+        let mut best = centroids[0];
+        let mut best_dist = f32::MAX;
+        for &c in centroids {
+            let cv = &vectors[c as usize * dim..(c as usize + 1) * dim];
+            let d = l2_simd(query, cv);
+            if d < best_dist {
+                best_dist = d;
+                best = c;
+            }
+        }
+        best
     }
 }
 

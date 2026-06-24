@@ -5,7 +5,7 @@
 //! 可选层：√N 个 centroid overlay 锚点节点（可关闭）
 
 use crate::build::ChaCha8Rng;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use rand::seq::SliceRandom;
 
 /// 导航层配置
@@ -58,9 +58,11 @@ impl NavigationLayer {
     /// k-means 聚类选择 centroid 锚点节点
     ///
     /// 算法：
-    /// 1. k-means++ 初始化选择 k 个聚类中心
-    /// 2. 迭代分配 + 更新中心
-    /// 3. 选择离每个聚类中心最近的节点作为 centroid
+    /// 1. 采样 min(n, 10000) 个样本（避免 O(n*k*dim) 全量扫描）
+    /// 2. 在样本上跑 k-means++ 初始化 + 迭代分配
+    /// 3. 从样本中选择离每个聚类中心最近的节点作为 centroid
+    ///
+    /// 采样加速：SIFT1M (n=1M, k=1000) 从 O(1.4T) 降到 O(15B)，几秒完成
     fn kmeans_centroids(vectors: &[f32], dim: usize, n: usize, k: usize) -> Vec<u32> {
         use crate::distance::l2_simd;
 
@@ -68,27 +70,31 @@ impl NavigationLayer {
             return Vec::new();
         }
 
-        // 1. k-means++ 初始化（ChaCha8Rng 保证确定性）
+        // 采样 min(n, 10000) 个样本（ChaCha8Rng 保证确定性）
+        let sample_size = n.min(10000);
         let mut rng = ChaCha8Rng::seed_from(42);
-        let mut centers: Vec<Vec<f32>> = Vec::with_capacity(k);
+        let sample_indices: Vec<usize> = {
+            use rand::seq::index::sample;
+            sample(&mut rng, n, sample_size).into_vec()
+        };
 
-        // 第一个中心随机选择
-        let first_idx = (0..n).collect::<Vec<_>>().choose(&mut rng).copied().unwrap_or(0);
+        // 1. k-means++ 初始化（在样本上）
+        let mut centers: Vec<Vec<f32>> = Vec::with_capacity(k);
+        let first_idx = sample_indices.choose(&mut rng).copied().unwrap_or(0);
         centers.push(vectors[first_idx * dim..(first_idx + 1) * dim].to_vec());
 
         // 后续中心按 D(x)² 概率选择
         for _ in 1..k {
-            let mut dists = vec![f32::MAX; n];
-            for i in 0..n {
-                let v = &vectors[i * dim..(i + 1) * dim];
+            let mut dists = vec![f32::MAX; sample_size];
+            for (si, &vi) in sample_indices.iter().enumerate() {
+                let v = &vectors[vi * dim..(vi + 1) * dim];
                 for c in &centers {
                     let d = l2_simd(v, c);
-                    if d < dists[i] {
-                        dists[i] = d;
+                    if d < dists[si] {
+                        dists[si] = d;
                     }
                 }
             }
-            // 按距离平方加权选择
             let total: f32 = dists.iter().map(|d| d * d).sum();
             if total <= 0.0 {
                 break;
@@ -96,23 +102,23 @@ impl NavigationLayer {
             let r: f32 = rng.gen();
             let mut cum = 0.0f32;
             let mut chosen = 0;
-            for i in 0..n {
-                cum += dists[i] * dists[i] / total;
+            for si in 0..sample_size {
+                cum += dists[si] * dists[si] / total;
                 if cum >= r {
-                    chosen = i;
+                    chosen = si;
                     break;
                 }
             }
-            centers.push(vectors[chosen * dim..(chosen + 1) * dim].to_vec());
+            let vi = sample_indices[chosen];
+            centers.push(vectors[vi * dim..(vi + 1) * dim].to_vec());
         }
 
-        // 2. 迭代分配 + 更新中心（最多 10 次）
-        let mut assignments = vec![0usize; n];
+        // 2. 迭代分配 + 更新中心（最多 10 次，在样本上）
+        let mut assignments = vec![0usize; sample_size];
         for _ in 0..10 {
             let mut changed = false;
-            // 分配
-            for i in 0..n {
-                let v = &vectors[i * dim..(i + 1) * dim];
+            for (si, &vi) in sample_indices.iter().enumerate() {
+                let v = &vectors[vi * dim..(vi + 1) * dim];
                 let mut best = 0;
                 let mut best_dist = f32::MAX;
                 for (j, c) in centers.iter().enumerate() {
@@ -122,20 +128,19 @@ impl NavigationLayer {
                         best = j;
                     }
                 }
-                if assignments[i] != best {
-                    assignments[i] = best;
+                if assignments[si] != best {
+                    assignments[si] = best;
                     changed = true;
                 }
             }
             if !changed {
                 break;
             }
-            // 更新中心
             let mut new_centers = vec![vec![0.0f32; dim]; centers.len()];
             let mut counts = vec![0usize; centers.len()];
-            for i in 0..n {
-                let a = assignments[i];
-                let v = &vectors[i * dim..(i + 1) * dim];
+            for (si, &vi) in sample_indices.iter().enumerate() {
+                let a = assignments[si];
+                let v = &vectors[vi * dim..(vi + 1) * dim];
                 for d in 0..dim {
                     new_centers[a][d] += v[d];
                 }
@@ -151,17 +156,17 @@ impl NavigationLayer {
             }
         }
 
-        // 3. 选择离每个聚类中心最近的节点作为 centroid
+        // 3. 从样本中选择离每个聚类中心最近的节点作为 centroid
         let mut result: Vec<u32> = Vec::with_capacity(centers.len());
         for c in &centers {
             let mut best = 0u32;
             let mut best_dist = f32::MAX;
-            for i in 0..n {
-                let v = &vectors[i * dim..(i + 1) * dim];
+            for &vi in &sample_indices {
+                let v = &vectors[vi * dim..(vi + 1) * dim];
                 let d = l2_simd(v, c);
                 if d < best_dist {
                     best_dist = d;
-                    best = i as u32;
+                    best = vi as u32;
                 }
             }
             if !result.contains(&best) {
