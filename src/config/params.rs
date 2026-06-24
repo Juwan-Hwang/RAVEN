@@ -61,7 +61,9 @@ impl ParamSpace {
     ///
     /// 设计文档修正摘要 #20：
     /// 协同调参策略：先固定 β 扫 α，再固定 α 扫 β，最后联合细扫
-    pub fn coordinated_alpha_beta_scan(&self) -> Vec<(f32, f32)> {
+    ///
+    /// optimal_alpha: 第一阶段实测得到的最优 α（评估报告 M5：原硬编码为中间值）
+    pub fn coordinated_alpha_beta_scan(&self, optimal_alpha: f32) -> Vec<(f32, f32)> {
         let mut combinations = Vec::new();
 
         // 第一阶段：固定 β=0（标准 RobustPrune），扫 α baseline
@@ -70,9 +72,8 @@ impl ParamSpace {
             combinations.push((alpha, 0.0));
         }
 
-        // 第二阶段：固定最优 α，扫 β
+        // 第二阶段：固定最优 α（第一阶段实测结果），扫 β
         // 设计文档：固定最优 α，扫 β
-        let optimal_alpha = self.alpha[1]; // 假设中间值
         for &beta in &self.beta {
             if beta > 0.0 {
                 combinations.push((optimal_alpha, beta));
@@ -81,7 +82,7 @@ impl ParamSpace {
 
         // 第三阶段：在最优 (α, β) 附近做联合细扫
         // 设计文档：在最优 (α, β) 附近做联合细扫
-        let fine_alphas = vec![1.0, 1.1, 1.2, 1.3, 1.4];
+        let fine_alphas = vec![optimal_alpha - 0.2, optimal_alpha - 0.1, optimal_alpha, optimal_alpha + 0.1, optimal_alpha + 0.2];
         let fine_betas = vec![0.2, 0.3, 0.4, 0.5];
         for &a in &fine_alphas {
             for &b in &fine_betas {
@@ -151,11 +152,14 @@ mod tests {
     #[test]
     fn coordinated_scan_has_phases() {
         let ps = ParamSpace::default();
-        let combos = ps.coordinated_alpha_beta_scan();
+        // 评估报告 M5：optimal_alpha 应从第一阶段实测结果取（这里用 1.2 模拟）
+        let combos = ps.coordinated_alpha_beta_scan(1.2);
         // 第一阶段：β=0 扫 α
         assert!(combos.iter().any(|&(a, b)| b == 0.0 && a == 1.0));
         // 第二阶段：固定 α 扫 β>0
         assert!(combos.iter().any(|&(_, b)| b > 0.0));
+        // 第三阶段：联合细扫包含 optimal_alpha 附近
+        assert!(combos.iter().any(|&(a, b)| (a - 1.2).abs() < 0.01 && b == 0.3));
     }
 
     #[test]
