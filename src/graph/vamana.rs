@@ -227,26 +227,18 @@ impl VamanaGraph {
         }
         let entry = rng.gen_range(0..n as u32);
 
-        // Fisher-Yates 部分采样（OPT-6）：预分配 indices 数组复用，避免每节点分配 HashSet
-        // 复杂度 O(r_max) per node，无哈希开销，无重试
-        // 旧方案：每节点 HashSet 去重采样，1M 节点 = 1M 次 HashSet 分配
-        let neighbor_count = config.r_max.min(n.saturating_sub(1));
-        let mut indices: Vec<u32> = (0..n as u32).collect();
-
+        // 随机连接每个节点到若干邻居（回退 OPT-6，恢复 dc814c8 HashSet 采样）
+        // Fisher-Yates partial_shuffle 虽然微基准快 2.11x，但导致图质量严重下降（recall 0.33→0.95）
+        // 原因：partial_shuffle 改变 indices 数组顺序，循环间状态污染采样分布
+        let neighbor_count = config.r_max;
         for node in 0..n as u32 {
-            // 多采 1 个以防 node 自己被采到（sample_size = neighbor_count + 1）
-            // 即使 node 在前 sample_size 个里，跳过后仍剩 neighbor_count 个，无需补采
-            let sample_size = (neighbor_count + 1).min(n);
-            // partial_shuffle 是 Fisher-Yates 的标准实现，比手写循环更快（rand crate 优化）
-            indices.partial_shuffle(rng, sample_size);
-            // 取前 sample_size 个，跳过 node 自己
+            let mut seen = std::collections::HashSet::with_capacity(neighbor_count);
+            seen.insert(node);
             let mut neighbors = Vec::with_capacity(neighbor_count);
-            for &candidate in indices.iter().take(sample_size) {
-                if candidate != node {
-                    neighbors.push(candidate);
-                    if neighbors.len() >= neighbor_count {
-                        break;
-                    }
+            while neighbors.len() < neighbor_count {
+                let j = rng.gen_range(0..n as u32);
+                if seen.insert(j) {
+                    neighbors.push(j);
                 }
             }
             for &j in &neighbors {
