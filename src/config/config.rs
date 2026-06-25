@@ -112,7 +112,7 @@ impl Default for Config {
             gemm_threshold: 8,
             avx512: false,
             batch_mode: false,
-            avq: true,
+            avq: false,
             gemm_path: false,
             candidate_count: 0,
             dim: default_dim(),
@@ -320,16 +320,16 @@ mod tests {
 
     #[test]
     fn merge_config_defaults() {
-        // 默认配置 avq=true + distance=l2 违反 avq_l2_conflict（设计意图）
+        // 默认配置 avq=false + distance=l2，不再违反 avq_l2_conflict
         let result = merge_config(None, None, false);
-        assert!(result.is_err(), "default config should violate avq_l2_conflict");
+        assert!(result.is_ok(), "default config should pass validation");
     }
 
     #[test]
     fn merge_config_cli_overrides() {
         let mut cli = Config::default();
         cli.m = 64;
-        cli.avq = false; // 避免违反 avq_l2_conflict
+        // avq 默认 false，不再需要手动关闭
         let cfg = merge_config(None, Some(&cli), false).unwrap();
         assert_eq!(cfg.m, 64);
     }

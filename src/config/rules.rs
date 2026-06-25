@@ -344,9 +344,9 @@ mod tests {
     fn validate_default_config() {
         let engine = RuleEngine::default();
         let cfg = Config::default();
-        // 默认 avq=true, distance=l2 → 违反 avq_l2_conflict
+        // 默认 avq=false, distance=l2 → 不再违反 avq_l2_conflict
         let result = engine.validate(&cfg);
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]

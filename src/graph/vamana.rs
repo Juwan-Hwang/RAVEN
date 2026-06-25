@@ -230,7 +230,8 @@ impl VamanaGraph {
         // 随机连接每个节点到若干邻居（回退 OPT-6，恢复 dc814c8 HashSet 采样）
         // Fisher-Yates partial_shuffle 虽然微基准快 2.11x，但导致图质量严重下降（recall 0.33→0.95）
         // 原因：partial_shuffle 改变 indices 数组顺序，循环间状态污染采样分布
-        let neighbor_count = config.r_max;
+        // BUG FIX: neighbor_count 不能超过 n-1，否则 while 循环死循环
+        let neighbor_count = config.r_max.min(n.saturating_sub(1));
         for node in 0..n as u32 {
             let mut seen = std::collections::HashSet::with_capacity(neighbor_count);
             seen.insert(node);
