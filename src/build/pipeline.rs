@@ -172,7 +172,7 @@ impl BuildPipeline {
     /// 设计文档：量化误差反向影响图剪枝决策
     /// 对已建好的图，用 QuantAwareRobustPrune 重新剪枝每个节点的邻居
     /// β=0.0 时退化为标准 RobustPrune，已在 vamana_build 阶段应用，跳过
-    fn quant_aware_prune(&self, mut state: PipelineState) -> PipelineState {
+    fn quant_aware_prune(&self, state: PipelineState) -> PipelineState {
         if self.config.beta == 0.0 {
             return state;
         }

@@ -182,7 +182,6 @@ fn main() {
             let top_n = 100;
             let k_ret = 10;
             let mut hits = 0usize;
-            let start = Instant::now();
             for _warmup in 0..3 { // 3 轮预热
                 for q in 0..nq {
                     let query = &test[q * dim..(q + 1) * dim];

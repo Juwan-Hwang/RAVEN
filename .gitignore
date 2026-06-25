@@ -4,5 +4,8 @@
 *.ivecs
 *.bvecs
 *.tgz
+*.tar.gz
 *.h5
+*.log
 Cargo.lock
+pending_publish.md

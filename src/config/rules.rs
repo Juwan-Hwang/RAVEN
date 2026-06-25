@@ -24,6 +24,7 @@ use super::Config;
 
 /// 规则校验错误
 #[derive(Debug, Error)]
+#[allow(missing_docs)]
 pub enum ConflictError {
     #[error("rule '{rule}' violated: {reason}")]
     RuleViolated { rule: String, reason: String },

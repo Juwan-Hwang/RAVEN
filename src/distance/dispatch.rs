@@ -44,6 +44,7 @@ pub fn dispatch_dynamic_slice(dim: usize) -> DispatchResult {
 
 /// 维度分发结果
 #[derive(Debug, Clone, Copy)]
+#[allow(missing_docs)]
 pub enum DispatchResult {
     /// 命中编译期特化维度
     Specialized { dim: usize },

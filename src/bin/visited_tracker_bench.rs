@@ -17,7 +17,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::time::{Instant, Duration};
-use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
+use raven::graph::{VamanaGraph, VamanaBuildConfig};
 use raven::memory::VisitedTracker;
 use raven::distance::l2_simd;
 use raven::build::ChaCha8Rng;
@@ -128,12 +128,12 @@ fn search_reuse(
 fn run_bench<F>(
     name: &str,
     vectors: &[f32],
-    graph: &VamanaGraph,
+    _graph: &VamanaGraph,
     queries: &[f32],
     gt: &[i32],
     dim: usize,
     nq: usize,
-    ef_search: usize,
+    _ef_search: usize,
     k: usize,
     mut search_fn: F,
 ) -> (f64, f64, Vec<Duration>)
@@ -193,7 +193,7 @@ fn main() {
     // 1. 加载 base 集前 100K 子集（确保 groundtruth 有效）
     // 用前 100K 而非 learn 集，因为 groundtruth 是基于完整 base 集的
     let t0 = Instant::now();
-    let (mut full_base, dim, n_full) = read_fvecs("data/sift/sift_base.fvecs");
+    let (full_base, dim, n_full) = read_fvecs("data/sift/sift_base.fvecs");
     let n_db = 100_000.min(n_full); // 取前 100K
     let mut db = full_base[..n_db * dim].to_vec();
     drop(full_base); // 释放完整 base

@@ -25,6 +25,7 @@ pub const EPSILON: f32 = 1e-8;
 
 /// β 有效范围（设计文档：约 0.05–2.0 之间有意义）
 pub const BETA_MIN: f32 = 0.05;
+/// β 上限
 pub const BETA_MAX: f32 = 2.0;
 
 /// 归一化方案（设计文档：消融对比）
@@ -178,7 +179,6 @@ impl QuantAwareRobustPrune {
 
             // α 遮遮挡判定（用原始距离，与标准 RobustPrune 一致）
             let p_vec = &vectors[node as usize * dim..(node as usize + 1) * dim];
-            let p_dist = dist_map[&node];
             for j in (i + 1)..scored_normalized.len() {
                 let (_, other) = scored_normalized[j];
                 if pruned[j] {

@@ -15,7 +15,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
-use raven::distance::{l2_simd, l2_f16, l2_f16_mixed, f32_to_f16_slice};
+use raven::distance::{l2_simd, l2_f16_mixed, f32_to_f16_slice};
 
 /// 读取 fvecs 文件
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
@@ -69,7 +69,7 @@ fn main() {
     let t0 = Instant::now();
     let (mut db, dim, n_db) = read_fvecs("data/sift/sift_learn.fvecs");
     let (mut queries, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
-    let (gt, gt_k, _) = read_ivecs("data/sift/sift_groundtruth.ivecs");
+    let (_, gt_k, _) = read_ivecs("data/sift/sift_groundtruth.ivecs");
     println!("数据加载: {:.1}s", t0.elapsed().as_secs_f64());
     println!("db(learn): {} vecs, queries: {} vecs, dim={}, gt_k={}", n_db, nq, dim, gt_k);
     println!();
@@ -93,7 +93,6 @@ fn main() {
     // 3. f32 暴力搜索（基线）
     println!("=== f32 暴力搜索（基线）===");
     let t0 = Instant::now();
-    let mut f32_hits = 0usize;
     for q in 0..nq {
         let query = &queries[q * dim..(q + 1) * dim];
         let mut best: Vec<(u32, f32)> = (0..n_db)
@@ -103,7 +102,7 @@ fn main() {
             })
             .collect();
         best.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let found: Vec<u32> = best.iter().take(k).map(|(id, _)| *id).collect();
+        let _found: Vec<u32> = best.iter().take(k).map(|(id, _)| *id).collect();
         // 注意：learn 集不是真正的 groundtruth，这里用 f32 结果作为 groundtruth 对比 f16
         if q == 0 {
             // 只对第一个 query 记录，用于对比

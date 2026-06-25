@@ -27,6 +27,7 @@ pub const HEADER_SIZE: usize = 16;
 
 /// 序列化错误类型
 #[derive(Debug, Error)]
+#[allow(missing_docs)]
 pub enum SerializeError {
     #[error("magic mismatch: expected {expected:#010X}, got {actual:#010X}, not a RAVEN index file")]
     MagicMismatch { expected: u32, actual: u32 },

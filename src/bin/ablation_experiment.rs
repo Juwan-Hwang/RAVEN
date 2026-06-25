@@ -17,9 +17,8 @@ use std::time::Instant;
 use raven::quant::opq::OPQRotation;
 use raven::quant::avq::{AVQCodebook, TrainingSignal};
 use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
-use raven::graph::ablation::{AblationFramework, AblationMetrics, ArgumentChainResult};
+use raven::graph::ablation::AblationFramework;
 use raven::build::ChaCha8Rng;
-use raven::l2_simd;
 
 /// 读取 fvecs 文件
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
@@ -124,7 +123,7 @@ fn main() {
     let t0 = Instant::now();
     let (mut train, dim, n) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
-    let (gt, gt_k, gt_nq) = read_ivecs("data/sift/sift_groundtruth.ivecs");
+    let (gt, _, _) = read_ivecs("data/sift/sift_groundtruth.ivecs");
     let (mut learn, _, n_learn) = read_fvecs("data/sift/sift_learn.fvecs");
     println!("数据加载: {:.1}s", t0.elapsed().as_secs_f64());
     println!("SIFT1M: dim={}, base={}, query={}, learn={}", dim, n, nq, n_learn);

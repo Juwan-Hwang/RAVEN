@@ -3,7 +3,7 @@ name = "raven"
 version = "0.1.0"
 edition = "2021"
 description = "Retrieval-Aware Vector Engine with Navigation - high-performance ANN search"
-license = "MIT"
+license = "Apache-2.0"
 
 [lib]
 name = "raven"
