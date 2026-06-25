@@ -15,6 +15,8 @@
 //! - 尾数位：10 bits
 //! - 范围：±65504，最小正规数约 6.1e-5
 
+use std::arch::x86_64::*;
+
 /// f16 类型（用 u16 存储，便于 SIMD 和序列化）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct F16(pub u16);
@@ -185,6 +187,151 @@ pub fn l2_f16_mixed(query: &[f32], db_packed: &[F16]) -> f32 {
     sum
 }
 
+// ============================================================================
+// OPT-4: SIMD f16 距离核（F16C + AVX-512）
+// ============================================================================
+//
+// 设计文档：f16 带宽优化快路径，减少内存传输，不改变图结构决策
+//
+// 核心思路：
+// - 数据库预量化为 f16（2B/元素），内存带宽减半
+// - 查询时用 F16C 指令（_mm256_cvtph_ps）将 f16 转为 f32 在寄存器中计算
+// - 计算精度保持 f32，但内存传输量减半
+// - 适用于 memory-bound 场景（图搜索的随机访问模式）
+//
+// 平台要求：F16C + AVX-512F（Skylake-X / Zen4 及以后）
+
+/// 检测 CPU 是否支持 F16C 指令
+pub fn is_f16c_supported() -> bool {
+    std::is_x86_feature_detected!("f16c")
+}
+
+/// SIMD f16 L2 距离（AVX-512 + F16C，混合模式）
+///
+/// query 为 f32，db 为预量化 f16。
+/// 用 F16C 将 f16 转为 f32 在寄存器中计算，内存带宽减半。
+///
+/// 每 cycle 处理 16 个元素：
+/// - 2 次 _mm_loadu_si128 加载 16 个 f16（32 字节）
+/// - 2 次 _mm256_cvtph_ps 将 f16 转为 f32（寄存器内）
+/// - _mm512_insertf32x8 合并为 16-wide f32
+/// - _mm512_fmadd_ps 做距离累加
+#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "f16c")]
+#[inline]
+pub unsafe fn l2_f16_mixed_avx512(query: &[f32], db_packed: &[F16]) -> f32 {
+    debug_assert_eq!(query.len(), db_packed.len());
+    let n = query.len();
+    let chunks = n / 16;
+    let remainder = n % 16;
+
+    let q_ptr = query.as_ptr();
+    // F16 是 u16，按 u16 指针访问
+    let db_ptr = db_packed.as_ptr() as *const u16;
+
+    let mut sum = _mm512_setzero_ps();
+
+    // 主循环：每次处理 16 个元素
+    for i in 0..chunks {
+        let offset = i * 16;
+        // 加载 query 的 16 个 f32
+        let vq = _mm512_loadu_ps(q_ptr.add(offset));
+
+        // 加载 db 的 16 个 f16（2 次 8-wide）
+        let db_lo = _mm_loadu_si128(db_ptr.add(offset) as *const __m128i);
+        let db_hi = _mm_loadu_si128(db_ptr.add(offset + 8) as *const __m128i);
+        // F16C: f16 → f32
+        let db_lo_f32 = _mm256_cvtph_ps(db_lo);
+        let db_hi_f32 = _mm256_cvtph_ps(db_hi);
+        // 合并为 16-wide f32
+        let vdb = _mm512_insertf32x8(_mm512_castps256_ps512(db_lo_f32), db_hi_f32, 1);
+
+        let d = _mm512_sub_ps(vq, vdb);
+        sum = _mm512_fmadd_ps(d, d, sum);
+    }
+
+    let mut result = 0.0f32;
+    if remainder > 0 {
+        let offset = chunks * 16;
+        // 尾部逐元素处理（remainder < 16）
+        for i in 0..remainder {
+            let q = *q_ptr.add(offset + i);
+            let d = F16(*db_ptr.add(offset + i)).to_f32();
+            let diff = q - d;
+            result += diff * diff;
+        }
+    }
+
+    result + _mm512_reduce_add_ps(sum)
+}
+
+/// SIMD f16 L2 距离（AVX2 + F16C，混合模式）
+///
+/// 8-wide f32 计算，适用于不支持 AVX-512 的平台
+#[target_feature(enable = "avx2")]
+#[target_feature(enable = "f16c")]
+#[inline]
+pub unsafe fn l2_f16_mixed_avx2(query: &[f32], db_packed: &[F16]) -> f32 {
+    debug_assert_eq!(query.len(), db_packed.len());
+    let n = query.len();
+    let chunks = n / 8;
+    let remainder = n % 8;
+
+    let q_ptr = query.as_ptr();
+    let db_ptr = db_packed.as_ptr() as *const u16;
+
+    let mut sum = _mm256_setzero_ps();
+
+    for i in 0..chunks {
+        let offset = i * 8;
+        let vq = _mm256_loadu_ps(q_ptr.add(offset));
+        let db_f16 = _mm_loadu_si128(db_ptr.add(offset) as *const __m128i);
+        let vdb = _mm256_cvtph_ps(db_f16);
+        let d = _mm256_sub_ps(vq, vdb);
+        sum = _mm256_fmadd_ps(d, d, sum);
+    }
+
+    let mut result = 0.0f32;
+    if remainder > 0 {
+        let offset = chunks * 8;
+        for i in 0..remainder {
+            let q = *q_ptr.add(offset + i);
+            let d = F16(*db_ptr.add(offset + i)).to_f32();
+            let diff = q - d;
+            result += diff * diff;
+        }
+    }
+
+    // 水平求和 AVX2 寄存器
+    let buf: [f32; 8] = std::mem::transmute(sum);
+    result + buf.iter().sum::<f32>()
+}
+
+/// 统一 SIMD f16 L2 距离分发（AVX-512 > AVX2 > 标量）
+///
+/// 设计文档：f16 带宽优化快路径
+/// 运行时检测 CPU 特性，优先使用最宽的 SIMD 核
+#[inline(always)]
+pub fn l2_f16_mixed_simd(query: &[f32], db_packed: &[F16]) -> f32 {
+    if is_avx512_and_f16c_supported() {
+        unsafe { l2_f16_mixed_avx512(query, db_packed) }
+    } else if is_avx2_and_f16c_supported() {
+        unsafe { l2_f16_mixed_avx2(query, db_packed) }
+    } else {
+        l2_f16_mixed(query, db_packed)
+    }
+}
+
+/// 检测 AVX-512 + F16C 同时支持
+pub fn is_avx512_and_f16c_supported() -> bool {
+    std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("f16c")
+}
+
+/// 检测 AVX2 + F16C 同时支持
+pub fn is_avx2_and_f16c_supported() -> bool {
+    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +412,76 @@ mod tests {
         }
         // [0,1] 范围内 f16 精度应足够（最大误差 < 0.001）
         assert!(max_err < 0.001, "f16 max error in [0,1]: {}", max_err);
+    }
+
+    // ===== OPT-4 SIMD f16 距离核测试 =====
+
+    #[test]
+    fn l2_f16_mixed_simd_matches_scalar() {
+        if !is_avx512_and_f16c_supported() && !is_avx2_and_f16c_supported() {
+            eprintln!("F16C not supported, skipping SIMD test");
+            return;
+        }
+        let query: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
+        let db_f32: Vec<f32> = (0..128).map(|i| (i as f32 / 128.0) * 0.9).collect();
+        let db_f16 = f32_to_f16_slice(&db_f32);
+
+        let scalar = l2_f16_mixed(&query, &db_f16);
+        let simd = l2_f16_mixed_simd(&query, &db_f16);
+        let rel_err = (scalar - simd).abs() / scalar.max(1e-6);
+        assert!(rel_err < 1e-4, "scalar={} simd={} rel_err={}", scalar, simd, rel_err);
+    }
+
+    #[test]
+    fn l2_f16_mixed_avx512_dim128() {
+        if !is_avx512_and_f16c_supported() {
+            return;
+        }
+        // SIFT1M dim=128 = 8 × 16，测试主循环
+        let query: Vec<f32> = (0..128).map(|i| i as f32).collect();
+        let db_f32: Vec<f32> = (0..128).map(|i| (i as f32) * 1.1).collect();
+        let db_f16 = f32_to_f16_slice(&db_f32);
+
+        let result = unsafe { l2_f16_mixed_avx512(&query, &db_f16) };
+        // 手动计算 f16 精度下的距离
+        let expected: f32 = query.iter().zip(db_f16.iter())
+            .map(|(q, d)| { let diff = q - d.to_f32(); diff * diff })
+            .sum();
+        let rel_err = (result - expected).abs() / expected.max(1.0);
+        assert!(rel_err < 1e-5, "result={} expected={} rel_err={}", result, expected, rel_err);
+    }
+
+    #[test]
+    fn l2_f16_mixed_avx512_small_vec() {
+        if !is_avx512_and_f16c_supported() {
+            return;
+        }
+        // 维度 < 16，测试尾部处理
+        let query = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let db_f32 = [4.0f32, 5.0, 6.0, 7.0, 8.0];
+        let db_f16 = f32_to_f16_slice(&db_f32);
+
+        let result = unsafe { l2_f16_mixed_avx512(&query, &db_f16) };
+        let expected: f32 = query.iter().zip(db_f16.iter())
+            .map(|(q, d)| { let diff = q - d.to_f32(); diff * diff })
+            .sum();
+        assert!((result - expected).abs() < 1e-4, "result={} expected={}", result, expected);
+    }
+
+    #[test]
+    fn l2_f16_mixed_avx2_dim128() {
+        if !is_avx2_and_f16c_supported() {
+            return;
+        }
+        let query: Vec<f32> = (0..128).map(|i| i as f32).collect();
+        let db_f32: Vec<f32> = (0..128).map(|i| (i as f32) * 1.1).collect();
+        let db_f16 = f32_to_f16_slice(&db_f32);
+
+        let result = unsafe { l2_f16_mixed_avx2(&query, &db_f16) };
+        let expected: f32 = query.iter().zip(db_f16.iter())
+            .map(|(q, d)| { let diff = q - d.to_f32(); diff * diff })
+            .sum();
+        let rel_err = (result - expected).abs() / expected.max(1.0);
+        assert!(rel_err < 1e-5, "result={} expected={} rel_err={}", result, expected, rel_err);
     }
 }

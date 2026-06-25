@@ -50,7 +50,12 @@ pub use kernel::{KernelVariant, select_kernel, validate_kernel_stability};
 pub use aligned::AlignedVec;
 pub use avx2::{l2_avx2, l2_dispatch, Avx2Kernel, is_avx2_supported};
 pub use avx512::{l2_avx512, Avx512Kernel, is_avx512_supported};
-pub use f16::{F16, l2_f16, l2_f16_packed, l2_f16_mixed, f32_to_f16_slice, f16_to_f32_slice};
+pub use f16::{
+    F16, l2_f16, l2_f16_packed, l2_f16_mixed, l2_f16_mixed_simd,
+    l2_f16_mixed_avx512, l2_f16_mixed_avx2,
+    f32_to_f16_slice, f16_to_f32_slice,
+    is_f16c_supported, is_avx512_and_f16c_supported, is_avx2_and_f16c_supported,
+};
 
 /// 统一 SIMD 分发：AVX-512 > AVX2 > 动态兜底
 ///
