@@ -1,8 +1,11 @@
 # RAVEN 冲击 ann-benchmarks 世界第一：战略路线图
 
 > 创建时间：2026-06-25
-> 最后修订：2026-06-26（v5：真实排行榜数据已填入 + 干净基线已测 + 差距重新计算）
-> 目标：在 ann-benchmarks SIFT1M (sift-128-euclidean) 上达到 recall-QPS Pareto 前沿世界第一
+> 最后修订：2026-06-26（v6：算术不可能定理 + Pivot Criterion + 目标重定义 + 终端工作流）
+> 目标：在 ann-benchmarks SIFT1M (sift-128-euclidean) 上达到 recall-QPS Pareto 前沿第一梯队（详见 §〇.2 目标重定义）
+>
+> **v6 重大变更**：用文档自己的两个数字（基线 2,706 × Phase 1 上限 2.5 = 6,765，目标 15,171）证明
+> Phase 1 单独无法闭合 5.6x 差距。avg_visited 被提升为项目最关键单个数字，拥有 Phase 1 优先级否决权。
 
 ---
 
@@ -35,6 +38,41 @@
 3. **在分支上开发**：复合优化在独立分支上开发，只有终态达标才并入主线。
 4. **子步骤仍需独立 commit**：每个子步骤在分支上单独 commit（方便回退和对比），但不要求每个子步骤单独满足规则 2。
 5. **终态评估**：合并到主线时，以终态工作点的 (recall, QPS) 与分支前的基线做 before/after 对比。
+
+### 〇.2 目标重定义与 Pivot Criterion
+
+> **算术诚实**：基线 2,706 × Phase 1 最乐观估计 2.5 = 6,765 QPS。目标线 glass = 15,171。
+> 即使 Phase 1 拿到它能给的全部上限，离 recall 0.95 处的榜首还差 2.24x。
+> Phase 3/4/6 在文档中已被诚实标注为「可能衰减」「+5-10%」，凑不出剩下的 2.24x。
+> **结论：按当前以 Phase 1 为核心引擎的计划，「SIFT1M Pareto 前沿世界第一」在数学上不成立。**
+
+**目标重定义**：
+
+| 层级 | 定义 | 达成条件 |
+|:--|:--|:--|
+| ~~旧目标~~ | ~~Pareto 前沿世界第一~~ | ~~QPS 超越所有库的外包络线~~ |
+| **新目标 A：第一梯队** | 在某个 recall 工作点进入 Pareto 前沿 top-5 | 存在 recall 点，RAVEN QPS ≥ 榜首 × 0.5 |
+| **新目标 B：单点突破** | 在某个 recall 工作点超越特定榜首算法 | 存在 recall 点，RAVEN QPS > 该点榜首 |
+| **新目标 C：论文贡献** | 机制创新有独立价值 | RP-Tuning / AVQ / 量化感知剪枝有消融数据支撑 |
+
+> 如果 avg_visited 测量后发现图质量是主瓶颈并修复之，5.6x 差距可能大幅缩小，届时可重新评估是否回归「世界第一」目标。
+
+**Pivot Criterion（avg_visited 否决权）**：
+
+> avg_visited 是当前整个项目最关键的单个数字，比 Phase 1 还关键。
+> 它必须在 Phase 1 之前测量，且结果有权否决 Phase 1 的优先级。
+
+| avg_visited 测量结果 | 诊断 | 行动 |
+|:--|:--|:--|
+| **< 150**（glass 量级） | 图质量正常，瓶颈在距离计算 | **Phase 1 优先**（原计划不变） |
+| **150-300**（中等） | 图质量有改进空间但不致命 | Phase 1 和 Phase 3.3 **并行推进** |
+| **> 300**（偏高） | 图质量是主瓶颈，Phase 1 救不了 | **Phase 3.3 优先**，Phase 1 降级为 P2 |
+| **> 500**（严重偏高） | 图导航效率根本性缺陷 | **暂停 Phase 1**，全力修图，重新评估可行性 |
+
+> **为什么 avg_visited 比 QPS 更能暴露问题**：QPS 受 SIMD、内存布局、cache miss 等多重因素干扰。
+> avg_visited 只衡量「图导航走了多少冤枉路」——如果 RAVEN 的 avg_visited 是 glass 的 3 倍，
+> 那么距离计算再快 5 倍也没用，因为做了 3 倍于对手的距离计算次数。
+> Amdahl 稀释之外还有这一层：在一条更长的路径上加速，对手压根不走那条路。
 
 ---
 
@@ -119,14 +157,56 @@
 | ADC 路径 vs f32 | ADC **更慢** (旧值 2,025 vs 2,434) | 榜首用 PQ-ADC 快 3-5x | **根本性缺陷** |
 | 建图时间 | **912.1s** (r_max=32) | ~200-500s | 2-4x |
 
-**核心发现 1：RAVEN 的 ADC 路径比 f32 还慢，这是反直觉的。** 顶尖库用 PQ-ADC 路径比 f32 快 3-5 倍。RAVEN 有量化器但搜索时没有用 SIMD lookup table 加速 ADC——等于浪费了量化的全部优势。
+**核心发现 1：RAVEN 的 ADC 路径比 f32 还慢。** 但这个发现能解释「为什么 RAVEN 的量化路径是坏的」，
+却解释不了「为什么 glass 比 RAVEN 的 f32 还快 5.6x」。把 ADC 修好，顶多让 RAVEN 追上自己的 f32 再快个 2x 上下，
+到 ~5,000-6,000 QPS，仍然到不了 15,000。
 
-**核心发现 2：榜首不是 ScaNN，是 qsgngt 和 glass。** 之前文档多处引用 "ScaNN" 作为竞争对手，实际榜首是 NGT-QSG 系列和 glass。ScaNN 未出现在最优 Pareto 前沿中。这意味着：
+**核心发现 2：榜首不是 ScaNN，是 qsgngt 和 glass。**
 - glass 在 recall=0.9523 时达到 15,171 QPS，而 RAVEN 在 recall=0.9517 时只有 2,706 QPS——**差距 5.6x**
 - qsgngt 在 recall=0.9917 时达到 11,163 QPS，而 RAVEN 在 recall=0.9961 时只有 2,434 QPS——**差距 4.6x**
-- glass 在低参数下同时保持 recall=0.9941 和 QPS=19,801——**图质量极高**
+- glass 在低参数下同时保持 recall=0.9941 和 QPS=19,801——**图质量极高的标志**
 
-**待验证假设：图算法质量。** 如果 avg_visited 显著偏高，说明图导航效率有问题，需要把图质量优化（Phase 3.3）的优先级提前到 Phase 1 之前或并行。
+**核心发现 3（v6 新增）：5.6x 差距的性质可能根本不是距离计算，而是图导航效率。**
+glass 用 R=32 的小度数就能又准又快，说明它每次查询访问的节点数极少。
+如果 RAVEN 的 avg_visited 是 glass 的好几倍，那么距离计算再快 5 倍也没用——
+因为做了几倍于对手的距离计算次数。这正是 §1.3 表中那个一直「待测」的 avg_visited。
+
+**待验证假设：图算法质量。** 如果 avg_visited 显著偏高，说明图导航效率有问题，
+需要把图质量优化（Phase 3.3）的优先级提前到 Phase 1 之前或并行。详见 §〇.2 Pivot Criterion。
+
+### 1.4 算术不可能定理
+
+> **用文档自己的两个数字做最简单的乘法。**
+>
+> - §1.3：RAVEN 干净基线 recall 0.95 处 QPS = **2,706**
+> - §1.4 预期收益表：Phase 1 端到端乐观估计 = **1.5-2.5x**（Amdahl 稀释后）
+>
+> 最乐观场景：2,706 × 2.5 = **6,765 QPS**
+> 目标线（glass @ recall 0.9523）：**15,171 QPS**
+> 即使 Phase 1 拿到全部上限，离榜首还差：15,171 / 6,765 = **2.24x**
+>
+> Phase 3/4/6 在文档中已被诚实标注为「可能衰减」「+5-10%」，凑不出剩下的 2.24x。
+>
+> **结论：按当前以 Phase 1 为核心引擎的计划，recall 0.95 处「超越 glass」在数学上不成立。**
+> 真正的突破口更可能在 avg_visited 暴露的图质量问题（§1.5），而非距离计算加速。
+
+### 1.5 两个独立问题：距离计算 vs 图导航效率
+
+> **旧叙事**：「核心差距很可能在距离计算方式（f32 vs PQ-ADC）」。
+> 这个叙事被 §1.1 的旧数据部分证伪：RAVEN 现在就有 ADC+rerank 路径（2,025 QPS），
+> 它非但不快反而比 f32（2,434）还慢。把 ADC 修好，顶多追上 f32 再快 2x 上下，到 ~5,000-6,000，仍然到不了 15,000。
+
+**必须把两个问题分开**：
+
+| 问题 | 性质 | 预期收益 | 对应 Phase | 当前状态 |
+|:--|:--|:--|:--|:--|
+| **问题 A：RAVEN 的 ADC 路径是坏的** | 明确但收益有限 | ~2x → 到 ~5,000-6,000 QPS | Phase 1 | 旧 ADC 更慢（2,025 vs 2,434） |
+| **问题 B：glass 比 RAVEN 的 f32 还快 5.6x** | 更大但更难 | 取决于 avg_visited 差距 | Phase 3.3 | 待诊断 |
+
+> 距离计算这个叙事能解释「为什么 RAVEN 的量化路径是坏的」，
+> 但它解释不了「为什么 glass 比 RAVEN 的 f32 还快 5.6x」。
+> 后面这个 5.6x，答案更可能在图，不在距离。
+> **别让「修 ADC」这个明确但收益有限的任务，掩盖了「图可能根本不够好」这个更大但更难的问题。**
 
 ---
 
@@ -554,7 +634,74 @@ PGO 预期收益：QPS +5-10%。
 
 ## 八、一句话总结
 
-**RAVEN 距离世界第一的差距已用真实数据量化：干净基线 QPS=2,706 (recall=0.9517)，而榜首 glass 在 recall=0.9523 时达到 15,171 QPS——差距 5.6x。榜首不是 ScaNN，是 qsgngt 和 glass。核心差距很可能在搜索热路径的距离计算方式（当前用 f32 全精度，顶尖库用 LUT16-shuffle 加速的 PQ-ADC）。补上这个差距（Phase 1，4-bit PQ + 寄存器内查表，放弃 gather），再叠加 rerank 补偿 recall，RAVEN 有实力在 SIFT1M 上挑战 Pareto 前沿。但在此之前必须先做：修复 ann-benchmarks wrapper（S1）+ 测量 avg_visited 验证图质量。否则一切性能数据和分析都建立在沙子上。**
+**RAVEN 距离榜首的差距已用真实数据量化：干净基线 QPS=2,706 (recall=0.9517)，榜首 glass 在 recall=0.9523 时达到 15,171 QPS——差距 5.6x。但用文档自己的数字做乘法：基线 2,706 × Phase 1 最乐观 2.5 = 6,765，离目标还差 2.24x。Phase 1（修 ADC）是明确但收益有限的任务，它解释不了「为什么 glass 比 RAVEN 的 f32 还快 5.6x」。真正的答案更可能在 avg_visited 暴露的图导航效率。因此 avg_visited 是当前整个项目最关键的单个数字，拥有 Phase 1 优先级否决权（§〇.2 Pivot Criterion）。测完 avg_visited 再决定：如果图质量是主瓶颈，Phase 3.3 应先于 Phase 1；如果图质量正常，Phase 1 仍是最优路径。在此之前：修复 ann-benchmarks wrapper（S1）+ 测量 avg_visited。**
+
+---
+
+## 九、附录：终端工作流（保证数据收集不中断、不阻塞）
+
+> 本节记录 agent 如何使用终端工具保证 benchmark 数据收集的可靠性与连续性。
+
+### 9.1 长时间任务后台执行
+
+建图和 benchmark 运行可能需要 10-15 分钟。直接在前台运行会阻塞整个 agent 会话。
+
+**方法**：使用 `is_background: true` 将任务放入后台，输出重定向到文件：
+
+```bat
+cd /d c:\Users\Juwan\Desktop\RAVEN && cargo run --release --bin quick_recall_check > result.txt 2>&1
+```
+
+- `> result.txt 2>&1`：stdout 和 stderr 合并写入文件，确保不丢数据
+- 后台执行后，agent 可继续做其他工作（如更新文档、审查代码）
+- 通过 `read_file` 工具读取 `result.txt` 获取结果，无需阻塞等待
+
+### 9.2 进程状态检查
+
+运行 benchmark 前必须确认无残留进程（旧 exe、cargo、rustc），否则 CPU 被抢占导致数据污染（QPS 减半 + 建图翻倍）。
+
+```bat
+tasklist | findstr /i "raven cargo rustc"
+```
+
+- 如有残留进程，先 `taskkill /f /im <process.exe>` 清理
+- 清理后等待 2-3 秒再启动新任务，确保 CPU 释放
+
+### 9.3 .bat 脚本封装复杂命令
+
+Windows cmd 对引号、管道、中文有编码问题。将复杂命令封装为 `.bat` 文件：
+
+```bat
+@echo off
+cd /d c:\Users\Juwan\Desktop\RAVEN
+git add RAVEN*.md
+git commit -m "docs: v6 - arithmetic impossibility + pivot criterion"
+```
+
+- 用 `write` 工具创建 `.bat`，用 `run_terminal_cmd` 执行
+- 避免中文或特殊字符直接出现在 cmd 参数中
+- git commit message 保持 ASCII，中文内容写入文档而非 commit message
+
+### 9.4 结果文件验证
+
+工具缓存可能导致 `read_file` 显示旧内容。验证磁盘实际状态的方法：
+
+```bat
+type result.txt | findstr /i "recall QPS"
+```
+
+- 或使用 `grep` 工具搜索结果文件中的关键行
+- 必要时用 `write` 工具全量覆盖文件，而非增量编辑
+
+### 9.5 干净环境验证清单
+
+每次跑 benchmark 前执行：
+
+1. `tasklist | findstr /i "raven cargo rustc"` → 确认无残留
+2. 确认数据文件存在：`dir data\sift\sift_base.fvecs`
+3. 后台启动 benchmark，输出重定向到文件
+4. 等待完成后用 `read_file` 或 `grep` 读取结果
+5. 将结果写入本文档对应章节
 
 ---
 
