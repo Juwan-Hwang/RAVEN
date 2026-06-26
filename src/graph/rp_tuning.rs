@@ -133,6 +133,7 @@ impl RPTuning {
                         dim,
                         alpha,
                         config.r_max,
+                        alpha > 1.0, // DiskANN: saturate_after_prune && alpha > 1.0
                     );
                     new_storage.set_neighbors(node, &pruned);
                 }

@@ -316,7 +316,7 @@ mod tests {
         };
         let candidates: Vec<u32> = (1..15).collect();
         let result = QuantAwareRobustPrune::prune(&candidates, 0, &v, 4, &error_fn, &config);
-        let standard = crate::graph::robust_prune::RobustPrune::prune(&candidates, 0, &v, 4, 1.0, 10);
+        let standard = crate::graph::robust_prune::RobustPrune::prune(&candidates, 0, &v, 4, 1.0, 10, false);
         // β=0 时量化误差不影响排序，结果应一致
         assert_eq!(result, standard);
     }

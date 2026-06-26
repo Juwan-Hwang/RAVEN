@@ -96,20 +96,34 @@ impl HybridBlockedCsr {
         (self.neighbors(node_id), &self.overflow[node_id as usize])
     }
 
-    /// 添加一条有向边 from -> to
+    /// 添加一条有向边 from -> to（自动去重）
     ///
-    /// 如果主块未满，写入主块；否则写入 overflow 区
+    /// 如果主块未满，写入主块；否则写入 overflow 区。
+    /// 去重：若 from -> to 已存在则跳过（DiskANN AdjacencyList 语义）。
+    ///
+    /// BUG FIX (v6.5): 原实现不去重，connect_bidirectional 反复添加反向边，
+    /// 导致度数虚高、触发不必要的重剪枝、图结构退化。
     pub fn add_edge(&mut self, from: u32, to: u32) {
         debug_assert!(to != SENTINEL, "cannot add edge to sentinel");
         let start = from as usize * self.r_max;
-        // 在主块中找第一个空槽
+
+        // 去重：检查主块中是否已存在该边
         for i in 0..self.r_max {
-            if self.main_block[start + i] == SENTINEL {
-                self.main_block[start + i] = to;
-                return;
+            match self.main_block[start + i] {
+                SENTINEL => {
+                    // 找到空槽，写入
+                    self.main_block[start + i] = to;
+                    return;
+                }
+                v if v == to => return, // 已存在，跳过
+                _ => {}
             }
         }
-        // 主块已满，写入 overflow
+
+        // 主块已满，检查 overflow
+        if self.overflow[from as usize].contains(&to) {
+            return;
+        }
         self.overflow[from as usize].push(to);
     }
 

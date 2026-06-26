@@ -37,6 +37,7 @@ fn main() {
     let mut alpha: f32 = 1.2;
     let mut l_build: usize = 200;
     let mut r_max: usize = 64;
+    let mut max_iterations: usize = 2; // Canonical Config: max_iterations=2 (Vamana two-pass)
     let mut ef_search: usize = 200;
     let mut output_path = String::new();
     let mut save_path = String::new();
@@ -58,6 +59,7 @@ fn main() {
             "--alpha" => { i += 1; alpha = args[i].parse().expect("invalid alpha"); }
             "--l-build" => { i += 1; l_build = args[i].parse().expect("invalid l_build"); }
             "--r-max" => { i += 1; r_max = args[i].parse().expect("invalid r_max"); }
+            "--max-iterations" => { i += 1; max_iterations = args[i].parse().expect("invalid max_iterations"); }
             "--ef-search" => { i += 1; ef_search = args[i].parse().expect("invalid ef_search"); }
             "--help" | "-h" => { print_help(); return; }
             _ => { eprintln!("unknown argument: {}", args[i]); std::process::exit(1); }
@@ -94,7 +96,7 @@ fn main() {
 
     eprintln!("RAVEN ann-benchmarks runner");
     eprintln!("  dim={}, n={}, nq={}, k={}", dim, n, nq, k);
-    eprintln!("  alpha={}, l_build={}, r_max={}, ef_search={}", alpha, l_build, r_max, ef_search);
+    eprintln!("  alpha={}, l_build={}, r_max={}, max_iterations={}, ef_search={}", alpha, l_build, r_max, max_iterations, ef_search);
 
     // 构建或加载索引
     let (graph, build_time) = if !load_path.is_empty() {
@@ -113,7 +115,7 @@ fn main() {
             l_build,
             r_max,
             r_soft: (r_max as f32 * 1.5) as usize,
-            max_iterations: 1,
+            max_iterations,
         };
         let build_start = Instant::now();
         let g = VamanaGraph::build(&train, dim, &config, &mut rng);
@@ -141,6 +143,7 @@ fn main() {
             "alpha": alpha,
             "l_build": l_build,
             "r_max": r_max,
+            "max_iterations": max_iterations,
         });
         println!("{}", result);
         return;
@@ -203,6 +206,7 @@ fn main() {
         "alpha": alpha,
         "l_build": l_build,
         "r_max": r_max,
+        "max_iterations": max_iterations,
         "ef_search": ef_search,
     });
     println!("{}", result);
@@ -222,7 +226,8 @@ fn print_help() {
     println!("    --alpha <F> --l-build <N> --r-max <N> --ef-search <N>");
     println!();
     println!("可选:");
-    println!("  --save <path>    构建后保存索引");
-    println!("  --load <path>    从文件加载索引（跳过构建）");
-    println!("  --output <path>  输出邻居 ID 到文件");
+    println!("  --save <path>         构建后保存索引");
+    println!("  --load <path>         从文件加载索引（跳过构建）");
+    println!("  --output <path>       输出邻居 ID 到文件");
+    println!("  --max-iterations <N>  Vamana 构建迭代轮数（默认 2）");
 }

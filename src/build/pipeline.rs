@@ -159,6 +159,7 @@ impl BuildPipeline {
             r_max: self.config.r_max,
             r_soft: self.config.r_soft,
             max_iterations: 2,
+            saturate: true,
         };
         let graph = VamanaGraph::build(&state.vectors, state.dim, &vamana_config, &mut rng);
         PipelineState {
@@ -244,6 +245,7 @@ impl BuildPipeline {
                 let pruned = RobustPrune::prune(
                     &all, node, &state.vectors, state.dim,
                     self.config.alpha, self.config.r_max,
+                    self.config.alpha > 1.0, // DiskANN: saturate_after_prune && alpha > 1.0
                 );
                 storage.set_neighbors(node, &pruned);
             }

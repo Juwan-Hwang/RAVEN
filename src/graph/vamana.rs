@@ -34,6 +34,12 @@ pub struct VamanaBuildConfig {
     pub r_soft: usize,
     /// 最大迭代轮数
     pub max_iterations: usize,
+    /// 是否在 RobustPrune 后用剩余候选填充到 R_max（saturation）
+    ///
+    /// DiskANN: saturate_after_prune(true) + alpha > 1.0
+    /// 但 saturation 会用远距离候选填充，拉低邻居重叠率 → avg_visited 膨胀
+    /// 实验开关：false 时图自然稀疏，邻居全是 RobustPrune 精选的高质量边
+    pub saturate: bool,
 }
 
 impl Default for VamanaBuildConfig {
@@ -47,6 +53,7 @@ impl Default for VamanaBuildConfig {
             // Vamana 论文要求 two passes：第一轮 α=1.0（连通性），第二轮 α=config（长程边）
             // max_iterations=1 只跑连通性轮，图质量显著下降（recall 0.33→0.95 的差距来源之一）
             max_iterations: 2,
+            saturate: true,
         }
     }
 }
@@ -88,8 +95,16 @@ impl VamanaGraph {
         let entry_point = Self::compute_medoid(vectors, dim, n);
         eprintln!("[build] init_random_graph done, entry=medoid[{}]", entry_point);
 
-        // 2. 迭代优化：并行 greedy_search + RobustPrune，顺序写入
+        // 2. 迭代优化：小批量并行 greedy_search + RobustPrune，批间顺序写入
         // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
+        //
+        // v6.6 关键修复：原实现全量并行（1M 节点同时在同一张旧图上搜索），
+        // 违反 Vamana 论文 Algorithm 1 的顺序处理要求。
+        // 全量并行导致所有节点看到相同的（差的）图状态，图质量严重退化
+        // （avg_visited=2325，正常应 100-300）。
+        // 小批量处理：每批 BUILD_BATCH_SIZE 个节点并行搜索，
+        // 批间顺序更新图，后续批次受益于前面批次的改进。
+        const BUILD_BATCH_SIZE: usize = 10_000;
         for iter in 0..config.max_iterations {
             let order = Self::permutation(n, rng);
             let progress = AtomicUsize::new(0);
@@ -97,36 +112,37 @@ impl VamanaGraph {
             let alpha = if iter == 0 { 1.0 } else { config.alpha };
             eprintln!("[build] iter {}/{} alpha={}", iter + 1, config.max_iterations, alpha);
 
-            // 并行计算每个节点的新邻居（storage 只读，安全并行）
-            let new_neighbors: Vec<(u32, Vec<u32>)> = order
-                .par_iter()
-                .map(|&node_id| {
-                    let idx = progress.fetch_add(1, Ordering::Relaxed);
-                    if idx > 0 && idx % progress_interval == 0 {
-                        eprintln!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
-                    }
-                    // 标准 break greedy search，返回 (top-L, all_visited)
-                    // Vamana/DiskANN 论文：用 visited set 做 RobustPrune（不是 top-L）
-                    let (_top, visited) = Self::greedy_search(
-                        vectors, dim, &storage, entry_point, node_id, config.l_build,
-                    );
-                    let pruned = RobustPrune::prune(
-                        &visited, node_id, vectors, dim, alpha, config.r_max,
-                    );
-                    (node_id, pruned)
-                })
-                .collect();
+            for chunk in order.chunks(BUILD_BATCH_SIZE) {
+                // 批内并行：在当前图状态上搜索 + 剪枝
+                let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
+                    .par_iter()
+                    .map(|&node_id| {
+                        let idx = progress.fetch_add(1, Ordering::Relaxed);
+                        if idx > 0 && idx % progress_interval == 0 {
+                            eprintln!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
+                        }
+                        let (_top, visited) = Self::greedy_search(
+                            vectors, dim, &storage, entry_point, node_id, config.l_build,
+                        );
+                        let pruned = RobustPrune::prune(
+                            &visited, node_id, vectors, dim, alpha, config.r_max,
+                            config.saturate && alpha > 1.0,
+                        );
+                        (node_id, pruned)
+                    })
+                    .collect();
 
-            // 顺序写入邻接表（避免锁竞争）+ 真正的延迟剪枝
-            for (node_id, pruned) in new_neighbors {
-                Self::connect_bidirectional(
-                    &mut storage, node_id, &pruned, vectors, dim, config,
-                );
+                // 批间顺序写入：更新图，下一批搜索受益
+                for (node_id, pruned) in new_neighbors {
+                    Self::connect_bidirectional(
+                        &mut storage, node_id, &pruned, vectors, dim, alpha, config,
+                    );
+                }
             }
         }
 
         // 3. 全局 final prune 到 R_max（用 RobustPrune，不是 truncate）
-        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max);
+        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate);
 
         VamanaGraph { storage, entry_point, dim, n }
     }
@@ -167,6 +183,8 @@ impl VamanaGraph {
         eprintln!("[build_qa] init_random_graph done, entry=medoid[{}]", entry_point);
 
         // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
+        // v6.6: 小批量顺序处理（同 build 方法）
+        const BUILD_BATCH_SIZE: usize = 10_000;
         for iter in 0..config.max_iterations {
             let order = Self::permutation(n, rng);
             let alpha = if iter == 0 { 1.0 } else { config.alpha };
@@ -174,44 +192,42 @@ impl VamanaGraph {
             let progress_interval = (n / 20).max(1);
             eprintln!("[build_qa] iter {}/{} alpha={} beta={}", iter + 1, config.max_iterations, alpha, qa_config.beta);
 
-            // 并行计算每个节点的新邻居（storage 只读，安全并行）
-            let new_neighbors: Vec<(u32, Vec<u32>)> = order
-                .par_iter()
-                .map(|&node_id| {
-                    let idx = progress.fetch_add(1, Ordering::Relaxed);
-                    if idx > 0 && idx % progress_interval == 0 {
-                        eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
-                    }
-                    let (_top, visited) = Self::greedy_search(
-                        vectors, dim, &storage, entry_point, node_id, config.l_build,
-                    );
-                    // 量化感知剪枝（β > 0 时考虑量化误差），用 visited set
-                    // two-pass: iter 0 用 α=1.0，iter 1 用 config.alpha
-                    let iter_qa_config = QuantAwarePruneConfig {
-                        alpha,
-                        ..*qa_config
-                    };
-                    let pruned = QuantAwareRobustPrune::prune(
-                        &visited,
-                        node_id,
-                        vectors,
-                        dim,
-                        &error_fn,
-                        &iter_qa_config,
-                    );
-                    (node_id, pruned)
-                })
-                .collect();
+            for chunk in order.chunks(BUILD_BATCH_SIZE) {
+                let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
+                    .par_iter()
+                    .map(|&node_id| {
+                        let idx = progress.fetch_add(1, Ordering::Relaxed);
+                        if idx > 0 && idx % progress_interval == 0 {
+                            eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
+                        }
+                        let (_top, visited) = Self::greedy_search(
+                            vectors, dim, &storage, entry_point, node_id, config.l_build,
+                        );
+                        let iter_qa_config = QuantAwarePruneConfig {
+                            alpha,
+                            ..*qa_config
+                        };
+                        let pruned = QuantAwareRobustPrune::prune(
+                            &visited,
+                            node_id,
+                            vectors,
+                            dim,
+                            &error_fn,
+                            &iter_qa_config,
+                        );
+                        (node_id, pruned)
+                    })
+                    .collect();
 
-            // 顺序写入邻接表（避免锁竞争）+ 真正的延迟剪枝
-            for (node_id, pruned) in new_neighbors {
-                Self::connect_bidirectional(
-                    &mut storage, node_id, &pruned, vectors, dim, config,
-                );
+                for (node_id, pruned) in new_neighbors {
+                    Self::connect_bidirectional(
+                        &mut storage, node_id, &pruned, vectors, dim, alpha, config,
+                    );
+                }
             }
         }
 
-        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max);
+        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate);
         VamanaGraph { storage, entry_point, dim, n }
     }
 
@@ -229,10 +245,10 @@ impl VamanaGraph {
         }
         let entry = rng.gen_range(0..n as u32);
 
-        // 随机连接每个节点到若干邻居（回退 OPT-6，恢复 dc814c8 HashSet 采样）
-        // Fisher-Yates partial_shuffle 虽然微基准快 2.11x，但导致图质量严重下降（recall 0.33→0.95）
-        // 原因：partial_shuffle 改变 indices 数组顺序，循环间状态污染采样分布
-        // BUG FIX: neighbor_count 不能超过 n-1，否则 while 循环死循环
+        // 随机连接每个节点到若干邻居，加双向边（Vamana/DiskANN 要求无向初始图）
+        // BUG FIX (v6.4): 原实现只加前向边不加反向边，导致初始图是有向的。
+        // 第一轮 greedy_search 只能沿前向边导航，访问集质量极差，
+        // RobustPrune 在噪声上剪枝 → 图导航效率崩塌（avg_visited=1400，glass 的 10x）。
         let neighbor_count = config.r_max.min(n.saturating_sub(1));
         for node in 0..n as u32 {
             let mut seen = std::collections::HashSet::with_capacity(neighbor_count);
@@ -246,6 +262,7 @@ impl VamanaGraph {
             }
             for &j in &neighbors {
                 storage.add_edge(node, j);
+                storage.add_edge(j, node); // 反向边：无向图
             }
         }
         entry
@@ -352,6 +369,25 @@ impl VamanaGraph {
     ///
     /// 返回 (top-L 结果, 所有 visited 节点)
     /// 查询时用 top-L，建图时用 visited（Vamana 论文要求）
+    ///
+    /// v7.1 核心修复：建图搜索从无界 BinaryHeap 改为 LinearPool。
+    ///
+    /// 根因分析（avg_visited=2445 的真正根因）：
+    /// 查询侧 LinearPool 已正确限制搜索宽度，但 avg_visited 仍高 →
+    /// 问题在图质量本身。图质量由建图搜索决定：
+    ///
+    /// 原实现用无界 BinaryHeap，候选堆可膨胀到数千元素：
+    /// - 建图搜索沿中距离候选发散，visited 集充斥远距离噪声节点
+    /// - RobustPrune 在噪声候选集上剪枝 → 边选择质量差
+    /// - 图邻居无局部重叠 → 查询时每次扩展引入大量新访问
+    /// - ef=50, degree=64 → 50×49=2450 ≈ avg_visited=2445
+    ///
+    /// LinearPool 修复（对齐 DiskANN：build 和 query 用同一个固定容量搜索器）：
+    /// - 候选池固定容量 = l_build，满时拒绝远候选
+    /// - 搜索聚焦局部邻域，visited 集干净无噪声
+    /// - RobustPrune 获得高质量候选集 → 更好的边 → 更好的图
+    /// - VisitedTracker 仍记录所有距离计算过的节点（含被 pool 拒绝的），
+    ///   保证 Vamana 论文要求的完整 visited set
     pub fn greedy_search_vec(
         vectors: &[f32],
         dim: usize,
@@ -362,59 +398,64 @@ impl VamanaGraph {
     ) -> (Vec<u32>, Vec<u32>) {
         let n = vectors.len() / dim;
         let mut visited = VisitedTracker::new(n, l);
+        let mut pool = LinearPool::new(l);
 
-        // 候选集：最小堆（距离小的优先）
-        use std::cmp::Reverse;
-        let mut candidates: BinaryHeap<Reverse<(OrderedF32, u32)>> = BinaryHeap::new();
-        // 结果集：最大堆（距离大的在堆顶，便于淘汰）
-        let mut results: BinaryHeap<(OrderedF32, u32)> = BinaryHeap::new();
-
+        // 插入入口节点
         let entry_dist = l2_simd(
             query,
             &vectors[entry_point as usize * dim..(entry_point as usize + 1) * dim],
         );
-        candidates.push(Reverse((OrderedF32(entry_dist), entry_point)));
         visited.visit(entry_point);
+        pool.insert(entry_point, entry_dist);
 
-        while let Some(Reverse((dist, node))) = candidates.pop() {
-            // 标准终止条件：结果集已满 l，且候选最小距离 > 结果集最差距离
-            if results.len() >= l {
-                if let Some(&(worst, _)) = results.peek() {
-                    if dist.0 > worst.0 {
-                        break;
-                    }
-                }
-            }
-
-            results.push((dist, node));
-            if results.len() > l {
-                results.pop();
-            }
-
+        // 主循环：弹出最近未扩展候选，扩展其邻居
+        while let Some((node, _dist)) = pool.pop() {
             for &neighbor in storage.neighbors(node) {
                 if visited.visit(neighbor) {
                     let d = l2_simd(
                         query,
-                        &vectors[neighbor as usize * dim..(neighbor as usize + 1) * dim],
+                        &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim],
                     );
-                    candidates.push(Reverse((OrderedF32(d), neighbor)));
+                    // LinearPool 满时自动拒绝远候选，
+                    // 但 visited 已记录该节点（距离已计算）
+                    pool.insert(neighbor, d);
                 }
             }
         }
 
-        let top_results: Vec<u32> = results.into_iter().map(|(_, id)| id).collect();
+        // top_results: pool 中所有元素（按距离升序）
+        let top_results: Vec<u32> = pool
+            .to_sorted_vec()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        // all_visited: VisitedTracker 记录的所有距离计算过的节点
         let all_visited: Vec<u32> = visited.visited_nodes().to_vec();
         (top_results, all_visited)
     }
 
-    /// 贪心搜索（复用 VisitedTracker，零分配热路径）
+    /// 贪心搜索（复用 VisitedTracker + LinearPool，零分配热路径）
     ///
-    /// 此方法复用外部传入的 VisitedTracker，避免每次搜索分配 1MB visited 数组
-    /// 适用于查询热路径（GraphSearcher::search）
+    /// v7.0 核心重写：用 LinearPool（固定容量排序数组）替换无界 BinaryHeap。
     ///
-    /// 返回 (节点ID, 距离) 对，调用方无需重算距离（SIFT1M 实测 +20% QPS）
-    /// OPT-2: 预取策略改为方案 B（预取堆顶节点的邻居列表）
-    /// 实测比方案 A（循环内预取 next_vec）快 28%，因为循环内预取指令开销超过收益
+    /// 根因分析（avg_visited=2444 的原因）：
+    /// 原实现用两个独立堆——无界候选堆 + 有界结果堆。
+    /// 当结果堆未满时（搜索早期），所有首次访问的邻居都进入候选堆，
+    /// 候选堆可膨胀到数千元素。搜索沿中距离候选发散，
+    /// 每弹出一个候选就扩展 64 个邻居 → visited 指数增长。
+    ///
+    /// 三个顶级引擎的解法：
+    /// - Glass: LinearPool（固定容量 = ef，满时拒绝远候选）
+    /// - DiskANN: NeighborPriorityQueue（固定容量 = search_l）
+    /// - NGT: 无界 priority_queue + exploration_radius 终止（不同范式）
+    ///
+    /// LinearPool 方案（融合 Glass + DiskANN 精华）：
+    /// - 候选集与结果集合并为单一排序数组
+    /// - 固定容量 = ef：满时直接拒绝 ≥ worst 的候选
+    /// - 游标弹出：标记已扩展元素，推进游标
+    /// - 终止条件：游标 ≥ ef（已扩展 ef 个最近候选）
+    ///
+    /// 效果预期：avg_visited 从 2444 降到 100-400（与 Glass/DiskANN 同级）
     pub fn greedy_search_vec_reuse(
         vectors: &[f32],
         dim: usize,
@@ -424,55 +465,41 @@ impl VamanaGraph {
         l: usize,
         visited: &mut VisitedTracker,
     ) -> Vec<(u32, f32)> {
-        // 复用 visited：reset 是 O(V) 而非 O(N)
         visited.reset();
 
-        // 候选集：最小堆
-        use std::cmp::Reverse;
-        let mut candidates: BinaryHeap<Reverse<(OrderedF32, u32)>> = BinaryHeap::with_capacity(l * 2);
-        // 结果集：最大堆
-        let mut results: BinaryHeap<(OrderedF32, u32)> = BinaryHeap::with_capacity(l + 1);
+        let mut pool = LinearPool::new(l);
 
+        // 插入入口节点
         let entry_dist = l2_simd(
             query,
             &vectors[entry_point as usize * dim..(entry_point as usize + 1) * dim],
         );
-        candidates.push(Reverse((OrderedF32(entry_dist), entry_point)));
         visited.visit(entry_point);
+        pool.insert(entry_point, entry_dist);
 
-        while let Some(Reverse((dist, node))) = candidates.pop() {
-            if results.len() >= l {
-                if let Some(&(worst, _)) = results.peek() {
-                    if dist.0 > worst.0 {
-                        break;
-                    }
-                }
-            }
-
-            results.push((dist, node));
-            if results.len() > l {
-                results.pop();
-            }
-
-            // OPT-2 方案 B：预取堆顶节点的邻居列表
-            // 下一步 pop 的节点需要访问其邻居列表，预取可隐藏 cache miss
-            if let Some(&Reverse((_, top_node))) = candidates.peek() {
-                storage.prefetch_neighbors(top_node);
-            }
-
+        // 主循环：弹出最近未扩展候选，扩展其邻居
+        while let Some((node, _dist)) = pool.pop() {
             let neighbors = storage.neighbors(node);
+
+            // 预取下一个要弹出的节点的邻居列表
+            if let Some((next_node, _)) = pool.peek_unchecked() {
+                storage.prefetch_neighbors(next_node);
+            }
+
             for &neighbor in neighbors {
                 if visited.visit(neighbor) {
                     let d = l2_simd(
                         query,
                         &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim],
                     );
-                    candidates.push(Reverse((OrderedF32(d), neighbor)));
+                    // LinearPool 内部处理容量限制：
+                    // 池满时自动拒绝 d >= worst 的候选
+                    pool.insert(neighbor, d);
                 }
             }
         }
 
-        results.into_iter().map(|(dist, id)| (id, dist.0)).collect()
+        pool.to_sorted_vec()
     }
 
     /// 贪心搜索（探索模式，建图期第一轮用）
@@ -555,27 +582,39 @@ impl VamanaGraph {
 
     /// 双向连接 + 度数控制
     ///
-    /// Vamana 论文：加反向边后，如果邻居度数超过 R_soft，立即对该邻居做 RobustPrune
-    /// 之前是空实现（注释说"final prune 统一处理"），导致 overflow 膨胀 + final_prune
-    /// 用 truncate 截断，破坏 RobustPrune 性质
+    /// Vamana 论文 Algorithm 1:
+    ///   SetOutNeighbors(p, N)       ← 替换，不是追加
+    ///   for n in N:
+    ///     AddOutNeighbor(n, p)      ← 加反向边
+    ///     if |OutN(n)| > R:
+    ///       RobustPrune(n, α_t, R)  ← 用迭代特定 α_t
+    ///
+    /// BUG FIX (v6.4): 原实现用 add_edge 追加边，不清除旧边。
+    /// 导致随机初始化边 + 各轮迭代边全部累积，final_prune 在噪声候选集上剪枝，
+    /// 图导航结构被破坏，avg_visited 飙升到 1,443（glass 的 ~10 倍）。
     fn connect_bidirectional(
         storage: &mut HybridBlockedCsr,
         node: u32,
         neighbors: &[u32],
         vectors: &[f32],
         dim: usize,
+        alpha: f32,
         config: &VamanaBuildConfig,
     ) {
+        // 替换：清除旧边，设置剪枝后的新邻居（Vamana: SetOutNeighbors）
+        storage.set_neighbors(node, neighbors);
+
+        // 加反向边 + 延迟剪枝（Vamana: AddOutNeighbor + RobustPrune）
         for &nb in neighbors {
-            storage.add_edge(node, nb);
             storage.add_edge(nb, node);
-            // 反向边：如果 nb 的度数超过 R_soft，对 nb 做 RobustPrune
+            // 反向边：如果 nb 的度数超过 R_soft，用迭代特定 α 做 RobustPrune
             if storage.degree(nb) > config.r_soft {
                 let (main, overflow) = storage.neighbors_full(nb);
                 let mut all: Vec<u32> = main.to_vec();
                 all.extend_from_slice(overflow);
                 let pruned = RobustPrune::prune(
-                    &all, nb, vectors, dim, config.alpha, config.r_max,
+                    &all, nb, vectors, dim, alpha, config.r_max,
+                    config.saturate && alpha > 1.0,
                 );
                 storage.set_neighbors(nb, &pruned);
             }
@@ -591,6 +630,7 @@ impl VamanaGraph {
         dim: usize,
         alpha: f32,
         r_max: usize,
+        saturate: bool,
     ) {
         for node in 0..storage.len() as u32 {
             let (main, overflow) = storage.neighbors_full(node);
@@ -599,7 +639,7 @@ impl VamanaGraph {
             }
             let mut all: Vec<u32> = main.to_vec();
             all.extend_from_slice(overflow);
-            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, r_max);
+            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, r_max, saturate);
             storage.set_neighbors(node, &pruned);
         }
     }
@@ -872,6 +912,7 @@ impl Ord for OrderedF32 {
 /// 引入 RobustPrune（避免循环引用，模块内使用）
 use super::robust_prune::RobustPrune;
 use super::quant_aware_prune::{QuantAwareRobustPrune, QuantAwarePruneConfig};
+use super::linear_pool::LinearPool;
 
 #[cfg(test)]
 mod tests {
@@ -884,13 +925,14 @@ mod tests {
         let vectors: Vec<f32> = (0..40).map(|i| i as f32).collect();
         let dim = 4;
         let mut rng = ChaCha8Rng::seed_from(42);
-        let config = VamanaBuildConfig {
-            alpha: 1.0,
-            l_build: 10,
-            r_max: 4,
-            r_soft: 6,
-            max_iterations: 1,
-        };
+let config = VamanaBuildConfig {
+alpha: 1.0,
+l_build: 10,
+r_max: 4,
+r_soft: 6,
+max_iterations: 1,
+saturate: true,
+};
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         assert_eq!(graph.len(), 10);
         assert_eq!(graph.dim(), 4);
@@ -901,13 +943,14 @@ mod tests {
         let vectors: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let dim = 10;
         let mut rng = ChaCha8Rng::seed_from(42);
-        let config = VamanaBuildConfig {
-            alpha: 1.0,
-            l_build: 20,
-            r_max: 8,
-            r_soft: 12,
-            max_iterations: 1,
-        };
+let config = VamanaBuildConfig {
+alpha: 1.0,
+l_build: 20,
+r_max: 8,
+r_soft: 12,
+max_iterations: 1,
+saturate: true,
+};
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         let mut searcher = GraphSearcher::new(&vectors, &graph, 20);
         let query = vectors[0..dim].to_vec();
@@ -935,13 +978,14 @@ mod tests {
         let vectors: Vec<f32> = (0..200).map(|i| i as f32).collect();
         let dim = 10;
         let mut rng = ChaCha8Rng::seed_from(42);
-        let config = VamanaBuildConfig {
-            alpha: 1.2,
-            l_build: 20,
-            r_max: 8,
-            r_soft: 12,
-            max_iterations: 1,
-        };
+let config = VamanaBuildConfig {
+alpha: 1.2,
+l_build: 20,
+r_max: 8,
+r_soft: 12,
+max_iterations: 1,
+saturate: true,
+};
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
 
         // 序列化到字节
@@ -969,13 +1013,14 @@ mod tests {
         let vectors: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let dim = 5;
         let mut rng = ChaCha8Rng::seed_from(42);
-        let config = VamanaBuildConfig {
-            alpha: 1.0,
-            l_build: 10,
-            r_max: 4,
-            r_soft: 6,
-            max_iterations: 1,
-        };
+let config = VamanaBuildConfig {
+alpha: 1.0,
+l_build: 10,
+r_max: 4,
+r_soft: 6,
+max_iterations: 1,
+saturate: true,
+};
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
 
         let tmp = std::env::temp_dir().join("raven_serialize_test.bin");

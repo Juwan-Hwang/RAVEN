@@ -13,6 +13,7 @@ pub mod rp_tuning;
 pub mod quant_aware_prune;
 pub mod ablation;
 pub mod navigation;
+pub mod linear_pool;
 
 pub use vamana::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
 pub use robust_prune::{RobustPrune, RobustPruneConfig};
@@ -20,3 +21,4 @@ pub use rp_tuning::{RPTuning, RPTuningConfig, AlphaVariant};
 pub use quant_aware_prune::{QuantAwareRobustPrune, QuantAwarePruneConfig, NormalizationScheme};
 pub use ablation::{AblationFramework, AblationMetrics, EdgeLengthHistogram};
 pub use navigation::{NavigationLayer, NavigationConfig};
+pub use linear_pool::LinearPool;

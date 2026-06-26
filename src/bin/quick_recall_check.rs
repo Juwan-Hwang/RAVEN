@@ -175,12 +175,39 @@ fn build_and_scan(
         r_max,
         r_soft,
         max_iterations,
+        saturate: true,
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();
     println!("建图: {:.1}s", build_time);
 
+    // 度数分布诊断
+    let stats = graph.degree_stats();
+    println!(
+        "[degree] mean={:.1} p95={} p99={} max={} isolated={} overflow={:.4}% overflow_count={}",
+        stats.mean_degree, stats.p95_degree, stats.p99_degree,
+        stats.max_degree, stats.isolated_nodes, stats.overflow_ratio, stats.overflow_count
+    );
+    // 采样前 10 个节点的度数
+    let mut sample_degrees = Vec::new();
+    for i in 0..10.min(graph.len()) {
+        sample_degrees.push(graph.neighbors(i as u32).len());
+    }
+    println!("[degree] sample[0..10]: {:?}", sample_degrees);
+
     run_scan(name, train, dim, &graph, test, nq, gt, gt_k, 10)
+}
+
+/// 版本横幅：编译时注入，运行时打印
+fn print_banner() {
+    let pkg_ver = env!("CARGO_PKG_VERSION");
+    let git_hash = env!("RAVEN_GIT_HASH");
+    let build_ts = env!("RAVEN_BUILD_TS");
+    // 多行横幅，终端中一眼可见
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║  RAVEN v{}  git:{}  build:{}  ║",
+             pkg_ver, git_hash, build_ts);
+    println!("╚══════════════════════════════════════════════════════════╝");
 }
 
 fn main() {
@@ -190,6 +217,7 @@ fn main() {
     let run_glass = args.is_empty()
         || args.iter().any(|a| a == "glass" || a == "all");
 
+    print_banner();
     println!("=== RAVEN SIFT1M recall + avg_visited 扫描 ===");
     println!("ef_search 列表: {:?}", EF_SEARCH_LIST);
 

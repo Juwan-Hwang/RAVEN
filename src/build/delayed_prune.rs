@@ -73,7 +73,7 @@ impl DelayedPruneController {
             let mut all: Vec<u32> = main.to_vec();
             all.extend_from_slice(overflow);
             // 用 RobustPrune 替代 truncate（设计文档硬约束）
-            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, self.r_max);
+            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, self.r_max, alpha > 1.0);
             storage.set_neighbors(node, &pruned);
         }
     }
