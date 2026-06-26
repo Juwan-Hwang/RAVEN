@@ -96,6 +96,36 @@
 > 公开 HNSW/Vamana 实现在 SIFT1M recall@10=0.95 时的 avg_visited 通常在 100-300 次。
 > 如果 RAVEN 的 avg_visited 显著偏高（如 >500），说明图本身的导航效率有问题，Phase 1 的 ADC 加速救不了。
 
+---
+
+### 唯一标准构建配置（Canonical Build Config）
+
+> **v6.2 新增（2026-06-26）**
+>
+> **问题**：审计发现项目存在三张参数不同的图——打榜旗舰图（200/64/max_iter=1）、干净基线图（100/32/max_iter=2）、待测 avg_visited 图（100/32/max_iter=2）。5.6x 差距是拿 100/32/2 的小图基线去比 glass，却拿 200/64/1 的旗舰图去打榜，口径错位。旗舰图堆了大参数（l_build=200/r_max=64）却因 `max_iterations=1` 漏了 Vamana 第二遍长程边，是「用料足但没建完」的图。
+>
+> **裁决**：在此钉死唯一标准构建配置，此后所有基线、avg_visited 测量、Phase 1/3.3 评估**必须**在这张图上进行。
+
+| 配置名 | α | l_build | r_max | r_soft | max_iterations | ef_search | 用途 |
+|:--|:--|:--|:--|:--|:--|:--|:--|
+| **CANONICAL** | 1.2 | 200 | 64 | 96 | **2** | 100 | **唯一标准图**：基线、avg_visited、打榜全部基于此 |
+| **GLASS-COMP** | 1.2 | 200 | **32** | 48 | 2 | 100 | 同度数对照：与 glass R=32 做 apples-to-apples 对比 |
+
+> - **CANONICAL** = 旗舰参数（l_build=200, r_max=64）+ max_iter=2（建完整两遍）。这是最终提交到 ann-benchmarks 的路径，基线必须长得和打榜图一样。
+> - **GLASS-COMP** = 同 l_build、同 max_iter，仅 r_max=32。glass 榜首用 R=32 做到 recall=0.9941/QPS=19,801，RAVEN 需在同度数下对比 avg_visited 才能暴露图质量差距。大参数能靠堆出度硬撑 recall，但 glass 用小出度就又快又准——这才是图质量高低的真正标尺。
+> - **旧的 2,706 QPS 基线（100/32/2）作废**。它既不是打榜图也不是新标准图，留着只会继续制造「和谁比」的混乱。
+
+**实施顺序（锁死，不得跳步）**：
+
+1. 修复 `VamanaBuildConfig::default()` 的 `max_iterations: 1` 地雷（纯 bug，独立 commit）
+2. 给 `GraphSearcher` 添加 `avg_visited` 插桩（纯增量，不改行为）
+3. 将 `quick_recall_check.rs` 改为 CANONICAL 配置，同时支持 `--r-max 32` 切换到 GLASS-COMP
+4. 在两张图上分别测量 avg_visited + QPS + recall
+5. 修复 `raven_ann_bench.rs` 硬编码 `max_iterations=1` + `__init__.py` wrapper S1
+6. 将结果记入本文档，按 §〇.2 Pivot Criterion 裁决
+
+---
+
 **额外修复（FIX-0）**：`init_random_graph` 死循环 bug
 - **问题**：`neighbor_count = config.r_max`（默认 64），当 n < r_max+1 时死循环。
 - **修复**：`let neighbor_count = config.r_max.min(n.saturating_sub(1));`
@@ -120,10 +150,12 @@
 
 | 工作点 | recall@10 | QPS | 路径 | 备注 |
 |:--|:--|:--|:--|:--|
-| α=1.2, r_max=32, ef=100 | **0.9517** | **2,706** | f32 全精度 | **干净基线（2026-06-26 实测）** |
+| α=1.2, r_max=32, ef=100 | **0.9517** | **2,706** | f32 全精度 | ~~干净基线~~ **已作废**：非 CANONICAL 配置，见 §Canonical Build Config |
 | α=1.2, r_max=64, ef=100 | 0.9961 | 2,434 | f32 全精度 | 旧值，需干净重测 |
 | α=1.0, r_max=64, ef=50 | 0.9275 | 7,611 | f32 全精度 | 旧值，需干净重测 |
 | α=1.2, ef=100, ADC+rerank | 0.9676 | 2,025 | AVQ 量化 | 旧值，需干净重测 |
+| **CANONICAL (200/64/2)** | **待测** | **待测** | f32 全精度 | **新标准基线**：取代 2,706 |
+| **GLASS-COMP (200/32/2)** | **待测** | **待测** | f32 全精度 | 同度数对照 glass R=32 |
 
 ### 1.2 竞争目标：ann-benchmarks 真实 Pareto 前沿（✅ 已填入）
 
