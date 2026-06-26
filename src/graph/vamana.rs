@@ -114,8 +114,9 @@ impl VamanaGraph {
 
             for chunk in order.chunks(BUILD_BATCH_SIZE) {
                 // 批内并行：在当前图状态上搜索 + 剪枝
-                // v7: map_init 复用 VisitedTracker，每线程零分配
-                // 消除 2M 次 × 1MB = 2TB 分配流量，建图 609.8s → ~400s
+                // map_init 复用 VisitedTracker：visited.reset() 只清 history（~1400 entries），
+                // 避免 vec![0u8; 1M] 的 1MB memset（2M 次 × 1MB = 2TB memset 流量）
+                // 用 greedy_search_vec_build（简单单循环），不用 Two-Pass Prefetch（建图场景纯开销）
                 let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
                     .par_iter()
                     .map_init(
@@ -126,7 +127,7 @@ impl VamanaGraph {
                                 eprintln!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
                             }
                             let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
-                            let _candidates = Self::greedy_search_vec_reuse(
+                            let _candidates = Self::greedy_search_vec_build(
                                 vectors, dim, &storage, entry_point, query, config.l_build,
                                 visited,
                             );
@@ -210,7 +211,7 @@ impl VamanaGraph {
                                 eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
                             }
                             let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
-                            let _candidates = Self::greedy_search_vec_reuse(
+                            let _candidates = Self::greedy_search_vec_build(
                                 vectors, dim, &storage, entry_point, query, config.l_build,
                                 visited,
                             );
@@ -446,7 +447,52 @@ impl VamanaGraph {
         (top_results, all_visited)
     }
 
-    /// 贪心搜索（复用 VisitedTracker + LinearPool，零分配热路径）
+    /// 建图专用贪心搜索（简单单循环，无 prefetch 开销）
+    ///
+    /// 建图路径调用 2M 次，每次 ~1400 迭代。Two-Pass Prefetch 的 3 循环 +
+    /// _mm_prefetch 指令开销在建图场景下是纯浪费（建图访问模式与查询不同）。
+    /// 此函数保留 map_init 的 memset 优化（visited.reset() 只清 history），
+    /// 但用简单单循环代替 Two-Pass Prefetch。
+    pub fn greedy_search_vec_build(
+        vectors: &[f32],
+        dim: usize,
+        storage: &HybridBlockedCsr,
+        entry_point: u32,
+        query: &[f32],
+        l: usize,
+        visited: &mut VisitedTracker,
+    ) -> Vec<(u32, f32)> {
+        visited.reset();
+
+        let mut pool = LinearPool::new(l);
+
+        let entry_dist = l2_simd(
+            query,
+            &vectors[entry_point as usize * dim..(entry_point as usize + 1) * dim],
+        );
+        visited.visit(entry_point);
+        pool.insert(entry_point, entry_dist);
+
+        while let Some((node, _dist)) = pool.pop() {
+            if let Some((next_node, _)) = pool.peek_unchecked() {
+                storage.prefetch_neighbors(next_node);
+            }
+
+            for &neighbor in storage.neighbors(node) {
+                if visited.visit(neighbor) {
+                    let d = l2_simd(
+                        query,
+                        &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim],
+                    );
+                    pool.insert(neighbor, d);
+                }
+            }
+        }
+
+        pool.to_sorted_vec()
+    }
+
+    /// 查询专用贪心搜索（复用 VisitedTracker + LinearPool + Two-Pass Prefetch）
     ///
     /// v8.0 核心优化：Two-Pass Prefetch + Multi-line Graph Prefetch
     ///
