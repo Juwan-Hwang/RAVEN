@@ -44,7 +44,9 @@ impl Default for VamanaBuildConfig {
             l_build: 200,
             r_max,
             r_soft: (r_max as f32 * 1.5) as usize, // 设计文档：1.5 × R_max
-            max_iterations: 1,
+            // Vamana 论文要求 two passes：第一轮 α=1.0（连通性），第二轮 α=config（长程边）
+            // max_iterations=1 只跑连通性轮，图质量显著下降（recall 0.33→0.95 的差距来源之一）
+            max_iterations: 2,
         }
     }
 }
