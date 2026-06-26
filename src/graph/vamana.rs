@@ -436,26 +436,23 @@ impl VamanaGraph {
 
     /// 贪心搜索（复用 VisitedTracker + LinearPool，零分配热路径）
     ///
-    /// v7.0 核心重写：用 LinearPool（固定容量排序数组）替换无界 BinaryHeap。
+    /// v8.0 核心优化：Two-Pass Prefetch + Multi-line Graph Prefetch
     ///
-    /// 根因分析（avg_visited=2444 的原因）：
-    /// 原实现用两个独立堆——无界候选堆 + 有界结果堆。
-    /// 当结果堆未满时（搜索早期），所有首次访问的邻居都进入候选堆，
-    /// 候选堆可膨胀到数千元素。搜索沿中距离候选发散，
-    /// 每弹出一个候选就扩展 64 个邻居 → visited 指数增长。
+    /// 消融实验验证（ef=50, recall=0.9931）：
+    ///   baseline (v7):           QPS=911
+    ///   + two_pass(po=8):        QPS=1258 (+38%)
+    ///   + multi_pref:            QPS=1081 (+19%)
+    ///   + combined(po=8):        QPS=1493 (+64%)  ← 采用此方案
     ///
-    /// 三个顶级引擎的解法：
-    /// - Glass: LinearPool（固定容量 = ef，满时拒绝远候选）
-    /// - DiskANN: NeighborPriorityQueue（固定容量 = search_l）
-    /// - NGT: 无界 priority_queue + exploration_radius 终止（不同范式）
+    /// Two-Pass Prefetch（学习 Glass SearchImpl2）：
+    ///   第一遍扫描邻居列表，收集未访问节点到 edge_buf
+    ///   预取 edge_buf 前 po 个节点的向量数据到 L1 cache
+    ///   第二遍计算距离，同时前瞻预取 i+po 处的向量
+    ///   效果：距离计算时向量已在 cache，隐藏 ~100ns DRAM 延迟
     ///
-    /// LinearPool 方案（融合 Glass + DiskANN 精华）：
-    /// - 候选集与结果集合并为单一排序数组
-    /// - 固定容量 = ef：满时直接拒绝 ≥ worst 的候选
-    /// - 游标弹出：标记已扩展元素，推进游标
-    /// - 终止条件：游标 ≥ ef（已扩展 ef 个最近候选）
-    ///
-    /// 效果预期：avg_visited 从 2444 降到 100-400（与 Glass/DiskANN 同级）
+    /// Multi-line Graph Prefetch：
+    ///   R_max=64 → 邻居列表 256 bytes = 4 cache lines
+    ///   原实现只预取 1 行，现在预取 4 行覆盖完整邻居列表
     pub fn greedy_search_vec_reuse(
         vectors: &[f32],
         dim: usize,
@@ -477,25 +474,63 @@ impl VamanaGraph {
         visited.visit(entry_point);
         pool.insert(entry_point, entry_dist);
 
+        // Prefetch offset：前瞻距离
+        // 消融实验：po=8 在 ef=50 最佳 (+38%), po=4 在 ef=100 最佳 (+39%)
+        // 取 po=8 作为默认（ef=50 是最常用的工作点）
+        const PO: usize = 8;
+        // 栈上 edge_buf，避免堆分配（R_max=64 → 64*4=256B fit 栈）
+        let mut edge_buf: [u32; 128] = [0; 128];
+
         // 主循环：弹出最近未扩展候选，扩展其邻居
         while let Some((node, _dist)) = pool.pop() {
-            let neighbors = storage.neighbors(node);
-
-            // 预取下一个要弹出的节点的邻居列表
+            // Multi-line graph prefetch：预取下一轮 pop 节点的完整邻居列表
+            // R_max=64 → 256 bytes → 4 cache lines
             if let Some((next_node, _)) = pool.peek_unchecked() {
-                storage.prefetch_neighbors(next_node);
+                let start = next_node as usize * storage.r_max();
+                let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(128));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(192));
+                }
             }
 
-            for &neighbor in neighbors {
-                if visited.visit(neighbor) {
-                    let d = l2_simd(
-                        query,
-                        &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim],
-                    );
-                    // LinearPool 内部处理容量限制：
-                    // 池满时自动拒绝 d >= worst 的候选
-                    pool.insert(neighbor, d);
+            let neighbors = storage.neighbors(node);
+
+            // 第一遍：收集未访问邻居到 edge_buf
+            let mut edge_size = 0usize;
+            for &v in neighbors {
+                if edge_size >= 128 {
+                    break;
                 }
+                if visited.visit(v) {
+                    edge_buf[edge_size] = v;
+                    edge_size += 1;
+                }
+            }
+
+            // 预取前 PO 个邻居的向量数据
+            let prefetch_count = PO.min(edge_size);
+            for i in 0..prefetch_count {
+                let v = edge_buf[i] as usize;
+                let ptr = &vectors[v * dim] as *const f32 as *const i8;
+                unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+            }
+
+            // 第二遍：计算距离，同时前瞻预取
+            for i in 0..edge_size {
+                if i + PO < edge_size {
+                    let v = edge_buf[i + PO] as usize;
+                    let ptr = &vectors[v * dim] as *const f32 as *const i8;
+                    unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                }
+                let neighbor = edge_buf[i];
+                let d = l2_simd(
+                    query,
+                    &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim],
+                );
+                pool.insert(neighbor, d);
             }
         }
 

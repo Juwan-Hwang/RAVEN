@@ -1,6 +1,6 @@
 [package]
 name = "raven"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "Retrieval-Aware Vector Engine with Navigation - high-performance ANN search"
 license = "Apache-2.0"

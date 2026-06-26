@@ -32,7 +32,7 @@ impl VisitedTracker {
     pub fn new(n: usize, ef_search: usize) -> Self {
         Self {
             visited: vec![0u8; n],
-            history: Vec::with_capacity(ef_search * 64),
+            history: Vec::with_capacity(ef_search * 3),
         }
     }
 
@@ -150,9 +150,9 @@ mod tests {
     }
 
     #[test]
-    fn history_preallocated_by_ef_search_times_64() {
+    fn history_preallocated_by_ef_search_times_3() {
         let t = VisitedTracker::new(1000, 200);
-        assert_eq!(t.history_capacity(), 200 * 64);
+        assert_eq!(t.history_capacity(), 600);
     }
 
     #[test]
