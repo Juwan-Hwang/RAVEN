@@ -188,13 +188,14 @@ mod tests {
         let dim = 10;
         let mut bench = LocalBenchmark::new(vectors, dim);
         bench.generate_random_queries(10, 10);
-        let config = VamanaBuildConfig {
-            alpha: 1.0,
-            l_build: 50,
-            r_max: 8,
-            r_soft: 12,
-            max_iterations: 1,
-        };
+let config = VamanaBuildConfig {
+alpha: 1.0,
+l_build: 50,
+r_max: 8,
+r_soft: 12,
+max_iterations: 1,
+saturate: true,
+};
         let result = bench.run(&config, 50);
         assert!(result.recall_at_10 >= 0.0 && result.recall_at_10 <= 1.0);
         assert!(result.qps > 0.0);

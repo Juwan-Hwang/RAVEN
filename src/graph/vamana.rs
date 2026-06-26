@@ -114,22 +114,29 @@ impl VamanaGraph {
 
             for chunk in order.chunks(BUILD_BATCH_SIZE) {
                 // 批内并行：在当前图状态上搜索 + 剪枝
+                // v7: map_init 复用 VisitedTracker，每线程零分配
+                // 消除 2M 次 × 1MB = 2TB 分配流量，建图 609.8s → ~400s
                 let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
                     .par_iter()
-                    .map(|&node_id| {
-                        let idx = progress.fetch_add(1, Ordering::Relaxed);
-                        if idx > 0 && idx % progress_interval == 0 {
-                            eprintln!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
+                    .map_init(
+                        || VisitedTracker::new(n, config.l_build),
+                        |visited, &node_id| {
+                            let idx = progress.fetch_add(1, Ordering::Relaxed);
+                            if idx > 0 && idx % progress_interval == 0 {
+                                eprintln!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
+                            }
+                            let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
+                            let _candidates = Self::greedy_search_vec_reuse(
+                                vectors, dim, &storage, entry_point, query, config.l_build,
+                                visited,
+                            );
+                            let pruned = RobustPrune::prune(
+                                visited.visited_nodes(), node_id, vectors, dim, alpha, config.r_max,
+                                config.saturate && alpha > 1.0,
+                            );
+                            (node_id, pruned)
                         }
-                        let (_top, visited) = Self::greedy_search(
-                            vectors, dim, &storage, entry_point, node_id, config.l_build,
-                        );
-                        let pruned = RobustPrune::prune(
-                            &visited, node_id, vectors, dim, alpha, config.r_max,
-                            config.saturate && alpha > 1.0,
-                        );
-                        (node_id, pruned)
-                    })
+                    )
                     .collect();
 
                 // 批间顺序写入：更新图，下一批搜索受益
@@ -195,28 +202,33 @@ impl VamanaGraph {
             for chunk in order.chunks(BUILD_BATCH_SIZE) {
                 let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
                     .par_iter()
-                    .map(|&node_id| {
-                        let idx = progress.fetch_add(1, Ordering::Relaxed);
-                        if idx > 0 && idx % progress_interval == 0 {
-                            eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
+                    .map_init(
+                        || VisitedTracker::new(n, config.l_build),
+                        |visited, &node_id| {
+                            let idx = progress.fetch_add(1, Ordering::Relaxed);
+                            if idx > 0 && idx % progress_interval == 0 {
+                                eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
+                            }
+                            let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
+                            let _candidates = Self::greedy_search_vec_reuse(
+                                vectors, dim, &storage, entry_point, query, config.l_build,
+                                visited,
+                            );
+                            let iter_qa_config = QuantAwarePruneConfig {
+                                alpha,
+                                ..*qa_config
+                            };
+                            let pruned = QuantAwareRobustPrune::prune(
+                                visited.visited_nodes(),
+                                node_id,
+                                vectors,
+                                dim,
+                                &error_fn,
+                                &iter_qa_config,
+                            );
+                            (node_id, pruned)
                         }
-                        let (_top, visited) = Self::greedy_search(
-                            vectors, dim, &storage, entry_point, node_id, config.l_build,
-                        );
-                        let iter_qa_config = QuantAwarePruneConfig {
-                            alpha,
-                            ..*qa_config
-                        };
-                        let pruned = QuantAwareRobustPrune::prune(
-                            &visited,
-                            node_id,
-                            vectors,
-                            dim,
-                            &error_fn,
-                            &iter_qa_config,
-                        );
-                        (node_id, pruned)
-                    })
+                    )
                     .collect();
 
                 for (node_id, pruned) in new_neighbors {
