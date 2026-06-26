@@ -13,6 +13,7 @@
 use crate::distance::l2_simd;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
 use crate::build::ChaCha8Rng;
+use crate::build::{BuildConfig, BuildMetadata};
 use crate::graph::navigation::NavigationLayer;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -63,14 +64,17 @@ impl Default for VamanaBuildConfig {
 /// 设计文档第三层主线：Vamana/DiskANN 风格图索引
 /// 内部使用 HybridBlockedCsr 存储
 pub struct VamanaGraph {
-    /// 图存储
-    storage: HybridBlockedCsr,
-    /// 入口节点（随机层级导航起点）
-    entry_point: u32,
-    /// 向量维度
-    dim: usize,
-    /// 节点数
-    n: usize,
+/// 图存储
+storage: HybridBlockedCsr,
+/// 入口节点（随机层级导航起点）
+entry_point: u32,
+/// 向量维度
+dim: usize,
+/// 节点数
+n: usize,
+/// 构建元数据（设计文档 F.7：随索引文件落盘）
+/// `None` 表示从旧格式反序列化或由 `from_storage` 构造
+metadata: Option<BuildMetadata>,
 }
 
 impl VamanaGraph {
@@ -152,13 +156,17 @@ impl VamanaGraph {
         // 3. 全局 final prune 到 R_max（用 RobustPrune，不是 truncate）
         Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate);
 
-        VamanaGraph { storage, entry_point, dim, n }
+        // 创建构建元数据（设计文档 F.7）
+        let build_config = BuildConfig::default();
+        let metadata = BuildMetadata::from_config(&build_config, n, dim);
+
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata) }
     }
 
     /// 从已有存储构造（用于 RP-Tuning 生成变体）
     pub fn from_storage(storage: HybridBlockedCsr, entry_point: u32, dim: usize) -> Self {
         let n = storage.len();
-        Self { storage, entry_point, dim, n }
+        Self { storage, entry_point, dim, n, metadata: None }
     }
 
     /// 量化感知建图（Week 7：β/α 协同调参）
@@ -241,7 +249,10 @@ impl VamanaGraph {
         }
 
         Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate);
-        VamanaGraph { storage, entry_point, dim, n }
+
+        let build_config = BuildConfig::default();
+        let metadata = BuildMetadata::from_config(&build_config, n, dim);
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata) }
     }
 
     /// 初始化随机图
@@ -772,6 +783,11 @@ impl VamanaGraph {
         &mut self.storage
     }
 
+    /// 获取构建元数据（设计文档 F.7）
+    pub fn metadata(&self) -> Option<&BuildMetadata> {
+        self.metadata.as_ref()
+    }
+
     /// 度数统计
     pub fn degree_stats(&self) -> crate::memory::graph::DegreeStats {
         self.storage.log_degree_distribution()
@@ -785,23 +801,53 @@ impl VamanaGraph {
 ///   [16..24) n: u64
 ///   [24..32) dim: u64
 ///   [32..36) entry_point: u32
-///   [36..)    HybridBlockedCsr body（见 src/memory/graph.rs）
+///   flags=0（旧格式）:
+///     [36..)    HybridBlockedCsr body
+///   flags=FLAG_HAS_METADATA（新格式）:
+///     [36..40)  metadata_len: u32
+///     [40..40+metadata_len) metadata TOML
+///     [40+metadata_len..) HybridBlockedCsr body
 impl crate::memory::serialize::Serializable for VamanaGraph {
     fn serialize(&self) -> Vec<u8> {
-        use crate::memory::serialize::{IndexHeader, crc32};
+        use crate::memory::serialize::{IndexHeader, crc32, FLAG_HAS_METADATA};
+
+        // 序列化 metadata TOML（如果有）
+        let metadata_bytes: Vec<u8> = match &self.metadata {
+            Some(m) => m.to_toml().unwrap_or_default().into_bytes(),
+            None => Vec::new(),
+        };
 
         // 序列化文件体
-        let mut body: Vec<u8> = Vec::with_capacity(20 + self.storage.main_block_bytes());
+        let mut body: Vec<u8> = Vec::with_capacity(
+            20 + self.storage.main_block_bytes() + 4 + metadata_bytes.len(),
+        );
         body.extend_from_slice(&(self.n as u64).to_le_bytes());
         body.extend_from_slice(&(self.dim as u64).to_le_bytes());
         body.extend_from_slice(&self.entry_point.to_le_bytes());
+
+        // metadata trailer（设计文档 F.7）
+        let has_metadata = !metadata_bytes.is_empty();
+        if has_metadata {
+            body.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
+            body.extend_from_slice(&metadata_bytes);
+            // 填充到 4 字节对齐，确保 CSR body 的 bytemuck::cast_slice 安全
+            let padding = (4 - (metadata_bytes.len() % 4)) % 4;
+            body.extend(std::iter::repeat(0u8).take(padding));
+        }
+
         // HybridBlockedCsr body
         let storage_bytes = crate::memory::serialize::Serializable::serialize(&self.storage);
         body.extend_from_slice(&storage_bytes);
 
         // 计算校验和并构造文件头
         let crc = crc32(&body);
-        let header = IndexHeader::new(crc);
+        let flags = if has_metadata { FLAG_HAS_METADATA } else { 0 };
+        let header = IndexHeader {
+            magic: crate::memory::serialize::INDEX_MAGIC,
+            version: crate::memory::serialize::INDEX_VERSION,
+            flags,
+            crc32: crc,
+        };
         let header_bytes = header.to_bytes();
 
         // 拼接：header + body
@@ -812,7 +858,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
     }
 
     fn deserialize(bytes: &[u8]) -> Result<Self, crate::memory::serialize::SerializeError> {
-        use crate::memory::serialize::{IndexHeader, HEADER_SIZE};
+        use crate::memory::serialize::{IndexHeader, HEADER_SIZE, FLAG_HAS_METADATA};
         use std::convert::TryInto;
 
         if bytes.len() < HEADER_SIZE + 20 {
@@ -842,8 +888,34 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
         let dim = u64::from_le_bytes(body[8..16].try_into().unwrap()) as usize;
         let entry_point = u32::from_le_bytes(body[16..20].try_into().unwrap());
 
+        // 读取 metadata trailer（如果 flags 标记存在）
+        let (metadata, csr_offset) = if header.flags & FLAG_HAS_METADATA != 0 {
+            if body.len() < 24 {
+                return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "body too short for metadata trailer header",
+                )));
+            }
+            let meta_len = u32::from_le_bytes(body[20..24].try_into().unwrap()) as usize;
+            if body.len() < 24 + meta_len {
+                return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "body too short for metadata trailer",
+                )));
+            }
+            let meta_bytes = &body[24..24 + meta_len];
+            let metadata = std::str::from_utf8(meta_bytes)
+                .ok()
+                .and_then(|s| BuildMetadata::from_toml(s).ok());
+            // 跳过 4 字节对齐填充
+            let padding = (4 - (meta_len % 4)) % 4;
+            (metadata, 24 + meta_len + padding)
+        } else {
+            (None, 20)
+        };
+
         // 反序列化 HybridBlockedCsr
-        let storage = HybridBlockedCsr::deserialize(&body[20..])?;
+        let storage = HybridBlockedCsr::deserialize(&body[csr_offset..])?;
 
         // 校验一致性
         if storage.len() != n {
@@ -853,7 +925,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
             )));
         }
 
-        Ok(Self::from_storage(storage, entry_point, dim))
+        Ok(Self { storage, entry_point, dim, n, metadata })
     }
 }
 
@@ -1090,6 +1162,14 @@ saturate: true,
         assert_eq!(restored.len(), graph.len());
         assert_eq!(restored.dim(), graph.dim());
         assert_eq!(restored.entry_point(), graph.entry_point());
+
+        // 验证 metadata roundtrip（设计文档 F.7）
+        assert!(restored.metadata().is_some(), "metadata should be present after roundtrip");
+        let meta = restored.metadata().unwrap();
+        assert_eq!(meta.n, 20);
+        assert_eq!(meta.dim, 10);
+        assert_eq!(meta.rng_algorithm, "chacha8");
+        assert_eq!(meta.rng_seed, 42);
 
         // 查询结果应一致
         let q = vectors[0..dim].to_vec();

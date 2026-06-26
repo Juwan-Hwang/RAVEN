@@ -22,6 +22,9 @@ pub const INDEX_MAGIC: u32 = 0x414E4E58;
 /// 设计文档：格式变更时递增，当前为 1
 pub const INDEX_VERSION: u32 = 1;
 
+/// flags bit 0：文件体包含 BuildMetadata trailer（设计文档 F.7）
+pub const FLAG_HAS_METADATA: u32 = 0x1;
+
 /// 文件头大小（字节）
 pub const HEADER_SIZE: usize = 16;
 
