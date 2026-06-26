@@ -61,8 +61,13 @@
 
 > avg_visited 是当前整个项目最关键的单个数字，比 Phase 1 还关键。
 > 它必须在 Phase 1 之前测量，且结果有权否决 Phase 1 的优先级。
+>
+> **裁决锁点（v6.3 新增）**：avg_visited 和 recall 都是 ef_search 的函数，对比的锁点是 recall，不是 ef_search。
+> glass 的 15,171 QPS 是在 recall=0.9523 这个特定 recall 点上的。
+> 因此进 Pivot Criterion 表做裁决的，是 **插值到 recall=0.95 处的 avg_visited**，
+> 不是 ef_search=100 那个点的。必须先扫出 (recall, QPS, avg_visited) 三元组曲线，再做插值。
 
-| avg_visited 测量结果 | 诊断 | 行动 |
+| avg_visited @ recall=0.95 | 诊断 | 行动 |
 |:--|:--|:--|
 | **< 150**（glass 量级） | 图质量正常，瓶颈在距离计算 | **Phase 1 优先**（原计划不变） |
 | **150-300**（中等） | 图质量有改进空间但不致命 | Phase 1 和 Phase 3.3 **并行推进** |
@@ -108,21 +113,29 @@
 
 | 配置名 | α | l_build | r_max | r_soft | max_iterations | ef_search | 用途 |
 |:--|:--|:--|:--|:--|:--|:--|:--|
-| **CANONICAL** | 1.2 | 200 | 64 | 96 | **2** | 100 | **唯一标准图**：基线、avg_visited、打榜全部基于此 |
-| **GLASS-COMP** | 1.2 | 200 | **32** | 48 | 2 | 100 | 同度数对照：与 glass R=32 做 apples-to-apples 对比 |
+| **CANONICAL** | 1.2 | 200 | 64 | 96 | **2** | **扫描** | **唯一标准图**：基线、avg_visited、打榜全部基于此 |
+| **GLASS-COMP** | 1.2 | 200 | **32** | 48 | 2 | **扫描** | 同度数对照：与 glass R=32 做 apples-to-apples 对比 |
 
+> **ef_search 扫描列表**：`{50, 75, 100, 150, 200, 300}`
+>
+> recall、QPS、avg_visited 三者都是 ef_search 的函数，随 ef_search 上下移动。
+> 必须对 CANONICAL 和 GLASS-COMP 各自跑出一条 (recall, QPS, avg_visited) 三元组曲线。
+> 进 Pivot Criterion 表做裁决的，是**插值到 recall=0.95 处的 avg_visited**，不是 ef_search=100 那个点的。
+> 这条曲线同时填充 §4.1 Pareto 前沿表（0.90/0.95/0.99 三行），一举两得。
+>
 > - **CANONICAL** = 旗舰参数（l_build=200, r_max=64）+ max_iter=2（建完整两遍）。这是最终提交到 ann-benchmarks 的路径，基线必须长得和打榜图一样。
 > - **GLASS-COMP** = 同 l_build、同 max_iter，仅 r_max=32。glass 榜首用 R=32 做到 recall=0.9941/QPS=19,801，RAVEN 需在同度数下对比 avg_visited 才能暴露图质量差距。大参数能靠堆出度硬撑 recall，但 glass 用小出度就又快又准——这才是图质量高低的真正标尺。
+>   - **结构差异注**：glass 为分层图（level=2），RAVEN 为扁平 Vamana，度数对齐但结构不完全等价；avg_visited 差距若巨大可归因图质量，若接近则需考虑分层结构本身的贡献。
 > - **旧的 2,706 QPS 基线（100/32/2）作废**。它既不是打榜图也不是新标准图，留着只会继续制造「和谁比」的混乱。
 
 **实施顺序（锁死，不得跳步）**：
 
-1. 修复 `VamanaBuildConfig::default()` 的 `max_iterations: 1` 地雷（纯 bug，独立 commit）
-2. 给 `GraphSearcher` 添加 `avg_visited` 插桩（纯增量，不改行为）
-3. 将 `quick_recall_check.rs` 改为 CANONICAL 配置，同时支持 `--r-max 32` 切换到 GLASS-COMP
-4. 在两张图上分别测量 avg_visited + QPS + recall
+1. ✅ 修复 `VamanaBuildConfig::default()` 的 `max_iterations: 1` 地雷（纯 bug，独立 commit）
+2. ✅ 给 `GraphSearcher` 添加 `avg_visited` 插桩（纯增量，不改行为）
+3. 将 `quick_recall_check.rs` 改为 CANONICAL/GLASS-COMP 双图 × ef_search 扫描 × avg_visited 输出
+4. 在两张图上分别跑出 (recall, QPS, avg_visited) 曲线
 5. 修复 `raven_ann_bench.rs` 硬编码 `max_iterations=1` + `__init__.py` wrapper S1
-6. 将结果记入本文档，按 §〇.2 Pivot Criterion 裁决
+6. 将结果记入本文档，插值 recall=0.95 处 avg_visited，按 §〇.2 Pivot Criterion 裁决
 
 ---
 
