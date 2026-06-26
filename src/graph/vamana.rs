@@ -737,6 +737,9 @@ pub struct GraphSearcher<'a> {
     /// 设计文档第三层：可选层，√N 个 centroid overlay 锚点节点
     /// 启用后搜索从最近 centroid 开始，而非默认 medoid
     navigation: Option<&'a NavigationLayer>,
+    /// 上次搜索访问的唯一节点数（avg_visited 诊断接口）
+    /// 此值在 search() 结束后被设置，不受 SIMD/内存布局干扰，纯粹衡量图导航效率
+    last_visited_count: usize,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -753,6 +756,7 @@ impl<'a> GraphSearcher<'a> {
             ef_search,
             visited: VisitedTracker::new(n, ef_search),
             navigation: None,
+            last_visited_count: 0,
         }
     }
 
@@ -775,6 +779,7 @@ impl<'a> GraphSearcher<'a> {
             ef_search,
             visited: VisitedTracker::new(n, ef_search),
             navigation: Some(navigation),
+            last_visited_count: 0,
         }
     }
 
@@ -803,11 +808,23 @@ impl<'a> GraphSearcher<'a> {
             &mut self.visited,
         );
 
+        // 记录本次搜索访问的唯一节点数（avg_visited 诊断）
+        self.last_visited_count = self.visited.visited_count();
+
         // 距离已在 greedy_search_vec_reuse 中计算，只需排序取 top-k
         let mut results = candidates;
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
         results
+    }
+
+    /// 上次搜索访问的唯一节点数（avg_visited 诊断接口）
+    ///
+    /// 返回最近一次 search() 调用期间访问的唯一节点数。
+    /// 此值不受 SIMD/内存布局干扰，纯粹衡量图导航效率。
+    /// 用于 §〇.2 Pivot Criterion 裁决 Phase 1 vs Phase 3.3 优先级。
+    pub fn last_visited_count(&self) -> usize {
+        self.last_visited_count
     }
 
     /// 找最近的 centroid 作为 entry_point
