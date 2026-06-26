@@ -56,9 +56,8 @@ impl Default for RPTuningConfig {
     fn default() -> Self {
         Self {
             scheme: RPTuningStorageScheme::SchemeA,
-            // 设计文档：生成 α=1.0 / 1.2 / 1.5 / 2.0 变体索引
-            // F.4：离散取点 [0.8, 1.0, 1.2, 1.5, 2.0, 3.0]
-            alpha_points: vec![1.0, 1.2, 1.5, 2.0],
+// 设计文档 F.4：离散取点 [0.8, 1.0, 1.2, 1.5, 2.0, 3.0]
+alpha_points: vec![0.8, 1.0, 1.2, 1.5, 2.0, 3.0],
             r_max: 64,
         }
     }
@@ -253,9 +252,9 @@ mod tests {
         let (vectors, dim, graph) = build_test_graph();
         let config = RPTuningConfig::default();
         let variants = RPTuning::generate_variants(&graph, &vectors, dim, &config);
-        assert_eq!(variants.len(), 4); // [1.0, 1.2, 1.5, 2.0]
-        assert_eq!(variants[0].alpha, 1.0);
-        assert_eq!(variants[3].alpha, 2.0);
+    assert_eq!(variants.len(), 6); // [0.8, 1.0, 1.2, 1.5, 2.0, 3.0]
+    assert_eq!(variants[0].alpha, 0.8);
+    assert_eq!(variants[5].alpha, 3.0);
     }
 
     #[test]
