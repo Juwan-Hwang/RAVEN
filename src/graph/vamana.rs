@@ -15,6 +15,7 @@ use crate::memory::{HybridBlockedCsr, VisitedTracker};
 use crate::build::ChaCha8Rng;
 use crate::build::{BuildConfig, BuildMetadata};
 use crate::graph::navigation::NavigationLayer;
+use crate::graph::navigation::LayeredNavigation;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rayon::prelude::*;
@@ -41,6 +42,10 @@ pub struct VamanaBuildConfig {
     /// 但 saturation 会用远距离候选填充，拉低邻居重叠率 → avg_visited 膨胀
     /// 实验开关：false 时图自然稀疏，邻居全是 RobustPrune 精选的高质量边
     pub saturate: bool,
+    /// 是否启用分层导航（设计文档：保留随机层级，可与 HNSW 直接对比）
+    pub enable_layered_nav: bool,
+    /// 分层导航参数 M（层间缩减比，默认 16）
+    pub nav_m: usize,
 }
 
 impl Default for VamanaBuildConfig {
@@ -53,8 +58,10 @@ impl Default for VamanaBuildConfig {
             r_soft: (r_max as f32 * 1.5) as usize, // 设计文档：1.5 × R_max
             // Vamana 论文要求 two passes：第一轮 α=1.0（连通性），第二轮 α=config（长程边）
             // max_iterations=1 只跑连通性轮，图质量显著下降（recall 0.33→0.95 的差距来源之一）
-            max_iterations: 2,
-            saturate: true,
+max_iterations: 2,
+saturate: true,
+enable_layered_nav: true,
+nav_m: 16,
         }
     }
 }
@@ -75,6 +82,9 @@ n: usize,
 /// 构建元数据（设计文档 F.7：随索引文件落盘）
 /// `None` 表示从旧格式反序列化或由 `from_storage` 构造
 metadata: Option<BuildMetadata>,
+/// HNSW 风格分层导航（设计文档：保留随机层级）
+/// 搜索时从顶层贪心走到 Layer 0 入口，大幅减少 avg_visited
+layered_nav: Option<LayeredNavigation>,
 }
 
 impl VamanaGraph {
@@ -160,13 +170,27 @@ impl VamanaGraph {
         let build_config = BuildConfig::default();
         let metadata = BuildMetadata::from_config(&build_config, n, dim);
 
-        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata) }
+        // 构建分层导航（设计文档：保留随机层级，可与 HNSW 直接对比）
+        let layered_nav = if config.enable_layered_nav && n > 0 {
+            eprintln!("[build] constructing layered navigation (M={})...", config.nav_m);
+            let t0 = std::time::Instant::now();
+            let nav = LayeredNavigation::build(
+                vectors, dim, &storage, entry_point, config.nav_m, config.r_max / 2,
+            );
+            eprintln!("[build] layered nav done in {:.1}s (max_level={})",
+                      t0.elapsed().as_secs_f64(), nav.max_level());
+            Some(nav)
+        } else {
+            None
+        };
+
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav }
     }
 
     /// 从已有存储构造（用于 RP-Tuning 生成变体）
     pub fn from_storage(storage: HybridBlockedCsr, entry_point: u32, dim: usize) -> Self {
         let n = storage.len();
-        Self { storage, entry_point, dim, n, metadata: None }
+        Self { storage, entry_point, dim, n, metadata: None, layered_nav: None }
     }
 
     /// 量化感知建图（Week 7：β/α 协同调参）
@@ -252,7 +276,7 @@ impl VamanaGraph {
 
         let build_config = BuildConfig::default();
         let metadata = BuildMetadata::from_config(&build_config, n, dim);
-        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata) }
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav: None }
     }
 
     /// 初始化随机图
@@ -530,6 +554,7 @@ impl VamanaGraph {
         query: &[f32],
         l: usize,
         visited: &mut VisitedTracker,
+        po: usize,
     ) -> Vec<(u32, f32)> {
         visited.reset();
 
@@ -543,10 +568,9 @@ impl VamanaGraph {
         visited.visit(entry_point);
         pool.insert(entry_point, entry_dist);
 
-        // Prefetch offset：前瞻距离
+        // Prefetch offset：前瞻距离（po=0 禁用向量预取）
         // 消融实验：po=8 在 ef=50 最佳 (+38%), po=4 在 ef=100 最佳 (+39%)
-        // 取 po=8 作为默认（ef=50 是最常用的工作点）
-        const PO: usize = 8;
+        // 默认 po=8（ef=50 是最常用的工作点），可通过 GraphSearcher::with_prefetch_offset 调整
         // 栈上 edge_buf，避免堆分配（R_max=64 → 64*4=256B fit 栈）
         let mut edge_buf: [u32; 128] = [0; 128];
 
@@ -579,8 +603,8 @@ impl VamanaGraph {
                 }
             }
 
-            // 预取前 PO 个邻居的向量数据
-            let prefetch_count = PO.min(edge_size);
+            // 预取前 po 个邻居的向量数据
+            let prefetch_count = po.min(edge_size);
             for i in 0..prefetch_count {
                 let v = edge_buf[i] as usize;
                 let ptr = &vectors[v * dim] as *const f32 as *const i8;
@@ -589,8 +613,8 @@ impl VamanaGraph {
 
             // 第二遍：计算距离，同时前瞻预取
             for i in 0..edge_size {
-                if i + PO < edge_size {
-                    let v = edge_buf[i + PO] as usize;
+                if i + po < edge_size {
+                    let v = edge_buf[i + po] as usize;
                     let ptr = &vectors[v * dim] as *const f32 as *const i8;
                     unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
                 }
@@ -788,6 +812,11 @@ impl VamanaGraph {
         self.metadata.as_ref()
     }
 
+    /// 获取分层导航（设计文档：保留随机层级）
+    pub fn layered_nav(&self) -> Option<&LayeredNavigation> {
+        self.layered_nav.as_ref()
+    }
+
     /// 度数统计
     pub fn degree_stats(&self) -> crate::memory::graph::DegreeStats {
         self.storage.log_degree_distribution()
@@ -807,9 +836,14 @@ impl VamanaGraph {
 ///     [36..40)  metadata_len: u32
 ///     [40..40+metadata_len) metadata TOML
 ///     [40+metadata_len..) HybridBlockedCsr body
+///   flags=FLAG_HAS_METADATA|FLAG_HAS_LAYERED_NAV:
+///     [36..40)  metadata_len: u32
+///     [40..40+metadata_len) metadata TOML + padding
+///     [after metadata] layered_nav_len: u32 + layered_nav bytes + padding
+///     [after layered_nav] HybridBlockedCsr body
 impl crate::memory::serialize::Serializable for VamanaGraph {
     fn serialize(&self) -> Vec<u8> {
-        use crate::memory::serialize::{IndexHeader, crc32, FLAG_HAS_METADATA};
+        use crate::memory::serialize::{IndexHeader, crc32, FLAG_HAS_METADATA, FLAG_HAS_LAYERED_NAV};
 
         // 序列化 metadata TOML（如果有）
         let metadata_bytes: Vec<u8> = match &self.metadata {
@@ -817,9 +851,15 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
             None => Vec::new(),
         };
 
+        // 序列化 layered nav（如果有）
+        let nav_bytes: Vec<u8> = match &self.layered_nav {
+            Some(nav) => nav.serialize_binary(),
+            None => Vec::new(),
+        };
+
         // 序列化文件体
         let mut body: Vec<u8> = Vec::with_capacity(
-            20 + self.storage.main_block_bytes() + 4 + metadata_bytes.len(),
+            20 + self.storage.main_block_bytes() + 4 + metadata_bytes.len() + 4 + nav_bytes.len(),
         );
         body.extend_from_slice(&(self.n as u64).to_le_bytes());
         body.extend_from_slice(&(self.dim as u64).to_le_bytes());
@@ -830,8 +870,16 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
         if has_metadata {
             body.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
             body.extend_from_slice(&metadata_bytes);
-            // 填充到 4 字节对齐，确保 CSR body 的 bytemuck::cast_slice 安全
             let padding = (4 - (metadata_bytes.len() % 4)) % 4;
+            body.extend(std::iter::repeat(0u8).take(padding));
+        }
+
+        // layered nav trailer（设计文档：保留随机层级）
+        let has_nav = !nav_bytes.is_empty();
+        if has_nav {
+            body.extend_from_slice(&(nav_bytes.len() as u32).to_le_bytes());
+            body.extend_from_slice(&nav_bytes);
+            let padding = (4 - (nav_bytes.len() % 4)) % 4;
             body.extend(std::iter::repeat(0u8).take(padding));
         }
 
@@ -841,7 +889,9 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
 
         // 计算校验和并构造文件头
         let crc = crc32(&body);
-        let flags = if has_metadata { FLAG_HAS_METADATA } else { 0 };
+        let mut flags = 0u32;
+        if has_metadata { flags |= FLAG_HAS_METADATA; }
+        if has_nav { flags |= FLAG_HAS_LAYERED_NAV; }
         let header = IndexHeader {
             magic: crate::memory::serialize::INDEX_MAGIC,
             version: crate::memory::serialize::INDEX_VERSION,
@@ -858,7 +908,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
     }
 
     fn deserialize(bytes: &[u8]) -> Result<Self, crate::memory::serialize::SerializeError> {
-        use crate::memory::serialize::{IndexHeader, HEADER_SIZE, FLAG_HAS_METADATA};
+        use crate::memory::serialize::{IndexHeader, HEADER_SIZE, FLAG_HAS_METADATA, FLAG_HAS_LAYERED_NAV};
         use std::convert::TryInto;
 
         if bytes.len() < HEADER_SIZE + 20 {
@@ -888,34 +938,63 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
         let dim = u64::from_le_bytes(body[8..16].try_into().unwrap()) as usize;
         let entry_point = u32::from_le_bytes(body[16..20].try_into().unwrap());
 
+        let mut offset = 20usize;
+
         // 读取 metadata trailer（如果 flags 标记存在）
-        let (metadata, csr_offset) = if header.flags & FLAG_HAS_METADATA != 0 {
-            if body.len() < 24 {
+        let metadata = if header.flags & FLAG_HAS_METADATA != 0 {
+            if body.len() < offset + 4 {
                 return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "body too short for metadata trailer header",
                 )));
             }
-            let meta_len = u32::from_le_bytes(body[20..24].try_into().unwrap()) as usize;
-            if body.len() < 24 + meta_len {
+            let meta_len = u32::from_le_bytes(body[offset..offset+4].try_into().unwrap()) as usize;
+            offset += 4;
+            if body.len() < offset + meta_len {
                 return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "body too short for metadata trailer",
                 )));
             }
-            let meta_bytes = &body[24..24 + meta_len];
+            let meta_bytes = &body[offset..offset + meta_len];
             let metadata = std::str::from_utf8(meta_bytes)
                 .ok()
                 .and_then(|s| BuildMetadata::from_toml(s).ok());
             // 跳过 4 字节对齐填充
             let padding = (4 - (meta_len % 4)) % 4;
-            (metadata, 24 + meta_len + padding)
+            offset += meta_len + padding;
+            metadata
         } else {
-            (None, 20)
+            None
+        };
+
+        // 读取 layered nav trailer（如果 flags 标记存在）
+        let layered_nav = if header.flags & FLAG_HAS_LAYERED_NAV != 0 {
+            if body.len() < offset + 4 {
+                return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "body too short for layered nav trailer header",
+                )));
+            }
+            let nav_len = u32::from_le_bytes(body[offset..offset+4].try_into().unwrap()) as usize;
+            offset += 4;
+            if body.len() < offset + nav_len {
+                return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "body too short for layered nav trailer",
+                )));
+            }
+            let nav_bytes = &body[offset..offset + nav_len];
+            let nav = LayeredNavigation::deserialize_binary(nav_bytes);
+            let padding = (4 - (nav_len % 4)) % 4;
+            offset += nav_len + padding;
+            nav
+        } else {
+            None
         };
 
         // 反序列化 HybridBlockedCsr
-        let storage = HybridBlockedCsr::deserialize(&body[csr_offset..])?;
+        let storage = HybridBlockedCsr::deserialize(&body[offset..])?;
 
         // 校验一致性
         if storage.len() != n {
@@ -925,7 +1004,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
             )));
         }
 
-        Ok(Self { storage, entry_point, dim, n, metadata })
+        Ok(Self { storage, entry_point, dim, n, metadata, layered_nav })
     }
 }
 
@@ -945,6 +1024,9 @@ pub struct GraphSearcher<'a> {
     /// 上次搜索访问的唯一节点数（avg_visited 诊断接口）
     /// 此值在 search() 结束后被设置，不受 SIMD/内存布局干扰，纯粹衡量图导航效率
     last_visited_count: usize,
+    /// Prefetch offset：Two-Pass Prefetch 的前瞻距离
+    /// po=8 适合 ef=50，po=4 适合 ef=100；po=0 禁用向量预取
+    prefetch_offset: usize,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -962,6 +1044,7 @@ impl<'a> GraphSearcher<'a> {
             visited: VisitedTracker::new(n, ef_search),
             navigation: None,
             last_visited_count: 0,
+            prefetch_offset: 8,
         }
     }
 
@@ -985,7 +1068,17 @@ impl<'a> GraphSearcher<'a> {
             visited: VisitedTracker::new(n, ef_search),
             navigation: Some(navigation),
             last_visited_count: 0,
+            prefetch_offset: 8,
         }
+    }
+
+    /// 设置 prefetch offset（Two-Pass Prefetch 前瞻距离）
+    ///
+    /// po=8 适合 ef=50，po=4 适合 ef=100；po=0 禁用向量预取
+    /// 返回 &mut Self 以支持链式调用
+    pub fn with_prefetch_offset(&mut self, po: usize) -> &mut Self {
+        self.prefetch_offset = po;
+        self
     }
 
     /// 搜索最近邻
@@ -994,10 +1087,14 @@ impl<'a> GraphSearcher<'a> {
     ///
     /// 使用标准 break 模式（Vamana 论文标准 greedy search）
     /// 复用预分配的 VisitedTracker，零堆分配热路径
-    /// 若启用 NavigationLayer，从最近 centroid 开始搜索
+    /// 若图有分层导航，从顶层贪心走到 Layer 0 入口（设计文档：保留随机层级）
+    /// 若启用 NavigationLayer centroid overlay，从最近 centroid 开始
+    /// 否则用 medoid entry_point
     pub fn search(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
-        // 选择 entry_point：若启用 NavigationLayer，找最近 centroid；否则用 medoid
-        let entry_point = if let Some(nav) = self.navigation {
+        // 选择 entry_point 优先级：分层导航 > centroid overlay > medoid
+        let entry_point = if let Some(nav) = self.graph.layered_nav() {
+            nav.initialize(self.vectors, self.dim, query).0
+        } else if let Some(nav) = self.navigation {
             Self::nearest_centroid(nav.centroids(), self.vectors, self.dim, query)
         } else {
             self.graph.entry_point()
@@ -1011,6 +1108,7 @@ impl<'a> GraphSearcher<'a> {
             query,
             self.ef_search,
             &mut self.visited,
+            self.prefetch_offset,
         );
 
         // 记录本次搜索访问的唯一节点数（avg_visited 诊断）
@@ -1097,6 +1195,8 @@ r_max: 4,
 r_soft: 6,
 max_iterations: 1,
 saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         assert_eq!(graph.len(), 10);
@@ -1115,6 +1215,8 @@ r_max: 8,
 r_soft: 12,
 max_iterations: 1,
 saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         let mut searcher = GraphSearcher::new(&vectors, &graph, 20);
@@ -1150,6 +1252,8 @@ r_max: 8,
 r_soft: 12,
 max_iterations: 1,
 saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
 
@@ -1193,6 +1297,8 @@ r_max: 4,
 r_soft: 6,
 max_iterations: 1,
 saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
 
