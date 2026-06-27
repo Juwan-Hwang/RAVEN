@@ -472,9 +472,21 @@ mod tests {
 
     #[test]
     fn prune_dedup_candidates() {
-        let v = make_vectors(10, 4);
+        // 非共线向量：候选在 query 的不同方向上，α=1.0 剪枝不会误杀
+        //
+        // 旧测试用 make_vectors 生成共线数据 [0,1,2,3], [4,5,6,7], [8,9,10,11]...
+        // 共线 → 所有候选在同一方向 → α 剪枝只保留最近的 1 个 → assert(3) 失败
+        //
+        // 修复：正交放置，3 个候选在 120° 分隔的方向上，全部存活
+        let v = vec![
+            0.0, 0.0,   // node 0 (query)
+            3.0, 0.0,   // node 1 — 0°
+            0.0, 3.0,   // node 2 — 90°
+           -3.0, 0.0,   // node 3 — 180°
+        ];
         let candidates = vec![1, 1, 2, 2, 3];
-        let result = RobustPrune::prune(&candidates, 0, &v, 4, 1.0, 8, false);
+        let result = RobustPrune::prune(&candidates, 0, &v, 2, 1.0, 8, false);
+        // 去重后 3 个候选，方向正交 → 全部通过 α=1.0 剪枝
         assert_eq!(result.len(), 3);
     }
 
@@ -505,9 +517,16 @@ mod tests {
 
     #[test]
     fn directional_prune_dedup() {
-        let v = make_vectors(10, 4);
+        // 非共线向量：同 prune_dedup_candidates 的修复理由
+        // 共线数据下 DirectionalPrune Pass 1 的 d²(j,i) < d²(i,q) 对同方向候选恒成立 → 只留 1 个
+        let v = vec![
+            0.0, 0.0,   // node 0 (query)
+            3.0, 0.0,   // node 1 — 0°
+            0.0, 3.0,   // node 2 — 90°
+           -3.0, 0.0,   // node 3 — 180°
+        ];
         let candidates = vec![1, 1, 2, 2, 3];
-        let result = DirectionalPrune::prune(&candidates, 0, &v, 4, 8, 2, 1.2);
+        let result = DirectionalPrune::prune(&candidates, 0, &v, 2, 8, 2, 1.2);
         assert_eq!(result.len(), 3);
     }
 
