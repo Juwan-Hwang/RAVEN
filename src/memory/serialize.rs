@@ -25,6 +25,9 @@ pub const INDEX_VERSION: u32 = 1;
 /// flags bit 0：文件体包含 BuildMetadata trailer（设计文档 F.7）
 pub const FLAG_HAS_METADATA: u32 = 0x1;
 
+/// flags bit 1：文件体包含 LayeredNavigation trailer（设计文档：随机层级导航）
+pub const FLAG_HAS_LAYERED_NAV: u32 = 0x2;
+
 /// 文件头大小（字节）
 pub const HEADER_SIZE: usize = 16;
 

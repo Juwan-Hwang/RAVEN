@@ -1,0 +1,4 @@
+[[entries]]
+dim = 128
+kernel = "avx512"
+selected_at = 1782403511

@@ -1,15 +1,15 @@
-//! 附录 A 退化判定实验
+﻿//! 闄勫綍 A 閫€鍖栧垽瀹氬疄楠?
 //!
-//! 设计文档附录 A：RP-Tuning 额外存储方案三选一
-//! 退化判定阈值（实验前锁定）：
-//!   指标一（固定 QPS）：A 方案 recall@10 差距 < 0.5%
-//!   指标二（固定 recall）：A 方案 QPS 差距 < 3%
-//!   覆盖范围：至少 3 个不同数据集，每个独立判定
+//! 璁捐鏂囨。闄勫綍 A锛歊P-Tuning 棰濆瀛樺偍鏂规涓夐€変竴
+//! 閫€鍖栧垽瀹氶槇鍊硷紙瀹為獙鍓嶉攣瀹氾級锛?
+//!   鎸囨爣涓€锛堝浐瀹?QPS锛夛細A 鏂规 recall@10 宸窛 < 0.5%
+//!   鎸囨爣浜岋紙鍥哄畾 recall锛夛細A 鏂规 QPS 宸窛 < 3%
+//!   瑕嗙洊鑼冨洿锛氳嚦灏?3 涓笉鍚屾暟鎹泦锛屾瘡涓嫭绔嬪垽瀹?
 //!
-//! 实验设计：
-//!   1. 完整重建版本（baseline）：分别用 α=1.0/1.5/2.0 从零构建
-//!   2. A 方案：建一次 α=1.2 基础图，RP-Tuning 后验生成 α=1.0/1.5/2.0 变体
-//!   3. 对比同等 QPS 下的 recall@10 差距
+//! 瀹為獙璁捐锛?
+//!   1. 瀹屾暣閲嶅缓鐗堟湰锛坆aseline锛夛細鍒嗗埆鐢?伪=1.0/1.5/2.0 浠庨浂鏋勫缓
+//!   2. A 鏂规锛氬缓涓€娆?伪=1.2 鍩虹鍥撅紝RP-Tuning 鍚庨獙鐢熸垚 伪=1.0/1.5/2.0 鍙樹綋
+//!   3. 瀵规瘮鍚岀瓑 QPS 涓嬬殑 recall@10 宸窛
 
 use std::time::Instant;
 use rand::Rng;
@@ -17,7 +17,7 @@ use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
 use raven::graph::rp_tuning::{RPTuning, RPTuningConfig, RPTuningStorageScheme};
 use raven::build::ChaCha8Rng;
 
-/// 实验结果
+/// 瀹為獙缁撴灉
 #[derive(Debug, Clone)]
 struct ExperimentResult {
     alpha: f32,
@@ -27,7 +27,7 @@ struct ExperimentResult {
     recall: f64,
 }
 
-/// 生成带聚类结构的合成数据集（模拟真实分布）
+/// 鐢熸垚甯﹁仛绫荤粨鏋勭殑鍚堟垚鏁版嵁闆嗭紙妯℃嫙鐪熷疄鍒嗗竷锛?
 fn generate_clustered_data(
     n: usize,
     dim: usize,
@@ -40,13 +40,13 @@ fn generate_clustered_data(
     let mut train = vec![0.0f32; n * dim];
     let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(n_clusters);
 
-    // 生成聚类中心
+    // 鐢熸垚鑱氱被涓績
     for _ in 0..n_clusters {
         let c: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>() * 10.0).collect();
         centroids.push(c);
     }
 
-    // 每个向量 = 聚类中心 + 高斯噪声
+    // 姣忎釜鍚戦噺 = 鑱氱被涓績 + 楂樻柉鍣０
     for i in 0..n {
         let cluster = i % n_clusters;
         for d in 0..dim {
@@ -55,7 +55,7 @@ fn generate_clustered_data(
         }
     }
 
-    // 生成查询向量
+    // 鐢熸垚鏌ヨ鍚戦噺
     let mut test = vec![0.0f32; nq * dim];
     for i in 0..nq {
         let cluster = (i % n_clusters) as usize;
@@ -65,7 +65,7 @@ fn generate_clustered_data(
         }
     }
 
-    // 暴力计算 ground truth
+    // 鏆村姏璁＄畻 ground truth
     let mut gt = vec![0i32; nq * k];
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
@@ -87,7 +87,7 @@ fn generate_clustered_data(
     (train, test, gt)
 }
 
-/// 运行查询并计算 recall
+/// 杩愯鏌ヨ骞惰绠?recall
 fn run_queries(
     train: &[f32],
     graph: &VamanaGraph,
@@ -119,12 +119,12 @@ fn run_queries(
 }
 
 fn main() {
-    println!("=== 附录 A 退化判定实验 ===");
-    println!("设计文档附录 A：RP-Tuning 额外存储方案三选一");
-    println!("退化判定阈值：recall@10 差距 < 0.5%, QPS 差距 < 3%");
+    println!("=== 闄勫綍 A 閫€鍖栧垽瀹氬疄楠?===");
+    println!("璁捐鏂囨。闄勫綍 A锛歊P-Tuning 棰濆瀛樺偍鏂规涓夐€変竴");
+    println!("閫€鍖栧垽瀹氶槇鍊硷細recall@10 宸窛 < 0.5%, QPS 宸窛 < 3%");
     println!();
 
-    // 3 个数据集（不同规模/维度，满足"至少 3 个不同数据集"要求）
+    // 3 涓暟鎹泦锛堜笉鍚岃妯?缁村害锛屾弧瓒?鑷冲皯 3 涓笉鍚屾暟鎹泦"瑕佹眰锛?
     let datasets = [
         ("dataset_1", 1000usize, 128usize, 100usize, 10usize, 20),
         ("dataset_2", 2000, 256, 100, 10, 30),
@@ -140,8 +140,8 @@ fn main() {
         let alpha_points = vec![1.0f32, 1.5, 2.0];
         let ef_search = 100;
 
-        // === Baseline: 完整重建 ===
-        println!("[Baseline] 完整重建（分别用不同 α 从零构建）");
+        // === Baseline: 瀹屾暣閲嶅缓 ===
+        println!("[Baseline] 瀹屾暣閲嶅缓锛堝垎鍒敤涓嶅悓 伪 浠庨浂鏋勫缓锛?);
         let mut rebuild_results: Vec<ExperimentResult> = Vec::new();
         for &alpha in &alpha_points {
             let mut rng = ChaCha8Rng::seed_from(42);
@@ -151,13 +151,14 @@ fn main() {
                 r_max: 64,
                 r_soft: 96,
                 max_iterations: 1,
+..Default::default()
             };
             let start = Instant::now();
             let graph = VamanaGraph::build(&train, *dim, &config, &mut rng);
             let build_time = start.elapsed().as_secs_f64();
 
             let (qps, recall) = run_queries(&train, &graph, &test, &gt, *dim, *nq, *k, ef_search);
-            println!("  α={:.1}: build={:.3}s, QPS={:.0}, recall@{}={:.4}",
+            println!("  伪={:.1}: build={:.3}s, QPS={:.0}, recall@{}={:.4}",
                 alpha, build_time, qps, k, recall);
             rebuild_results.push(ExperimentResult {
                 alpha,
@@ -168,8 +169,8 @@ fn main() {
             });
         }
 
-        // === A 方案：RP-Tuning ===
-        println!("[Scheme A] RP-Tuning（建一次 α=1.2 基础图，后验生成变体）");
+        // === A 鏂规锛歊P-Tuning ===
+        println!("[Scheme A] RP-Tuning锛堝缓涓€娆?伪=1.2 鍩虹鍥撅紝鍚庨獙鐢熸垚鍙樹綋锛?);
         let mut rng = ChaCha8Rng::seed_from(42);
         let base_config = VamanaBuildConfig {
             alpha: 1.2,
@@ -177,11 +178,12 @@ fn main() {
             r_max: 64,
             r_soft: 96,
             max_iterations: 1,
+..Default::default()
         };
         let start = Instant::now();
         let base_graph = VamanaGraph::build(&train, *dim, &base_config, &mut rng);
         let base_build_time = start.elapsed().as_secs_f64();
-        println!("  base graph (α=1.2): build={:.3}s", base_build_time);
+        println!("  base graph (伪=1.2): build={:.3}s", base_build_time);
 
         let rp_config = RPTuningConfig {
             scheme: RPTuningStorageScheme::SchemeA,
@@ -197,11 +199,11 @@ fn main() {
         for variant in &variants {
             let graph = variant.clone().into_graph(*dim);
             let stats = graph.degree_stats();
-            println!("  α={:.1}: degree stats: mean={:.1}, p95={}, p99={}, max={}, isolated={}, overflow_ratio={:.4}",
+            println!("  伪={:.1}: degree stats: mean={:.1}, p95={}, p99={}, max={}, isolated={}, overflow_ratio={:.4}",
                 variant.alpha, stats.mean_degree, stats.p95_degree, stats.p99_degree,
                 stats.max_degree, stats.isolated_nodes, stats.overflow_ratio);
             let (qps, recall) = run_queries(&train, &graph, &test, &gt, *dim, *nq, *k, ef_search);
-            println!("  α={:.1}: QPS={:.0}, recall@{}={:.4}",
+            println!("  伪={:.1}: QPS={:.0}, recall@{}={:.4}",
                 variant.alpha, qps, k, recall);
             rp_results.push(ExperimentResult {
                 alpha: variant.alpha,
@@ -212,32 +214,32 @@ fn main() {
             });
         }
 
-        // === 退化判定 ===
-        println!("[退化判定]");
+        // === 閫€鍖栧垽瀹?===
+        println!("[閫€鍖栧垽瀹歖");
         let mut dataset_pass = true;
         for i in 0..alpha_points.len() {
             let rebuild = &rebuild_results[i];
             let rp = &rp_results[i];
 
-            // recall 退化：只在 Scheme A recall 低于 baseline 时算退化
-            // Scheme A recall 更高是优势，不算退化
+            // recall 閫€鍖栵細鍙湪 Scheme A recall 浣庝簬 baseline 鏃剁畻閫€鍖?
+            // Scheme A recall 鏇撮珮鏄紭鍔匡紝涓嶇畻閫€鍖?
             let recall_drop = if rp.recall < rebuild.recall {
                 rebuild.recall - rp.recall
             } else {
-                0.0  // Scheme A 更好，不算退化
+                0.0  // Scheme A 鏇村ソ锛屼笉绠楅€€鍖?
             };
 
-            // QPS 退化：只在 Scheme A QPS 低于 baseline 时算退化
+            // QPS 閫€鍖栵細鍙湪 Scheme A QPS 浣庝簬 baseline 鏃剁畻閫€鍖?
             let qps_drop = if rp.qps < rebuild.qps {
                 (rebuild.qps - rp.qps) / rebuild.qps
             } else {
-                0.0  // Scheme A 更快，不算退化
+                0.0  // Scheme A 鏇村揩锛屼笉绠楅€€鍖?
             };
 
-            let recall_ok = recall_drop < 0.005;  // recall 下降 < 0.5%
-            let qps_ok = qps_drop < 0.03;  // QPS 下降 < 3%
+            let recall_ok = recall_drop < 0.005;  // recall 涓嬮檷 < 0.5%
+            let qps_ok = qps_drop < 0.03;  // QPS 涓嬮檷 < 3%
 
-            println!("  α={:.1}: recall_drop={:.4} ({}), qps_drop={:.2}%, build_time: {}={:.3}s vs {}={:.3}s, {}",
+            println!("  伪={:.1}: recall_drop={:.4} ({}), qps_drop={:.2}%, build_time: {}={:.3}s vs {}={:.3}s, {}",
                 rebuild.alpha,
                 recall_drop,
                 if recall_ok { "PASS" } else { "FAIL" },
@@ -253,22 +255,22 @@ fn main() {
         }
 
         if dataset_pass {
-            println!("  → {} PASS（A 方案不退化）", name);
+            println!("  鈫?{} PASS锛圓 鏂规涓嶉€€鍖栵級", name);
         } else {
-            println!("  → {} FAIL（A 方案退化，需降级 B）", name);
+            println!("  鈫?{} FAIL锛圓 鏂规閫€鍖栵紝闇€闄嶇骇 B锛?, name);
             all_pass = false;
         }
         println!();
     }
 
-    // === 最终结论 ===
-    println!("=== 最终结论 ===");
+    // === 鏈€缁堢粨璁?===
+    println!("=== 鏈€缁堢粨璁?===");
     if all_pass {
-        println!("所有数据集均通过退化判定");
-        println!("→ 选定方案 A：zero-cost RP-Tuning");
-        println!("→ 论文亮点：RP-Tuning 无额外存储代价，不退化");
+        println!("鎵€鏈夋暟鎹泦鍧囬€氳繃閫€鍖栧垽瀹?);
+        println!("鈫?閫夊畾鏂规 A锛歾ero-cost RP-Tuning");
+        println!("鈫?璁烘枃浜偣锛歊P-Tuning 鏃犻澶栧瓨鍌ㄤ唬浠凤紝涓嶉€€鍖?);
     } else {
-        println!("存在数据集未通过退化判定");
-        println!("→ 降级方案 B：每节点存储被剪掉的邻居 ID");
+        println!("瀛樺湪鏁版嵁闆嗘湭閫氳繃閫€鍖栧垽瀹?);
+        println!("鈫?闄嶇骇鏂规 B锛氭瘡鑺傜偣瀛樺偍琚壀鎺夌殑閭诲眳 ID");
     }
 }

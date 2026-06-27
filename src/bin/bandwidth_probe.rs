@@ -1,32 +1,23 @@
-//! 内存带宽瓶颈分析探针
+﻿//! 鍐呭瓨甯﹀鐡堕鍒嗘瀽鎺㈤拡
 //!
-//! 设计文档 Week 3-4：内存带宽瓶颈分析（LLC miss / bandwidth counters，
-//! 判断 compute-bound vs memory-bound）
-//!
-//! 本探针通过扫描 working set 大小，测量不同 cache 层级下的有效带宽，
-//! 从而判断 L2 距离核是 compute-bound 还是 memory-bound。
-//!
-//! 判定逻辑：
-//! - 若带宽随 working set 增大而显著下降（L1→L2→L3→RAM）→ memory-bound
-//! - 若带宽在各层级保持稳定 → compute-bound
-//! - 对比算术强度：L2 距离 3 FLOPs / 8 bytes = 0.375 FLOPs/byte，
-//!   远低于 compute-bound 门槛（~10 FLOPs/byte），理论上应为 memory-bound
+//! 璁捐鏂囨。 Week 3-4锛氬唴瀛樺甫瀹界摱棰堝垎鏋愶紙LLC miss / bandwidth counters锛?//! 鍒ゆ柇 compute-bound vs memory-bound锛?//!
+//! 鏈帰閽堥€氳繃鎵弿 working set 澶у皬锛屾祴閲忎笉鍚?cache 灞傜骇涓嬬殑鏈夋晥甯﹀锛?//! 浠庤€屽垽鏂?L2 璺濈鏍告槸 compute-bound 杩樻槸 memory-bound銆?//!
+//! 鍒ゅ畾閫昏緫锛?//! - 鑻ュ甫瀹介殢 working set 澧炲ぇ鑰屾樉钁椾笅闄嶏紙L1鈫扡2鈫扡3鈫扲AM锛夆啋 memory-bound
+//! - 鑻ュ甫瀹藉湪鍚勫眰绾т繚鎸佺ǔ瀹?鈫?compute-bound
+//! - 瀵规瘮绠楁湳寮哄害锛歀2 璺濈 3 FLOPs / 8 bytes = 0.375 FLOPs/byte锛?//!   杩滀綆浜?compute-bound 闂ㄦ锛垀10 FLOPs/byte锛夛紝鐞嗚涓婂簲涓?memory-bound
 
 use std::time::Instant;
 use raven::distance::l2_dynamic;
 
-/// 测量给定 working set 下的 L2 距离吞吐
+/// 娴嬮噺缁欏畾 working set 涓嬬殑 L2 璺濈鍚炲悙
 ///
-/// n_pairs: 同时计算的向量对数（控制 working set 大小）
-/// dim: 维度
-/// iterations: 迭代次数（大 working set 时应减少以控制总耗时）
-fn measure_bandwidth(n_pairs: usize, dim: usize, iterations: usize) -> BandwidthResult {
-    // 准备数据：n_pairs 对向量
-    let total_bytes = n_pairs * 2 * dim * std::mem::size_of::<f32>();
+/// n_pairs: 鍚屾椂璁＄畻鐨勫悜閲忓鏁帮紙鎺у埗 working set 澶у皬锛?/// dim: 缁村害
+/// iterations: 杩唬娆℃暟锛堝ぇ working set 鏃跺簲鍑忓皯浠ユ帶鍒舵€昏€楁椂锛?fn measure_bandwidth(n_pairs: usize, dim: usize, iterations: usize) -> BandwidthResult {
+    // 鍑嗗鏁版嵁锛歯_pairs 瀵瑰悜閲?    let total_bytes = n_pairs * 2 * dim * std::mem::size_of::<f32>();
     let vectors_a: Vec<f32> = (0..n_pairs * dim).map(|i| i as f32 * 0.001).collect();
     let vectors_b: Vec<f32> = (0..n_pairs * dim).map(|i| (i as f32 * 0.002) + 1.0).collect();
 
-    // 预热：确保数据进入对应 cache 层级
+    // 棰勭儹锛氱‘淇濇暟鎹繘鍏ュ搴?cache 灞傜骇
     let mut sink = 0.0f32;
     for _ in 0..1000.min(n_pairs * 10) {
         for p in 0..n_pairs {
@@ -37,7 +28,7 @@ fn measure_bandwidth(n_pairs: usize, dim: usize, iterations: usize) -> Bandwidth
     }
     std::hint::black_box(sink);
 
-    // 实测
+    // 瀹炴祴
     let mut sink = 0.0f32;
     let start = Instant::now();
     for _ in 0..iterations {
@@ -95,23 +86,23 @@ impl BandwidthResult {
 }
 
 fn main() {
-    println!("=== RAVEN 内存带宽瓶颈分析 ===");
+    println!("=== RAVEN 鍐呭瓨甯﹀鐡堕鍒嗘瀽 ===");
     println!("CPU: AMD Ryzen 7 8845H (Zen 4)");
     println!("Cache: L1d=32KB, L2=1MB, L3=16MB");
     println!();
-    println!("L2 距离算术强度: 3 FLOPs / 8 bytes = 0.375 FLOPs/byte");
-    println!("Compute-bound 门槛: ~10 FLOPs/byte");
+    println!("L2 璺濈绠楁湳寮哄害: 3 FLOPs / 8 bytes = 0.375 FLOPs/byte");
+    println!("Compute-bound 闂ㄦ: ~10 FLOPs/byte");
     println!();
 
-    // 测试 1：固定 dim=768，扫描 working set 大小
-    // 揭示 cache 层级对带宽的影响
-    println!("=== 测试 1: 固定 dim=768, 扫描 working set ===");
+    // 娴嬭瘯 1锛氬浐瀹?dim=768锛屾壂鎻?working set 澶у皬
+    // 鎻ず cache 灞傜骇瀵瑰甫瀹界殑褰卞搷
+    println!("=== 娴嬭瘯 1: 鍥哄畾 dim=768, 鎵弿 working set ===");
     println!("{:>10} {:>8} {:>10} {:>12} {:>10} {:>10} {:>8}",
         "pairs", "dim", "WS(KB)", "cache", "BW(GB/s)", "GFLOPs", "lat(ns)");
     println!("{}", "-".repeat(72));
 
     let dim = 768;
-    // working set = n_pairs × 2 × 768 × 4 bytes
+    // working set = n_pairs 脳 2 脳 768 脳 4 bytes
     // 1 pair = 6KB (L1), 5 pairs = 30KB (L1), 10 pairs = 60KB (L2),
     // 100 pairs = 600KB (L2), 1000 pairs = 6MB (L3), 5000 pairs = 30MB (RAM)
     let pair_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096];
@@ -120,7 +111,7 @@ fn main() {
     let mut ram_bw: f64 = 0.0;
 
     for &n_pairs in &pair_counts {
-        // 大 working set 减少迭代次数以控制总耗时
+        // 澶?working set 鍑忓皯杩唬娆℃暟浠ユ帶鍒舵€昏€楁椂
         let iterations = (1_000_000 / n_pairs).max(1000);
         let result = measure_bandwidth(n_pairs, dim, iterations);
         if result.working_set_kb <= 32.0 {
@@ -141,12 +132,12 @@ fn main() {
     }
 
     println!();
-    println!("=== 测试 2: 固定 working set 在 L1, 扫描维度 ===");
+    println!("=== 娴嬭瘯 2: 鍥哄畾 working set 鍦?L1, 鎵弿缁村害 ===");
     println!("{:>8} {:>10} {:>12} {:>10} {:>10} {:>8}",
         "dim", "WS(KB)", "cache", "BW(GB/s)", "GFLOPs", "lat(ns)");
     println!("{}", "-".repeat(62));
 
-    // 固定 1 pair，确保都在 L1
+    // 鍥哄畾 1 pair锛岀‘淇濋兘鍦?L1
     let dims = [64, 128, 256, 384, 512, 768, 960, 1024, 1536, 2048, 3072, 4096];
     for &d in &dims {
         let result = measure_bandwidth(1, d, 1_000_000);
@@ -161,27 +152,27 @@ fn main() {
     }
 
     println!();
-    println!("=== 分析结论 ===");
+    println!("=== 鍒嗘瀽缁撹 ===");
     let bw_ratio = if ram_bw > 0.0 { l1_bw / ram_bw } else { 0.0 };
-    println!("L1 峰值带宽: {:.1} GB/s", l1_bw);
-    println!("RAM 峰值带宽: {:.1} GB/s", ram_bw);
-    println!("L1/RAM 带宽比: {:.1}x", bw_ratio);
+    println!("L1 宄板€煎甫瀹? {:.1} GB/s", l1_bw);
+    println!("RAM 宄板€煎甫瀹? {:.1} GB/s", ram_bw);
+    println!("L1/RAM 甯﹀姣? {:.1}x", bw_ratio);
     println!();
 
     if bw_ratio > 3.0 {
-        println!(">>> 判定: MEMORY-BOUND <<<");
-        println!("带宽随 working set 跨 cache 层级显著下降（{:.1}x），", bw_ratio);
-        println!("说明数据搬运是瓶颈。AVX2 加宽指令在此场景收益有限，");
-        println!("优化重心应先放在：布局优化 + 预取 + 减少数据搬运。");
+        println!(">>> 鍒ゅ畾: MEMORY-BOUND <<<");
+        println!("甯﹀闅?working set 璺?cache 灞傜骇鏄捐憲涓嬮檷锛坽:.1}x锛夛紝", bw_ratio);
+        println!("璇存槑鏁版嵁鎼繍鏄摱棰堛€侫VX2 鍔犲鎸囦护鍦ㄦ鍦烘櫙鏀剁泭鏈夐檺锛?);
+        println!("浼樺寲閲嶅績搴斿厛鏀惧湪锛氬竷灞€浼樺寲 + 棰勫彇 + 鍑忓皯鏁版嵁鎼繍銆?);
     } else {
-        println!(">>> 判定: COMPUTE-BOUND 或 OVERHEAD-BOUND <<<");
-        println!("带宽在各 cache 层级保持稳定，瓶颈在计算或循环开销。");
-        println!("AVX2 加宽指令可直接提升吞吐，应优先引入。");
+        println!(">>> 鍒ゅ畾: COMPUTE-BOUND 鎴?OVERHEAD-BOUND <<<");
+        println!("甯﹀鍦ㄥ悇 cache 灞傜骇淇濇寔绋冲畾锛岀摱棰堝湪璁＄畻鎴栧惊鐜紑閿€銆?);
+        println!("AVX2 鍔犲鎸囦护鍙洿鎺ユ彁鍗囧悶鍚愶紝搴斾紭鍏堝紩鍏ャ€?);
     }
     println!();
-    println!("=== 理论参考 ===");
-    println!("Zen 4 峰值带宽: L1~288GB/s, L2~144GB/s, L3~72GB/s, RAM~50GB/s");
-    println!("当前 L1 有效带宽 {:.1} GB/s = L1 峰值的 {:.1}%", l1_bw, l1_bw / 288.0 * 100.0);
-    println!("若有效带宽 << 峰值带宽，说明计算/循环开销是瓶颈（compute-bound）");
-    println!("若有效带宽 ≈ 峰值带宽，说明数据搬运是瓶颈（memory-bound）");
+    println!("=== 鐞嗚鍙傝€?===");
+    println!("Zen 4 宄板€煎甫瀹? L1~288GB/s, L2~144GB/s, L3~72GB/s, RAM~50GB/s");
+    println!("褰撳墠 L1 鏈夋晥甯﹀ {:.1} GB/s = L1 宄板€肩殑 {:.1}%", l1_bw, l1_bw / 288.0 * 100.0);
+    println!("鑻ユ湁鏁堝甫瀹?<< 宄板€煎甫瀹斤紝璇存槑璁＄畻/寰幆寮€閿€鏄摱棰堬紙compute-bound锛?);
+    println!("鑻ユ湁鏁堝甫瀹?鈮?宄板€煎甫瀹斤紝璇存槑鏁版嵁鎼繍鏄摱棰堬紙memory-bound锛?);
 }

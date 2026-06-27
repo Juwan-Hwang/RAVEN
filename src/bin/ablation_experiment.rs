@@ -1,15 +1,15 @@
-//! 完整消融指标实验（第四阶段）
+﻿//! 瀹屾暣娑堣瀺鎸囨爣瀹為獙锛堢鍥涢樁娈碉級
 //!
-//! 设计文档第三层消融实验设计（论文核心证据）：
-//! 1. 边长分布（边两端 L2 距离直方图）→ 证明 β 增大时，长程导航边比例提高
-//! 2. 量化误差分布（保留边端点的 AVQ 平行分量误差均值）→ 证明 β 增大时，图系统性回避量化不稳定节点
-//! 3. 图连通度指标（平均出度、最大出度、孤立节点数）→ 证明量化感知剪枝没有破坏导航连通性
-//! 4. 跨随机种子 recall 方差（辅助稳定性指标）→ 验证量化感知剪枝是否放大构建随机性
+//! 璁捐鏂囨。绗笁灞傛秷铻嶅疄楠岃璁★紙璁烘枃鏍稿績璇佹嵁锛夛細
+//! 1. 杈归暱鍒嗗竷锛堣竟涓ょ L2 璺濈鐩存柟鍥撅級鈫?璇佹槑 尾 澧炲ぇ鏃讹紝闀跨▼瀵艰埅杈规瘮渚嬫彁楂?
+//! 2. 閲忓寲璇樊鍒嗗竷锛堜繚鐣欒竟绔偣鐨?AVQ 骞宠鍒嗛噺璇樊鍧囧€硷級鈫?璇佹槑 尾 澧炲ぇ鏃讹紝鍥剧郴缁熸€у洖閬块噺鍖栦笉绋冲畾鑺傜偣
+//! 3. 鍥捐繛閫氬害鎸囨爣锛堝钩鍧囧嚭搴︺€佹渶澶у嚭搴︺€佸绔嬭妭鐐规暟锛夆啋 璇佹槑閲忓寲鎰熺煡鍓灊娌℃湁鐮村潖瀵艰埅杩為€氭€?
+//! 4. 璺ㄩ殢鏈虹瀛?recall 鏂瑰樊锛堣緟鍔╃ǔ瀹氭€ф寚鏍囷級鈫?楠岃瘉閲忓寲鎰熺煡鍓灊鏄惁鏀惧ぇ鏋勫缓闅忔満鎬?
 //!
-//! 对照组（设计文档附录 E）：
-//! - 对照组 1：标准 RobustPrune + 无量化（f32 全精度）
-//! - 对照组 2：标准 RobustPrune + AVQ 量化（β=0，含 OPQ）
-//! - 实验组：量化感知 RobustPrune + AVQ 量化（β=0.3，含 OPQ）
+//! 瀵圭収缁勶紙璁捐鏂囨。闄勫綍 E锛夛細
+//! - 瀵圭収缁?1锛氭爣鍑?RobustPrune + 鏃犻噺鍖栵紙f32 鍏ㄧ簿搴︼級
+//! - 瀵圭収缁?2锛氭爣鍑?RobustPrune + AVQ 閲忓寲锛埼?0锛屽惈 OPQ锛?
+//! - 瀹為獙缁勶細閲忓寲鎰熺煡 RobustPrune + AVQ 閲忓寲锛埼?0.3锛屽惈 OPQ锛?
 
 use std::fs::File;
 use std::io::Read;
@@ -20,16 +20,16 @@ use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
 use raven::graph::ablation::AblationFramework;
 use raven::build::ChaCha8Rng;
 
-/// 读取 fvecs 文件
+/// 璇诲彇 fvecs 鏂囦欢
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 fvecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 fvecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 fvecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 fvecs 澶辫触");
 
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
-    assert_eq!(bytes.len() % record_bytes, 0, "fvecs 文件长度不对齐");
+    assert_eq!(bytes.len() % record_bytes, 0, "fvecs 鏂囦欢闀垮害涓嶅榻?);
 
     let mut vectors = Vec::with_capacity(n * dim);
     for i in 0..n {
@@ -42,11 +42,11 @@ fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
     (vectors, dim, n)
 }
 
-/// 读取 ivecs 文件
+/// 璇诲彇 ivecs 鏂囦欢
 fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 ivecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 ivecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 ivecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 ivecs 澶辫触");
 
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
@@ -63,7 +63,7 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
     (gt, dim, n)
 }
 
-/// 计算 recall@10
+/// 璁＄畻 recall@10
 fn eval_recall(
     train: &[f32],
     test: &[f32],
@@ -91,7 +91,7 @@ fn eval_recall(
     hits as f32 / (nq * k) as f32
 }
 
-/// 跨随机种子 recall 方差
+/// 璺ㄩ殢鏈虹瀛?recall 鏂瑰樊
 fn eval_recall_variance(
     train: &[f32],
     test: &[f32],
@@ -115,21 +115,21 @@ fn eval_recall_variance(
 }
 
 fn main() {
-    println!("=== 完整消融指标实验（第四阶段）===");
-    println!("四层指标：边长分布 / 量化误差分布 / 连通度 / 随机种子方差");
+    println!("=== 瀹屾暣娑堣瀺鎸囨爣瀹為獙锛堢鍥涢樁娈碉級===");
+    println!("鍥涘眰鎸囨爣锛氳竟闀垮垎甯?/ 閲忓寲璇樊鍒嗗竷 / 杩為€氬害 / 闅忔満绉嶅瓙鏂瑰樊");
     println!();
 
-    // 1. 加载数据
+    // 1. 鍔犺浇鏁版嵁
     let t0 = Instant::now();
     let (mut train, dim, n) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
     let (gt, _, _) = read_ivecs("data/sift/sift_groundtruth.ivecs");
     let (mut learn, _, n_learn) = read_fvecs("data/sift/sift_learn.fvecs");
-    println!("数据加载: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("鏁版嵁鍔犺浇: {:.1}s", t0.elapsed().as_secs_f64());
     println!("SIFT1M: dim={}, base={}, query={}, learn={}", dim, n, nq, n_learn);
     println!();
 
-    // 归一化到 [0,1]
+    // 褰掍竴鍖栧埌 [0,1]
     for v in train.iter_mut() { *v /= 255.0; }
     for v in test.iter_mut() { *v /= 255.0; }
     for v in learn.iter_mut() { *v /= 255.0; }
@@ -137,8 +137,8 @@ fn main() {
     let k = 10;
     let ef_search = 100;
 
-    // 2. OPQ + AVQ 训练
-    println!("=== OPQ + AVQ 训练 ===");
+    // 2. OPQ + AVQ 璁粌
+    println!("=== OPQ + AVQ 璁粌 ===");
     let t0 = Instant::now();
     let opq = OPQRotation::train_with_sub_dim(&learn, dim, 8);
     let train_rot = opq.apply(&train, dim);
@@ -148,35 +148,36 @@ fn main() {
     let cb = AVQCodebook::train_full(
         &learn_rot, dim, 256, TrainingSignal::BatchHighScorePairs, 5, 8, 0.30, avq_rng.inner(),
     );
-    println!("OPQ + AVQ 训练: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("OPQ + AVQ 璁粌: {:.1}s", t0.elapsed().as_secs_f64());
     println!();
 
-    // 3. 预计算节点量化误差
+    // 3. 棰勮绠楄妭鐐归噺鍖栬宸?
     let t0 = Instant::now();
     let node_errors: Vec<f32> = (0..n)
         .map(|i| cb.node_error(i as u32, &train_rot))
         .collect();
-    println!("节点量化误差预计算: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("鑺傜偣閲忓寲璇樊棰勮绠? {:.1}s", t0.elapsed().as_secs_f64());
     println!();
 
-    // 4. 建图配置（用较快参数，r_max=32, l_build=100）
+    // 4. 寤哄浘閰嶇疆锛堢敤杈冨揩鍙傛暟锛宺_max=32, l_build=100锛?
     let config = VamanaBuildConfig {
         alpha: 1.2,
         l_build: 100,
         r_soft: 48,
         r_max: 32,
         max_iterations: 2,
+..Default::default()
     };
 
-    // 5. 构建 β=0.0 图（对照组 2：标准 RobustPrune + AVQ）
-    println!("=== 构建 β=0.0 图（对照组 2）===");
+    // 5. 鏋勫缓 尾=0.0 鍥撅紙瀵圭収缁?2锛氭爣鍑?RobustPrune + AVQ锛?
+    println!("=== 鏋勫缓 尾=0.0 鍥撅紙瀵圭収缁?2锛?==");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
     let graph_beta0 = VamanaGraph::build(&train_rot, dim, &config, &mut rng);
-    println!("β=0.0 建图: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("尾=0.0 寤哄浘: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // 6. 构建 β=0.3 图（实验组：量化感知 RobustPrune + AVQ）
-    println!("=== 构建 β=0.3 图（实验组）===");
+    // 6. 鏋勫缓 尾=0.3 鍥撅紙瀹為獙缁勶細閲忓寲鎰熺煡 RobustPrune + AVQ锛?
+    println!("=== 鏋勫缓 尾=0.3 鍥撅紙瀹為獙缁勶級===");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
     use raven::graph::quant_aware_prune::{QuantAwarePruneConfig, NormalizationScheme, EPSILON};
@@ -193,15 +194,15 @@ fn main() {
         move |u, v| (ne[u as usize] + ne[v as usize]) / 2.0,
         &mut rng,
     );
-    println!("β=0.3 建图: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("尾=0.3 寤哄浘: {:.1}s", t0.elapsed().as_secs_f64());
     println!();
 
-    // 7. 运行消融指标
+    // 7. 杩愯娑堣瀺鎸囨爣
     let framework = AblationFramework::default();
     let error_fn_beta0 = |u: u32, v: u32| (node_errors[u as usize] + node_errors[v as usize]) / 2.0;
 
-    // β=0.0 消融指标
-    println!("=== β=0.0 消融指标 ===");
+    // 尾=0.0 娑堣瀺鎸囨爣
+    println!("=== 尾=0.0 娑堣瀺鎸囨爣 ===");
     let recall_beta0 = eval_recall(&train_rot, &test_rot, &gt, dim, nq, &graph_beta0, ef_search, k);
     println!("recall@10: {:.4}", recall_beta0);
 
@@ -215,30 +216,30 @@ fn main() {
         recall_beta0,
     );
 
-    println!("边长分布: mean={:.4}, median={:.4}, p95={:.4}, p99={:.4}, total={}",
+    println!("杈归暱鍒嗗竷: mean={:.4}, median={:.4}, p95={:.4}, p99={:.4}, total={}",
         metrics_beta0.edge_length.mean,
         metrics_beta0.edge_length.median,
         metrics_beta0.edge_length.p95,
         metrics_beta0.edge_length.p99,
         metrics_beta0.edge_length.total_edges);
-    println!("误差分布: mean={:.6}, median={:.6}, p95={:.6}, p99={:.6}",
+    println!("璇樊鍒嗗竷: mean={:.6}, median={:.6}, p95={:.6}, p99={:.6}",
         metrics_beta0.error_distribution.mean,
         metrics_beta0.error_distribution.median,
         metrics_beta0.error_distribution.p95,
         metrics_beta0.error_distribution.p99);
-    println!("连通度: mean_degree={:.2}, max_degree={}, isolated={}, total_edges={}",
+    println!("杩為€氬害: mean_degree={:.2}, max_degree={}, isolated={}, total_edges={}",
         metrics_beta0.connectivity.mean_degree,
         metrics_beta0.connectivity.max_degree,
         metrics_beta0.connectivity.isolated_nodes,
         metrics_beta0.connectivity.total_edges);
-    println!("recall方差: mean={:.4}, std_dev={:.4}, variance={:.6}",
+    println!("recall鏂瑰樊: mean={:.4}, std_dev={:.4}, variance={:.6}",
         metrics_beta0.recall_variance.mean,
         metrics_beta0.recall_variance.std_dev,
         metrics_beta0.recall_variance.variance);
     println!();
 
-    // β=0.3 消融指标
-    println!("=== β=0.3 消融指标 ===");
+    // 尾=0.3 娑堣瀺鎸囨爣
+    println!("=== 尾=0.3 娑堣瀺鎸囨爣 ===");
     let recall_beta03 = eval_recall(&train_rot, &test_rot, &gt, dim, nq, &graph_beta03, ef_search, k);
     println!("recall@10: {:.4}", recall_beta03);
 
@@ -252,57 +253,57 @@ fn main() {
         recall_beta03,
     );
 
-    println!("边长分布: mean={:.4}, median={:.4}, p95={:.4}, p99={:.4}, total={}",
+    println!("杈归暱鍒嗗竷: mean={:.4}, median={:.4}, p95={:.4}, p99={:.4}, total={}",
         metrics_beta03.edge_length.mean,
         metrics_beta03.edge_length.median,
         metrics_beta03.edge_length.p95,
         metrics_beta03.edge_length.p99,
         metrics_beta03.edge_length.total_edges);
-    println!("误差分布: mean={:.6}, median={:.6}, p95={:.6}, p99={:.6}",
+    println!("璇樊鍒嗗竷: mean={:.6}, median={:.6}, p95={:.6}, p99={:.6}",
         metrics_beta03.error_distribution.mean,
         metrics_beta03.error_distribution.median,
         metrics_beta03.error_distribution.p95,
         metrics_beta03.error_distribution.p99);
-    println!("连通度: mean_degree={:.2}, max_degree={}, isolated={}, total_edges={}",
+    println!("杩為€氬害: mean_degree={:.2}, max_degree={}, isolated={}, total_edges={}",
         metrics_beta03.connectivity.mean_degree,
         metrics_beta03.connectivity.max_degree,
         metrics_beta03.connectivity.isolated_nodes,
         metrics_beta03.connectivity.total_edges);
-    println!("recall方差: mean={:.4}, std_dev={:.4}, variance={:.6}",
+    println!("recall鏂瑰樊: mean={:.4}, std_dev={:.4}, variance={:.6}",
         metrics_beta03.recall_variance.mean,
         metrics_beta03.recall_variance.std_dev,
         metrics_beta03.recall_variance.variance);
     println!();
 
-    // 8. 闭合论证链验证
-    println!("=== 闭合论证链验证 ===");
+    // 8. 闂悎璁鸿瘉閾鹃獙璇?
+    println!("=== 闂悎璁鸿瘉閾鹃獙璇?===");
     let all_metrics = vec![metrics_beta0, metrics_beta03];
     let chain_result = AblationFramework::verify_argument_chain(&all_metrics);
-    println!("拓扑证据（β增大时低误差边比例上升）: {}", chain_result.topology_evidence);
-    println!("性能证据（β增大时recall提高）: {}", chain_result.performance_evidence);
-    println!("机制解释（连通度未破坏）: {}", chain_result.mechanism_explanation);
-    println!("论证链是否成立: {}", chain_result.chain_holds);
+    println!("鎷撴墤璇佹嵁锛埼插澶ф椂浣庤宸竟姣斾緥涓婂崌锛? {}", chain_result.topology_evidence);
+    println!("鎬ц兘璇佹嵁锛埼插澶ф椂recall鎻愰珮锛? {}", chain_result.performance_evidence);
+    println!("鏈哄埗瑙ｉ噴锛堣繛閫氬害鏈牬鍧忥級: {}", chain_result.mechanism_explanation);
+    println!("璁鸿瘉閾炬槸鍚︽垚绔? {}", chain_result.chain_holds);
     println!();
 
-    // 9. 跨随机种子 recall 方差（辅助稳定性指标）
-    println!("=== 跨随机种子 recall 方差（β=0.0）===");
+    // 9. 璺ㄩ殢鏈虹瀛?recall 鏂瑰樊锛堣緟鍔╃ǔ瀹氭€ф寚鏍囷級
+    println!("=== 璺ㄩ殢鏈虹瀛?recall 鏂瑰樊锛埼?0.0锛?==");
     let seeds = [42u64, 123, 456];
     let recalls_variance = eval_recall_variance(
         &train_rot, &test_rot, &gt, dim, nq, &config, &seeds, ef_search, k,
     );
     let variance_metrics = raven::graph::ablation::RecallVariance::from_recalls(&recalls_variance);
-    println!("跨种子 recall: mean={:.4}, std_dev={:.4}, variance={:.6}",
+    println!("璺ㄧ瀛?recall: mean={:.4}, std_dev={:.4}, variance={:.6}",
         variance_metrics.mean, variance_metrics.std_dev, variance_metrics.variance);
     println!();
 
-    // 10. 汇总
-    println!("=== 汇总 ===");
-    println!("对照组 2（β=0.0, OPQ+AVQ）: recall={:.4}", recall_beta0);
-    println!("实验组（β=0.3, OPQ+AVQ）: recall={:.4}", recall_beta03);
-    println!("论证链成立: {}", chain_result.chain_holds);
+    // 10. 姹囨€?
+    println!("=== 姹囨€?===");
+    println!("瀵圭収缁?2锛埼?0.0, OPQ+AVQ锛? recall={:.4}", recall_beta0);
+    println!("瀹為獙缁勶紙尾=0.3, OPQ+AVQ锛? recall={:.4}", recall_beta03);
+    println!("璁鸿瘉閾炬垚绔? {}", chain_result.chain_holds);
     println!();
-    println!("论文结论：");
-    println!("  1. OPQ 减小量化退化（ADC+rerank recall +0.88%）");
-    println!("  2. β 量化感知剪枝在 SIFT 数据上无正收益（β=0.0 最优）");
-    println!("  3. 论证链不成立：β 增大时 recall 未提高（SIFT 数据量化误差均匀分布）");
+    println!("璁烘枃缁撹锛?);
+    println!("  1. OPQ 鍑忓皬閲忓寲閫€鍖栵紙ADC+rerank recall +0.88%锛?);
+    println!("  2. 尾 閲忓寲鎰熺煡鍓灊鍦?SIFT 鏁版嵁涓婃棤姝ｆ敹鐩婏紙尾=0.0 鏈€浼橈級");
+    println!("  3. 璁鸿瘉閾句笉鎴愮珛锛毼?澧炲ぇ鏃?recall 鏈彁楂橈紙SIFT 鏁版嵁閲忓寲璇樊鍧囧寑鍒嗗竷锛?);
 }

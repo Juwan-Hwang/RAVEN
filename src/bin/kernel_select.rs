@@ -1,16 +1,14 @@
-//! 三阶段内核选择 CLI（含 5 分钟稳定性测试）
+﻿//! 涓夐樁娈靛唴鏍搁€夋嫨 CLI锛堝惈 5 鍒嗛挓绋冲畾鎬ф祴璇曪級
 //!
-//! 设计文档 Week 3-4 硬目标：三阶段内核选择（含 5 分钟稳定性测试）落地
-//! 设计文档 F.10：连续运行 5 分钟，每 30 秒采样一次 QPS
+//! 璁捐鏂囨。 Week 3-4 纭洰鏍囷細涓夐樁娈靛唴鏍搁€夋嫨锛堝惈 5 鍒嗛挓绋冲畾鎬ф祴璇曪級钀藉湴
+//! 璁捐鏂囨。 F.10锛氳繛缁繍琛?5 鍒嗛挓锛屾瘡 30 绉掗噰鏍蜂竴娆?QPS
 //!
-//! 用法：
-//!   cargo run --release --bin kernel_select -- --dim 768
+//! 鐢ㄦ硶锛?//!   cargo run --release --bin kernel_select -- --dim 768
 //!   cargo run --release --bin kernel_select -- --dim 768 --duration 300
-//!   cargo run --release --bin kernel_select -- --dim 768 --skip-stability  # 跳过 5 分钟测试
+//!   cargo run --release --bin kernel_select -- --dim 768 --skip-stability  # 璺宠繃 5 鍒嗛挓娴嬭瘯
 //!
-//! 环境变量：
-//!   RAVEN_KERNEL=scalar|avx2  强制指定内核（跳过三阶段筛选）
-//!   RAVEN_CACHE_DIR=<path>    指定缓存目录
+//! 鐜鍙橀噺锛?//!   RAVEN_KERNEL=scalar|avx2  寮哄埗鎸囧畾鍐呮牳锛堣烦杩囦笁闃舵绛涢€夛級
+//!   RAVEN_CACHE_DIR=<path>    鎸囧畾缂撳瓨鐩綍
 
 use std::time::{Duration, Instant};
 use raven::distance::kernel::{
@@ -19,10 +17,9 @@ use raven::distance::kernel::{
 };
 
 fn main() {
-    // 初始化 tracing（简化版，直接 println）
-    let args: Vec<String> = std::env::args().collect();
+    // 鍒濆鍖?tracing锛堢畝鍖栫増锛岀洿鎺?println锛?    let args: Vec<String> = std::env::args().collect();
     let mut dim: usize = 768;
-    let mut stability_duration_secs: u64 = 300; // 设计文档 F.10：5 分钟
+    let mut stability_duration_secs: u64 = 300; // 璁捐鏂囨。 F.10锛? 鍒嗛挓
     let mut skip_stability = false;
 
     let mut i = 1;
@@ -50,24 +47,24 @@ fn main() {
         i += 1;
     }
 
-    println!("=== RAVEN 三阶段内核选择 ===");
-    println!("维度: dim={}", dim);
-    println!("稳定性测试时长: {}s ({:.1}min)", stability_duration_secs, stability_duration_secs as f64 / 60.0);
+    println!("=== RAVEN 涓夐樁娈靛唴鏍搁€夋嫨 ===");
+    println!("缁村害: dim={}", dim);
+    println!("绋冲畾鎬ф祴璇曟椂闀? {}s ({:.1}min)", stability_duration_secs, stability_duration_secs as f64 / 60.0);
     println!();
 
     let candidates = available_kernels();
-    println!("可用内核: {:?}", candidates.iter().map(|k| k.name()).collect::<Vec<_>>());
+    println!("鍙敤鍐呮牳: {:?}", candidates.iter().map(|k| k.name()).collect::<Vec<_>>());
     println!();
 
-    // === 第一阶段：延迟粗筛 ===
-    println!("--- 第一阶段：延迟粗筛（阈值 {}ns）---", LATENCY_THRESHOLD_NS);
+    // === 绗竴闃舵锛氬欢杩熺矖绛?===
+    println!("--- 绗竴闃舵锛氬欢杩熺矖绛涳紙闃堝€?{}ns锛?--", LATENCY_THRESHOLD_NS);
     let mut passed_stage1: Vec<(KernelVariant, u64)> = Vec::new();
     for k in &candidates {
         let lat = measure_latency_ns(*k, dim);
         let pass = lat < LATENCY_THRESHOLD_NS;
         println!("  {:<8} latency={:>6}ns  {}",
             k.name(), lat,
-            if pass { "PASS" } else { "FAIL (淘汰)" });
+            if pass { "PASS" } else { "FAIL (娣樻卑)" });
         if pass {
             passed_stage1.push((*k, lat));
         }
@@ -75,12 +72,12 @@ fn main() {
     println!();
 
     if passed_stage1.is_empty() {
-        println!("所有内核延迟超标，降级到 {}", fallback_kernel(dim).name());
+        println!("鎵€鏈夊唴鏍稿欢杩熻秴鏍囷紝闄嶇骇鍒?{}", fallback_kernel(dim).name());
         return;
     }
 
-    // === 第二阶段：瞬时 QPS 筛选 ===
-    println!("--- 第二阶段：瞬时 QPS 筛选 ---");
+    // === 绗簩闃舵锛氱灛鏃?QPS 绛涢€?===
+    println!("--- 绗簩闃舵锛氱灛鏃?QPS 绛涢€?---");
     let mut qps_results: Vec<(KernelVariant, u64)> = Vec::new();
     for (k, _lat) in &passed_stage1 {
         let qps = measure_qps(*k, dim);
@@ -90,32 +87,32 @@ fn main() {
     qps_results.sort_by(|a, b| b.1.cmp(&a.1));
     let finalist = qps_results[0].0;
     println!();
-    println!("决赛选手: {} (qps={})", finalist.name(), qps_results[0].1);
+    println!("鍐宠禌閫夋墜: {} (qps={})", finalist.name(), qps_results[0].1);
     println!();
 
-    // === 第三阶段：持续稳定性验证 ===
+    // === 绗笁闃舵锛氭寔缁ǔ瀹氭€ч獙璇?===
     if skip_stability {
-        println!("--- 第三阶段：跳过（--skip-stability）---");
+        println!("--- 绗笁闃舵锛氳烦杩囷紙--skip-stability锛?--");
         println!();
         save_cache(dim, finalist);
         print_summary(dim, finalist, &passed_stage1, &qps_results, None);
         return;
     }
 
-    println!("--- 第三阶段：持续稳定性验证（{}s，每 30s 采样）---", stability_duration_secs);
-    println!("  运行中...（此阶段耗时 {}s）", stability_duration_secs);
+    println!("--- 绗笁闃舵锛氭寔缁ǔ瀹氭€ч獙璇侊紙{}s锛屾瘡 30s 閲囨牱锛?--", stability_duration_secs);
+    println!("  杩愯涓?..锛堟闃舵鑰楁椂 {}s锛?, stability_duration_secs);
 
     let stability_start = Instant::now();
     let baseline_qps = measure_qps(finalist, dim);
     println!("  baseline QPS: {}", baseline_qps);
 
-    // 设计文档 F.10：连续运行 5 分钟，每 30 秒采样一次 QPS
-    // 关键：内核必须持续运行（不能空闲），以检测 thermal throttling
+    // 璁捐鏂囨。 F.10锛氳繛缁繍琛?5 鍒嗛挓锛屾瘡 30 绉掗噰鏍蜂竴娆?QPS
+    // 鍏抽敭锛氬唴鏍稿繀椤绘寔缁繍琛岋紙涓嶈兘绌洪棽锛夛紝浠ユ娴?thermal throttling
     let kernel = finalist.build_kernel(raven::distance::DistanceMetric::L2);
     let a: Vec<f32> = (0..dim).map(|i| i as f32 * 0.001).collect();
     let b: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.002) + 1.0).collect();
 
-    // 预热
+    // 棰勭儹
     for _ in 0..256 {
         let _ = kernel.distance(&a, &b);
     }
@@ -127,8 +124,7 @@ fn main() {
     while stability_start.elapsed() < Duration::from_secs(stability_duration_secs) {
         let window_start = Instant::now();
         let mut window_count: u64 = 0;
-        // 持续运行 30 秒，不停歇
-        while window_start.elapsed() < sample_interval {
+        // 鎸佺画杩愯 30 绉掞紝涓嶅仠姝?        while window_start.elapsed() < sample_interval {
             for _ in 0..1024 {
                 let _ = kernel.distance(&a, &b);
             }
@@ -150,11 +146,11 @@ fn main() {
 
     println!();
     println!("  baseline QPS:   {}", baseline_qps);
-    println!("  sustained QPS:  {:.0} ({} 个采样平均)", sustained_qps, samples.len());
+    println!("  sustained QPS:  {:.0} ({} 涓噰鏍峰钩鍧?", sustained_qps, samples.len());
     println!("  ratio:          {:.4}", ratio);
-    println!("  通过标准:       ratio >= 0.95");
-    println!("  结果:           {}",
-        if stable { "PASS" } else { "FAIL (降级)" });
+    println!("  閫氳繃鏍囧噯:       ratio >= 0.95");
+    println!("  缁撴灉:           {}",
+        if stable { "PASS" } else { "FAIL (闄嶇骇)" });
     println!();
 
     let selected = if stable {
@@ -168,14 +164,13 @@ fn main() {
         fallback_kernel(dim)
     };
 
-    // 保存到缓存（设计文档：缓存最优配置，首次选定后落盘）
+    // 淇濆瓨鍒扮紦瀛橈紙璁捐鏂囨。锛氱紦瀛樻渶浼橀厤缃紝棣栨閫夊畾鍚庤惤鐩橈級
     save_cache(dim, selected);
 
     print_summary(dim, selected, &passed_stage1, &qps_results, Some((ratio, stable)));
 }
 
-/// 保存内核选择到缓存文件
-fn save_cache(dim: usize, variant: KernelVariant) {
+/// 淇濆瓨鍐呮牳閫夋嫨鍒扮紦瀛樻枃浠?fn save_cache(dim: usize, variant: KernelVariant) {
     use raven::distance::kernel::KernelCache;
     let cache_dir = std::env::var("RAVEN_CACHE_DIR")
         .map(std::path::PathBuf::from)
@@ -201,39 +196,39 @@ fn print_summary(
     stage2: &[(KernelVariant, u64)],
     stability: Option<(f64, bool)>,
 ) {
-    println!("=== 最终选择结果 ===");
+    println!("=== 鏈€缁堥€夋嫨缁撴灉 ===");
     println!("dim={}, kernel={}", dim, selected.name());
     println!();
-    println!("阶段 1（延迟粗筛）:");
+    println!("闃舵 1锛堝欢杩熺矖绛涳級:");
     for (k, lat) in stage1 {
         println!("  {:<8} {}ns", k.name(), lat);
     }
-    println!("阶段 2（瞬时 QPS）:");
+    println!("闃舵 2锛堢灛鏃?QPS锛?");
     for (k, qps) in stage2 {
         println!("  {:<8} qps={}", k.name(), qps);
     }
     if let Some((ratio, stable)) = stability {
-        println!("阶段 3（稳定性）: ratio={:.4} stable={}", ratio, stable);
+        println!("闃舵 3锛堢ǔ瀹氭€э級: ratio={:.4} stable={}", ratio, stable);
     }
     println!();
-    println!("缓存路径: ~/.cache/raven/kernel_cache.toml");
-    println!("（下次同维度选择将直接命中缓存，跳过三阶段筛选）");
+    println!("缂撳瓨璺緞: ~/.cache/raven/kernel_cache.toml");
+    println!("锛堜笅娆″悓缁村害閫夋嫨灏嗙洿鎺ュ懡涓紦瀛橈紝璺宠繃涓夐樁娈电瓫閫夛級");
 }
 
 fn print_help() {
-    println!("RAVEN 三阶段内核选择工具");
+    println!("RAVEN 涓夐樁娈靛唴鏍搁€夋嫨宸ュ叿");
     println!();
-    println!("用法:");
+    println!("鐢ㄦ硶:");
     println!("  kernel_select [OPTIONS]");
     println!();
-    println!("选项:");
-    println!("  --dim <N>              维度（默认 768）");
-    println!("  --duration <S>         稳定性测试时长秒数（默认 300=5min）");
-    println!("  --skip-stability       跳过第三阶段稳定性测试");
-    println!("  -v, --verbose          详细输出");
-    println!("  -h, --help             显示帮助");
+    println!("閫夐」:");
+    println!("  --dim <N>              缁村害锛堥粯璁?768锛?);
+    println!("  --duration <S>         绋冲畾鎬ф祴璇曟椂闀跨鏁帮紙榛樿 300=5min锛?);
+    println!("  --skip-stability       璺宠繃绗笁闃舵绋冲畾鎬ф祴璇?);
+    println!("  -v, --verbose          璇︾粏杈撳嚭");
+    println!("  -h, --help             鏄剧ず甯姪");
     println!();
-    println!("环境变量:");
-    println!("  RAVEN_KERNEL=scalar|avx2   强制指定内核");
-    println!("  RAVEN_CACHE_DIR=<path>     缓存目录");
+    println!("鐜鍙橀噺:");
+    println!("  RAVEN_KERNEL=scalar|avx2   寮哄埗鎸囧畾鍐呮牳");
+    println!("  RAVEN_CACHE_DIR=<path>     缂撳瓨鐩綍");
 }

@@ -1,14 +1,14 @@
-//! 旗舰索引 + RP-Tuning Pareto 曲线实验（第二阶段）
+﻿//! 鏃楄埌绱㈠紩 + RP-Tuning Pareto 鏇茬嚎瀹為獙锛堢浜岄樁娈碉級
 //!
-//! 最终参数：α=1.2, β=0.0, l_build=200, r_max=64, r_soft=96
-//! 流程：
-//! 1. OPQ 旋转（learn 集 100K）
-//! 2. AVQ 训练（旋转后 learn, K=256, sub_dim=8, α=0.30, iter=5）
-//! 3. 旗舰图构建（旋转后 train, α=1.2, l_build=200, r_max=64, r_soft=96, max_iter=2）
-//! 4. RP-Tuning 生成 α=1.0/1.2/1.5/2.0 变体（秒级）
-//! 5. 对每个变体跑 f32 和 ADC+rerank 搜索，绘制 Pareto 曲线
+//! 鏈€缁堝弬鏁帮細伪=1.2, 尾=0.0, l_build=200, r_max=64, r_soft=96
+//! 娴佺▼锛?
+//! 1. OPQ 鏃嬭浆锛坙earn 闆?100K锛?
+//! 2. AVQ 璁粌锛堟棆杞悗 learn, K=256, sub_dim=8, 伪=0.30, iter=5锛?
+//! 3. 鏃楄埌鍥炬瀯寤猴紙鏃嬭浆鍚?train, 伪=1.2, l_build=200, r_max=64, r_soft=96, max_iter=2锛?
+//! 4. RP-Tuning 鐢熸垚 伪=1.0/1.2/1.5/2.0 鍙樹綋锛堢绾э級
+//! 5. 瀵规瘡涓彉浣撹窇 f32 鍜?ADC+rerank 鎼滅储锛岀粯鍒?Pareto 鏇茬嚎
 //!
-//! 目标：证明 RP-Tuning 在稠密图（r_max=64）上仍无退化，且能覆盖整条前沿
+//! 鐩爣锛氳瘉鏄?RP-Tuning 鍦ㄧ瀵嗗浘锛坮_max=64锛変笂浠嶆棤閫€鍖栵紝涓旇兘瑕嗙洊鏁存潯鍓嶆部
 
 use std::fs::File;
 use std::io::Read;
@@ -20,16 +20,16 @@ use raven::graph::rp_tuning::{RPTuning, RPTuningConfig, RPTuningStorageScheme};
 use raven::build::ChaCha8Rng;
 use raven::l2_simd;
 
-/// 读取 fvecs 文件
+/// 璇诲彇 fvecs 鏂囦欢
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 fvecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 fvecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 fvecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 fvecs 澶辫触");
 
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
-    assert_eq!(bytes.len() % record_bytes, 0, "fvecs 文件长度不对齐");
+    assert_eq!(bytes.len() % record_bytes, 0, "fvecs 鏂囦欢闀垮害涓嶅榻?);
 
     let mut vectors = Vec::with_capacity(n * dim);
     for i in 0..n {
@@ -42,11 +42,11 @@ fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
     (vectors, dim, n)
 }
 
-/// 读取 ivecs 文件
+/// 璇诲彇 ivecs 鏂囦欢
 fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 ivecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 ivecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 ivecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 ivecs 澶辫触");
 
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
@@ -63,7 +63,7 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
     (gt, dim, n)
 }
 
-/// f32 搜索，返回 (recall@10, qps)
+/// f32 鎼滅储锛岃繑鍥?(recall@10, qps)
 fn eval_f32(
     train: &[f32],
     storage: &raven::memory::HybridBlockedCsr,
@@ -98,7 +98,7 @@ fn eval_f32(
     (recall, qps)
 }
 
-/// ADC + rerank 搜索，返回 (recall@10, qps)
+/// ADC + rerank 鎼滅储锛岃繑鍥?(recall@10, qps)
 fn eval_adc_rerank(
     train: &[f32],
     quantized_db: &[f32],
@@ -145,22 +145,22 @@ fn eval_adc_rerank(
 }
 
 fn main() {
-    println!("=== 旗舰索引 + RP-Tuning Pareto 曲线实验（第二阶段）===");
-    println!("最终参数：α=1.2, β=0.0, l_build=200, r_max=64, r_soft=96, max_iter=2");
-    println!("OPQ 旋转 + AVQ 量化 + RP-Tuning α 变体");
+    println!("=== 鏃楄埌绱㈠紩 + RP-Tuning Pareto 鏇茬嚎瀹為獙锛堢浜岄樁娈碉級===");
+    println!("鏈€缁堝弬鏁帮細伪=1.2, 尾=0.0, l_build=200, r_max=64, r_soft=96, max_iter=2");
+    println!("OPQ 鏃嬭浆 + AVQ 閲忓寲 + RP-Tuning 伪 鍙樹綋");
     println!();
 
-    // 1. 加载数据
+    // 1. 鍔犺浇鏁版嵁
     let t0 = Instant::now();
     let (mut train, dim, n) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
     let (gt, gt_k, gt_nq) = read_ivecs("data/sift/sift_groundtruth.ivecs");
     let (mut learn, _, n_learn) = read_fvecs("data/sift/sift_learn.fvecs");
-    println!("数据加载: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("鏁版嵁鍔犺浇: {:.1}s", t0.elapsed().as_secs_f64());
     println!("SIFT1M: dim={}, base={}, query={}, gt_nq={}, gt_k={}, learn={}", dim, n, nq, gt_nq, gt_k, n_learn);
     println!();
 
-    // 归一化到 [0,1]
+    // 褰掍竴鍖栧埌 [0,1]
     for v in train.iter_mut() { *v /= 255.0; }
     for v in test.iter_mut() { *v /= 255.0; }
     for v in learn.iter_mut() { *v /= 255.0; }
@@ -169,24 +169,24 @@ fn main() {
     let top_n = 100;
     let ef_points = vec![50, 100, 200, 400];
 
-    // 2. OPQ 训练 + 旋转
-    println!("=== OPQ 训练 + 旋转 ===");
+    // 2. OPQ 璁粌 + 鏃嬭浆
+    println!("=== OPQ 璁粌 + 鏃嬭浆 ===");
     let t0 = Instant::now();
     let opq = OPQRotation::train_with_sub_dim(&learn, dim, 8);
     let train_rot = opq.apply(&train, dim);
     let test_rot = opq.apply(&test, dim);
     let learn_rot = opq.apply(&learn, dim);
-    println!("OPQ 训练 + 旋转: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("OPQ 璁粌 + 鏃嬭浆: {:.1}s", t0.elapsed().as_secs_f64());
     println!();
 
-    // 3. AVQ 训练 + 量化数据库
-    println!("=== AVQ 训练（旋转后 learn, K=256, sub_dim=8, α=0.30, iter=5）===");
+    // 3. AVQ 璁粌 + 閲忓寲鏁版嵁搴?
+    println!("=== AVQ 璁粌锛堟棆杞悗 learn, K=256, sub_dim=8, 伪=0.30, iter=5锛?==");
     let t0 = Instant::now();
     let mut avq_rng = ChaCha8Rng::seed_from(42);
     let cb = AVQCodebook::train_full(
         &learn_rot, dim, 256, TrainingSignal::BatchHighScorePairs, 5, 8, 0.30, avq_rng.inner(),
     );
-    println!("AVQ 训练: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("AVQ 璁粌: {:.1}s", t0.elapsed().as_secs_f64());
 
     let t0 = Instant::now();
     let quantized_db: Vec<f32> = (0..n)
@@ -195,11 +195,11 @@ fn main() {
             cb.decode(&cb.encode(v))
         })
         .collect();
-    println!("量化数据库构造: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("閲忓寲鏁版嵁搴撴瀯閫? {:.1}s", t0.elapsed().as_secs_f64());
     println!();
 
-    // 4. 旗舰图构建（最终参数）
-    println!("=== 旗舰图构建（α=1.2, l_build=200, r_max=64, r_soft=96, max_iter=2）===");
+    // 4. 鏃楄埌鍥炬瀯寤猴紙鏈€缁堝弬鏁帮級
+    println!("=== 鏃楄埌鍥炬瀯寤猴紙伪=1.2, l_build=200, r_max=64, r_soft=96, max_iter=2锛?==");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
@@ -208,15 +208,16 @@ fn main() {
         r_soft: 96,
         r_max: 64,
         max_iterations: 2,
+..Default::default()
     };
     let base_graph = VamanaGraph::build(&train_rot, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();
-    println!("旗舰图构建完成: {:.1}s", build_time);
-    println!("平均出度: {:.1}", base_graph.degree_stats().mean_degree);
+    println!("鏃楄埌鍥炬瀯寤哄畬鎴? {:.1}s", build_time);
+    println!("骞冲潎鍑哄害: {:.1}", base_graph.degree_stats().mean_degree);
     println!();
 
-    // 5. RP-Tuning 生成 α 变体（秒级）
-    println!("=== RP-Tuning 生成 α 变体（Scheme A）===");
+    // 5. RP-Tuning 鐢熸垚 伪 鍙樹綋锛堢绾э級
+    println!("=== RP-Tuning 鐢熸垚 伪 鍙樹綋锛圫cheme A锛?==");
     let t0 = Instant::now();
     let rp_config = RPTuningConfig {
         scheme: RPTuningStorageScheme::SchemeA,
@@ -224,11 +225,11 @@ fn main() {
         r_max: 64,
     };
     let variants = RPTuning::generate_variants(&base_graph, &train_rot, dim, &rp_config);
-    println!("RP-Tuning 生成 {} 个变体: {:.2}s", variants.len(), t0.elapsed().as_secs_f64());
+    println!("RP-Tuning 鐢熸垚 {} 涓彉浣? {:.2}s", variants.len(), t0.elapsed().as_secs_f64());
     println!();
 
-    // 6. f32 Pareto 曲线
-    println!("=== f32 Pareto 曲线 ===");
+    // 6. f32 Pareto 鏇茬嚎
+    println!("=== f32 Pareto 鏇茬嚎 ===");
     println!("{:<8} {:<10} {:>12} {:>10}", "alpha", "ef_search", "f32_recall", "f32_qps");
     println!("{:-<44}", "");
 
@@ -243,8 +244,8 @@ fn main() {
         println!();
     }
 
-    // 7. ADC + rerank Pareto 曲线
-    println!("=== ADC + rerank Pareto 曲线 ===");
+    // 7. ADC + rerank Pareto 鏇茬嚎
+    println!("=== ADC + rerank Pareto 鏇茬嚎 ===");
     println!("{:<8} {:<10} {:>14} {:>12}", "alpha", "ef_search", "adc_rerank", "adc_qps");
     println!("{:-<48}", "");
 
@@ -259,14 +260,14 @@ fn main() {
         println!();
     }
 
-    // 8. 汇总
-    println!("=== 汇总 ===");
-    println!("旗舰图参数: α=1.2, l_build=200, r_max=64, r_soft=96, max_iter=2");
-    println!("OPQ: sub_dim=8, AVQ: K=256, sub_dim=8, α=0.30, iter=5");
-    println!("RP-Tuning 变体: α=[1.0, 1.2, 1.5, 2.0], Scheme A, r_max=64");
+    // 8. 姹囨€?
+    println!("=== 姹囨€?===");
+    println!("鏃楄埌鍥惧弬鏁? 伪=1.2, l_build=200, r_max=64, r_soft=96, max_iter=2");
+    println!("OPQ: sub_dim=8, AVQ: K=256, sub_dim=8, 伪=0.30, iter=5");
+    println!("RP-Tuning 鍙樹綋: 伪=[1.0, 1.2, 1.5, 2.0], Scheme A, r_max=64");
     println!("ef_search: [50, 100, 200, 400]");
     println!();
-    println!("Pareto 前沿分析：");
-    println!("  f32: 验证 RP-Tuning 在稠密图（r_max=64）上无退化");
-    println!("  ADC+rerank: 验证 OPQ+AVQ 量化后的 Pareto 前沿覆盖");
+    println!("Pareto 鍓嶆部鍒嗘瀽锛?);
+    println!("  f32: 楠岃瘉 RP-Tuning 鍦ㄧ瀵嗗浘锛坮_max=64锛変笂鏃犻€€鍖?);
+    println!("  ADC+rerank: 楠岃瘉 OPQ+AVQ 閲忓寲鍚庣殑 Pareto 鍓嶆部瑕嗙洊");
 }

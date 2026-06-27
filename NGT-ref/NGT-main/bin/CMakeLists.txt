@@ -1,0 +1,8 @@
+if(${UNIX})
+	include_directories("${PROJECT_SOURCE_DIR}/lib" "${PROJECT_BINARY_DIR}/lib/")
+	link_directories("${PROJECT_BINARY_DIR}/lib/NGT")
+	add_subdirectory("${PROJECT_SOURCE_DIR}/bin/ngt")
+	if(NOT DEFINED NGT_QBG_DISABLED OR (NOT ${NGT_QBG_DISABLED}))
+		add_subdirectory("${PROJECT_SOURCE_DIR}/bin/qbg")
+        endif()
+endif()

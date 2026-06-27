@@ -195,6 +195,9 @@ r_max: 8,
 r_soft: 12,
 max_iterations: 1,
 saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
+..Default::default()
 };
         let result = bench.run(&config, 50);
         assert!(result.recall_at_10 >= 0.0 && result.recall_at_10 <= 1.0);

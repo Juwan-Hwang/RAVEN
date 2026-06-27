@@ -1,10 +1,10 @@
-//! OPT-5: centroid overlay 数量优化验证（siftsmall）
+﻿//! OPT-5: centroid overlay 鏁伴噺浼樺寲楠岃瘉锛坰iftsmall锛?
 //!
-//! SIFT1M 上 centroid overlay（√N=1000）仅提升 QPS 0.5%（已有日志）。
-//! OPT-5 假设：减少 centroid 数量可能有更大收益（降低找最近 centroid 的开销）。
+//! SIFT1M 涓?centroid overlay锛堚垰N=1000锛変粎鎻愬崌 QPS 0.5%锛堝凡鏈夋棩蹇楋級銆?
+//! OPT-5 鍋囪锛氬噺灏?centroid 鏁伴噺鍙兘鏈夋洿澶ф敹鐩婏紙闄嶄綆鎵炬渶杩?centroid 鐨勫紑閿€锛夈€?
 //!
-//! 本实验用 siftsmall 快速验证不同 centroid_count 的效果。
-//! 反效果预警：如果所有组合 QPS 提升 < 2%，标记为"已验证无显著收益"。
+//! 鏈疄楠岀敤 siftsmall 蹇€熼獙璇佷笉鍚?centroid_count 鐨勬晥鏋溿€?
+//! 鍙嶆晥鏋滈璀︼細濡傛灉鎵€鏈夌粍鍚?QPS 鎻愬崌 < 2%锛屾爣璁颁负"宸查獙璇佹棤鏄捐憲鏀剁泭"銆?
 
 use std::fs::File;
 use std::io::Read;
@@ -13,9 +13,9 @@ use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher, NavigationLaye
 use raven::build::ChaCha8Rng;
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 fvecs");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 fvecs");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -30,9 +30,9 @@ fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
 }
 
 fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 ivecs");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 ivecs");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -73,7 +73,7 @@ fn eval(
 }
 
 fn main() {
-    println!("=== OPT-5: centroid overlay 数量优化（siftsmall）===");
+    println!("=== OPT-5: centroid overlay 鏁伴噺浼樺寲锛坰iftsmall锛?==");
     println!();
 
     let (mut train, dim, n) = read_fvecs("data/siftsmall_base.fvecs");
@@ -88,25 +88,26 @@ fn main() {
     let k = 10;
     let ef_search = 100;
 
-    // 建图（只建一次）
+    // 寤哄浘锛堝彧寤轰竴娆★級
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
         alpha: 1.0, l_build: 100, r_soft: 48, r_max: 32, max_iterations: 2,
+..Default::default()
     };
     let t0 = Instant::now();
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
-    println!("建图: {:.2}s", t0.elapsed().as_secs_f64());
+    println!("寤哄浘: {:.2}s", t0.elapsed().as_secs_f64());
     println!();
 
-    // 基线：medoid entry（无 navigation）
+    // 鍩虹嚎锛歮edoid entry锛堟棤 navigation锛?
     let (recall_base, qps_base) = eval(
         &train, &test, &gt, dim, nq, gt_stride, &graph, ef_search, k, None,
     );
-    println!("基线 (medoid entry): recall={:.4}, QPS={:.0}", recall_base, qps_base);
+    println!("鍩虹嚎 (medoid entry): recall={:.4}, QPS={:.0}", recall_base, qps_base);
     println!();
 
-    // 扫描 centroid_count
-    let centroid_counts = [10usize, 50, 100];  // siftsmall √N=100
+    // 鎵弿 centroid_count
+    let centroid_counts = [10usize, 50, 100];  // siftsmall 鈭歂=100
     println!("{:>12} {:>10} {:>10} {:>10}", "centroid_n", "recall@10", "QPS", "qps_delta");
     println!("{:-<46}", "");
 
@@ -128,8 +129,8 @@ fn main() {
     }
 
     println!();
-    println!("=== 结论 ===");
-    println!("SIFT1M 已有数据: centroid overlay (√N=1000) QPS +0.5%");
-    println!("siftsmall 验证: 不同 centroid_count 的 QPS 变化");
-    println!("反效果预警: 如果 QPS 提升 < 2%，标记为'已验证无显著收益'");
+    println!("=== 缁撹 ===");
+    println!("SIFT1M 宸叉湁鏁版嵁: centroid overlay (鈭歂=1000) QPS +0.5%");
+    println!("siftsmall 楠岃瘉: 涓嶅悓 centroid_count 鐨?QPS 鍙樺寲");
+    println!("鍙嶆晥鏋滈璀? 濡傛灉 QPS 鎻愬崌 < 2%锛屾爣璁颁负'宸查獙璇佹棤鏄捐憲鏀剁泭'");
 }

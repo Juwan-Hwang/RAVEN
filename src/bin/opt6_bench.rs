@@ -1,6 +1,6 @@
-//! OPT-6 微基准：HashSet 去重采样 vs Fisher-Yates 部分采样
+﻿//! OPT-6 微基准：HashSet 去重采样 vs Fisher-Yates 部分采样
 //!
-//! 只测 init_random_graph 的采样逻辑，不跑完整建图
+//! 可测 init_random_graph 的采样逻辑，不跑完整建图
 //! 数据集：100K 节点（快速验证），r_max=64
 
 use raven::build::ChaCha8Rng;
@@ -93,12 +93,11 @@ fn main() {
     println!();
     println!("正确性: 三种方案都采到 {} 个邻居/节点", r_max);
 
-    // 验收标准：加速比 ≥ 1.5x（放宽从 2x 到 1.5x，因为 HashSet 在低碰撞率下已经很快）
+    // 验收标准：加速比 >= 1.5x
     let speedup_b = dur_a.as_secs_f64() / dur_b.as_secs_f64();
     if speedup_b >= 1.5 {
-        println!("验收: PASS (方案 B 加速比 {:.2}x ≥ 1.5x)", speedup_b);
+        println!("验收: PASS (方案 B 加速比 {:.2}x >= 1.5x)", speedup_b);
     } else {
         println!("验收: FAIL (方案 B 加速比 {:.2}x < 1.5x)", speedup_b);
     }
 }
-

@@ -1,0 +1,100 @@
+/*
+ * Copyright (c) Microsoft Corporation.
+ * Licensed under the MIT license.
+ */
+
+use diskann_benchmark_runner::{output, App, Output, Registry};
+use diskann_benchmark_simd::register;
+
+pub fn main() -> anyhow::Result<()> {
+    // Create the pocket bench application.
+    let app = App::parse();
+    main_inner(&app, &mut output::default())
+}
+
+fn main_inner(app: &App, output: &mut dyn Output) -> anyhow::Result<()> {
+    let mut registry = Registry::new();
+    register(&mut registry)?;
+
+    // Here we go!
+    app.run(&registry, output)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::path::{Path, PathBuf};
+
+    use diskann_benchmark_runner::app::{Check, Commands};
+
+    fn run_integration_test(input_file: &Path, output_file: &Path) {
+        let commands = Commands::Run {
+            input_file: input_file.to_str().unwrap().into(),
+            output_file: output_file.to_str().unwrap().into(),
+            dry_run: false,
+            allow_debug: true,
+        };
+
+        let app = App::from_commands(commands);
+
+        let mut output = output::Memory::new();
+        main_inner(&app, &mut output).unwrap();
+        println!(
+            "output = {}",
+            String::from_utf8(output.into_inner()).unwrap()
+        );
+
+        assert!(output_file.exists());
+    }
+
+    fn run_check_test(input_file: &Path, tolerances: &Path) -> String {
+        let commands = Commands::Check(Check::Verify {
+            tolerances: tolerances.to_str().unwrap().into(),
+            input_file: input_file.to_str().unwrap().into(),
+        });
+
+        let app = App::from_commands(commands);
+
+        let mut output = output::Memory::new();
+        main_inner(&app, &mut output).unwrap();
+        String::from_utf8(output.into_inner()).unwrap()
+    }
+
+    #[test]
+    fn integration_test() {
+        let input = if cfg!(target_arch = "x86_64") {
+            "test.json"
+        } else if cfg!(target_arch = "aarch64") {
+            "test-aarch64.json"
+        } else {
+            panic!("Please add a dedicated test input for the compiled architecture");
+        };
+
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join(input);
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let output_path = tempdir.path().join("output.json");
+
+        run_integration_test(&input_path, &output_path);
+    }
+
+    #[test]
+    fn check_verify() {
+        let input_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("simd-scalar.json");
+        let tolerance_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("tolerance.json");
+
+        let stdout = run_check_test(&input_path, &tolerance_path);
+        println!("stdout = {}", stdout);
+    }
+}

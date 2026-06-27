@@ -1,0 +1,54 @@
+[package]
+name = "diskann-tools"
+edition = "2021"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+byteorder.workspace = true
+clap = { workspace = true, features = ["derive"] }
+diskann-providers = { workspace = true, default-features = false } # see `linalg/Cargo.toml`
+diskann-vector = { workspace = true }
+diskann-disk = { workspace = true }
+diskann-utils = { workspace = true }
+bytemuck.workspace = true
+num_cpus.workspace = true
+rayon.workspace = true
+half.workspace = true
+ordered-float = "4.2.0"
+rand_distr.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+bincode.workspace = true
+opentelemetry.workspace = true
+diskann-quantization = { workspace = true }
+diskann = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing.workspace = true
+bit-set.workspace = true
+anyhow.workspace = true
+itertools.workspace = true
+diskann-label-filter.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+vfs = { workspace = true }
+diskann-providers = { workspace = true, default-features = false, features = [
+    "virtual_storage",
+] }
+diskann-utils = { workspace = true, features = ["testing"] }
+
+[features]
+default = []
+# When a feature is enabled in tools, enable it in dependencies
+perf_test = ["diskann-providers/perf_test", "diskann-disk/perf_test"]
+
+[lints]
+clippy.undocumented_unsafe_blocks = "warn"
+clippy.uninlined_format_args = "allow"

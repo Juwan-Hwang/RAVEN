@@ -1,0 +1,68 @@
+   Compiling raven v0.8.0 (C:\Users\Juwan\Desktop\RAVEN)
+    Finished `release` profile [optimized] target(s) in 4.72s
+     Running `target\release\nav_verify_1m.exe`
+=== v9 导航层 SIFT1M 验证 ===
+数据: n=1000000, dim=128, nq=10000
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[594]
+[build] iter 1/2 alpha=1
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+[build] constructing layered navigation (M=16)...
+[nav] level 1: 62343 nodes → graph-guided
+[nav] level 2: 3886 nodes → graph-guided
+[nav] level 3: 243 nodes → brute-force
+[nav] level 4: 14 nodes → brute-force
+[build] layered nav done in 12.4s (max_level=4)
+建图: 593.2s
+[degree] mean=32.0 p95=32 p99=32 max=32 isolated=0
+[nav] max_level=4
+
+=== GLASS-COMP (200/32/2) + v9 导航 ===
+ef=50  recall=0.9705  QPS=4463  avg_visited=1227.4
+p50=1265  p95=1468  p99=1584  max=1868
+
+=== 对比基线（GLASS-COMP v3）===
+ef=50  recall=0.9703  QPS=7,501  avg_visited=1,399.5
+
+=== 对比 Glass HNSW ===
+avg_visited < 150
+
+❌ avg_visited >= 1000，分层导航未生效

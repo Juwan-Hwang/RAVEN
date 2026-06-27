@@ -1,20 +1,20 @@
-//! v8.0 消融实验：逐项独立验证每项优化
+﻿//! v8.0 娑堣瀺瀹為獙锛氶€愰」鐙珛楠岃瘉姣忛」浼樺寲
 //!
-//! 实验设计（科学方法论）：
-//! 1. 建图一次（saturate=true），保存到内存
-//! 2. 在同一张图上跑多个搜索变体，隔离搜索层优化效果
-//! 3. 另建 saturate=false 的图，对比图结构差异
+//! 瀹為獙璁捐锛堢瀛︽柟娉曡锛夛細
+//! 1. 寤哄浘涓€娆★紙saturate=true锛夛紝淇濆瓨鍒板唴瀛?
+//! 2. 鍦ㄥ悓涓€寮犲浘涓婅窇澶氫釜鎼滅储鍙樹綋锛岄殧绂绘悳绱㈠眰浼樺寲鏁堟灉
+//! 3. 鍙﹀缓 saturate=false 鐨勫浘锛屽姣斿浘缁撴瀯宸紓
 //!
-//! 搜索变体（同一张图，仅搜索代码不同）：
-//!   A: baseline     — 当前搜索（bitset 已生效）
-//!   B: two_pass     — Glass SearchImpl2 模式（批量收集 + 预取向量）
-//!   C: multi_pref   — 多行图预取（4 cache lines vs 1）
-//!   D: all_combined — B+C 合并
+//! 鎼滅储鍙樹綋锛堝悓涓€寮犲浘锛屼粎鎼滅储浠ｇ爜涓嶅悓锛夛細
+//!   A: baseline     鈥?褰撳墠鎼滅储锛坆itset 宸茬敓鏁堬級
+//!   B: two_pass     鈥?Glass SearchImpl2 妯″紡锛堟壒閲忔敹闆?+ 棰勫彇鍚戦噺锛?
+//!   C: multi_pref   鈥?澶氳鍥鹃鍙栵紙4 cache lines vs 1锛?
+//!   D: all_combined 鈥?B+C 鍚堝苟
 //!
-//! 图结构变体（不同图，相同搜索代码）：
-//!   E: saturate_off — saturate=false 建图，用 baseline 搜索
+//! 鍥剧粨鏋勫彉浣擄紙涓嶅悓鍥撅紝鐩稿悓鎼滅储浠ｇ爜锛夛細
+//!   E: saturate_off 鈥?saturate=false 寤哄浘锛岀敤 baseline 鎼滅储
 //!
-//! 用法：
+//! 鐢ㄦ硶锛?
 //!   cargo run --release --bin opt_ablation
 
 use std::fs::File;
@@ -26,7 +26,7 @@ use raven::distance::l2_simd;
 use raven::memory::{HybridBlockedCsr, VisitedTracker};
 use raven::graph::linear_pool::LinearPool;
 
-// ── 数据读取 ──
+// 鈹€鈹€ 鏁版嵁璇诲彇 鈹€鈹€
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
     let mut file = File::open(path).expect("open fvecs");
@@ -66,7 +66,7 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
     (gt, dim, n)
 }
 
-// ── 搜索变体 A: baseline（当前代码，bitset 已生效） ──
+// 鈹€鈹€ 鎼滅储鍙樹綋 A: baseline锛堝綋鍓嶄唬鐮侊紝bitset 宸茬敓鏁堬級 鈹€鈹€
 
 fn search_baseline(
     vectors: &[f32],
@@ -100,17 +100,17 @@ fn search_baseline(
     pool.to_sorted_vec()
 }
 
-// ── 搜索变体 B: two_pass（Glass SearchImpl2 模式） ──
+// 鈹€鈹€ 鎼滅储鍙樹綋 B: two_pass锛圙lass SearchImpl2 妯″紡锛?鈹€鈹€
 //
-// Glass 的核心技巧：
-// 1. Pop 节点后，第一遍扫描邻居列表，收集未访问的到 edge_buf
-// 2. 预取 edge_buf 前 po 个邻居的向量数据
-// 3. 第二遍扫描 edge_buf，每次预取 i+po 前瞻的向量
-// 4. 计算距离时向量已在 L1/L2 cache
+// Glass 鐨勬牳蹇冩妧宸э細
+// 1. Pop 鑺傜偣鍚庯紝绗竴閬嶆壂鎻忛偦灞呭垪琛紝鏀堕泦鏈闂殑鍒?edge_buf
+// 2. 棰勫彇 edge_buf 鍓?po 涓偦灞呯殑鍚戦噺鏁版嵁
+// 3. 绗簩閬嶆壂鎻?edge_buf锛屾瘡娆￠鍙?i+po 鍓嶇灮鐨勫悜閲?
+// 4. 璁＄畻璺濈鏃跺悜閲忓凡鍦?L1/L2 cache
 //
-// 与 baseline 的区别：baseline 逐个邻居计算距离，
-// 每次距离计算前向量数据可能在 DRAM，cache miss 延迟 ~100ns。
-// two_pass 批量预取，距离计算时数据已在 cache，延迟 ~4ns。
+// 涓?baseline 鐨勫尯鍒細baseline 閫愪釜閭诲眳璁＄畻璺濈锛?
+// 姣忔璺濈璁＄畻鍓嶅悜閲忔暟鎹彲鑳藉湪 DRAM锛宑ache miss 寤惰繜 ~100ns銆?
+// two_pass 鎵归噺棰勫彇锛岃窛绂昏绠楁椂鏁版嵁宸插湪 cache锛屽欢杩?~4ns銆?
 
 fn search_two_pass(
     vectors: &[f32],
@@ -120,7 +120,7 @@ fn search_two_pass(
     query: &[f32],
     ef: usize,
     visited: &mut VisitedTracker,
-    po: usize,  // prefetch offset（前瞻距离）
+    po: usize,  // prefetch offset锛堝墠鐬昏窛绂伙級
 ) -> Vec<(u32, f32)> {
     visited.reset();
     let mut pool = LinearPool::new(ef);
@@ -129,19 +129,19 @@ fn search_two_pass(
     visited.visit(entry_point);
     pool.insert(entry_point, entry_dist);
 
-    // 预分配 edge_buf（栈上，避免堆分配）
-    // R_max=64 → 64 * 4 = 256 bytes，fit 栈
+    // 棰勫垎閰?edge_buf锛堟爤涓婏紝閬垮厤鍫嗗垎閰嶏級
+    // R_max=64 鈫?64 * 4 = 256 bytes锛宖it 鏍?
     let mut edge_buf: [u32; 128] = [0; 128];
 
     while let Some((node, _dist)) = pool.pop() {
         let neighbors = storage.neighbors(node);
 
-        // 图预取：预取下一轮要 pop 的节点的邻居列表
+        // 鍥鹃鍙栵細棰勫彇涓嬩竴杞 pop 鐨勮妭鐐圭殑閭诲眳鍒楄〃
         if let Some((next_node, _)) = pool.peek_unchecked() {
             storage.prefetch_neighbors(next_node);
         }
 
-        // 第一遍：收集未访问邻居到 edge_buf
+        // 绗竴閬嶏細鏀堕泦鏈闂偦灞呭埌 edge_buf
         let mut edge_size = 0usize;
         for &v in neighbors {
             if edge_size >= 128 {
@@ -153,7 +153,7 @@ fn search_two_pass(
             }
         }
 
-        // 预取前 po 个邻居的向量数据
+        // 棰勫彇鍓?po 涓偦灞呯殑鍚戦噺鏁版嵁
         let prefetch_count = po.min(edge_size);
         for i in 0..prefetch_count {
             let v = edge_buf[i] as usize;
@@ -161,9 +161,9 @@ fn search_two_pass(
             unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
         }
 
-        // 第二遍：计算距离，同时前瞻预取
+        // 绗簩閬嶏細璁＄畻璺濈锛屽悓鏃跺墠鐬婚鍙?
         for i in 0..edge_size {
-            // 前瞻预取：i + po 处的向量
+            // 鍓嶇灮棰勫彇锛歩 + po 澶勭殑鍚戦噺
             if i + po < edge_size {
                 let v = edge_buf[i + po] as usize;
                 let ptr = &vectors[v * dim] as *const f32 as *const i8;
@@ -178,11 +178,11 @@ fn search_two_pass(
     pool.to_sorted_vec()
 }
 
-// ── 搜索变体 C: multi_pref（多行图预取） ──
+// 鈹€鈹€ 鎼滅储鍙樹綋 C: multi_pref锛堝琛屽浘棰勫彇锛?鈹€鈹€
 //
-// 当前 prefetch_neighbors 只预取 1 个 cache line（64 bytes）。
-// R_max=64 → 邻居列表 64*4=256 bytes = 4 cache lines。
-// 多行预取确保整个邻居列表在 L1 cache。
+// 褰撳墠 prefetch_neighbors 鍙鍙?1 涓?cache line锛?4 bytes锛夈€?
+// R_max=64 鈫?閭诲眳鍒楄〃 64*4=256 bytes = 4 cache lines銆?
+// 澶氳棰勫彇纭繚鏁翠釜閭诲眳鍒楄〃鍦?L1 cache銆?
 
 fn search_multi_pref(
     vectors: &[f32],
@@ -201,12 +201,12 @@ fn search_multi_pref(
     pool.insert(entry_point, entry_dist);
 
     while let Some((node, _dist)) = pool.pop() {
-        // 多行图预取：预取完整邻居列表（4 cache lines for R=64）
+        // 澶氳鍥鹃鍙栵細棰勫彇瀹屾暣閭诲眳鍒楄〃锛? cache lines for R=64锛?
         if let Some((next_node, _)) = pool.peek_unchecked() {
             let start = next_node as usize * storage.r_max();
             let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
-            // R_max=64 → 256 bytes → 4 cache lines
-            // 预取 4 行覆盖整个邻居列表
+            // R_max=64 鈫?256 bytes 鈫?4 cache lines
+            // 棰勫彇 4 琛岃鐩栨暣涓偦灞呭垪琛?
             unsafe {
                 std::arch::x86_64::_mm_prefetch::<0>(ptr);
                 std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
@@ -227,7 +227,7 @@ fn search_multi_pref(
     pool.to_sorted_vec()
 }
 
-// ── 搜索变体 D: all_combined（two_pass + multi_pref） ──
+// 鈹€鈹€ 鎼滅储鍙樹綋 D: all_combined锛坱wo_pass + multi_pref锛?鈹€鈹€
 
 fn search_combined(
     vectors: &[f32],
@@ -249,7 +249,7 @@ fn search_combined(
     let mut edge_buf: [u32; 128] = [0; 128];
 
     while let Some((node, _dist)) = pool.pop() {
-        // 多行图预取
+        // 澶氳鍥鹃鍙?
         if let Some((next_node, _)) = pool.peek_unchecked() {
             let start = next_node as usize * storage.r_max();
             let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
@@ -295,7 +295,7 @@ fn search_combined(
     pool.to_sorted_vec()
 }
 
-// ── 基准测试框架 ──
+// 鈹€鈹€ 鍩哄噯娴嬭瘯妗嗘灦 鈹€鈹€
 
 struct BenchResult {
     name: String,
@@ -367,19 +367,19 @@ fn bench_search_variant(
     }
 }
 
-/// 版本横幅
+/// 鐗堟湰妯箙
 fn print_banner() {
     let pkg_ver = env!("CARGO_PKG_VERSION");
     let git_hash = env!("RAVEN_GIT_HASH");
     let build_ts = env!("RAVEN_BUILD_TS");
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║  RAVEN v{}  git:{}  build:{}  ║", pkg_ver, git_hash, build_ts);
-    println!("╚══════════════════════════════════════════════════════════╝");
+    println!("鈺斺晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晽");
+    println!("鈺? RAVEN v{}  git:{}  build:{}  鈺?, pkg_ver, git_hash, build_ts);
+    println!("鈺氣晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨暆");
 }
 
 fn main() {
     print_banner();
-    println!("=== v8.0 消融实验：逐项独立验证 ===\n");
+    println!("=== v8.0 娑堣瀺瀹為獙锛氶€愰」鐙珛楠岃瘉 ===\n");
 
     let (mut train, dim, n) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
@@ -387,12 +387,12 @@ fn main() {
 
     for v in train.iter_mut() { *v /= 255.0; }
     for v in test.iter_mut() { *v /= 255.0; }
-    println!("数据: n={}, dim={}, nq={}\n", n, dim, nq);
+    println!("鏁版嵁: n={}, dim={}, nq={}\n", n, dim, nq);
 
-    // ════════════════════════════════════════════════════
-    //  Part 1: 搜索层优化（同一张图，不同搜索代码）
-    // ════════════════════════════════════════════════════
-    println!("══ Part 1: 搜索层优化（同一张 saturate=true 图）══\n");
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+    //  Part 1: 鎼滅储灞備紭鍖栵紙鍚屼竴寮犲浘锛屼笉鍚屾悳绱唬鐮侊級
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+    println!("鈺愨晲 Part 1: 鎼滅储灞備紭鍖栵紙鍚屼竴寮?saturate=true 鍥撅級鈺愨晲\n");
 
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
@@ -403,12 +403,14 @@ fn main() {
         r_soft: 96,
         max_iterations: 2,
         saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
     };
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();
-    println!("建图完成: {:.1}s\n", build_time);
+    println!("寤哄浘瀹屾垚: {:.1}s\n", build_time);
 
-    // 度数统计
+    // 搴︽暟缁熻
     let stats = graph.degree_stats();
     println!(
         "[degree] mean={:.1} p95={} p99={} max={} isolated={}",
@@ -416,10 +418,10 @@ fn main() {
         stats.max_degree, stats.isolated_nodes
     );
 
-    // VisitedTracker 内存对比
+    // VisitedTracker 鍐呭瓨瀵规瘮
     let vt = VisitedTracker::new(n, 200);
-    println!("[visited] bitset 内存 = {} bytes ({:.1} KB)", vt.bits_bytes(), vt.bits_bytes() as f64 / 1024.0);
-    println!("[visited] 对比 Vec<u8> = {} bytes ({:.1} KB)\n", n, n as f64 / 1024.0);
+    println!("[visited] bitset 鍐呭瓨 = {} bytes ({:.1} KB)", vt.bits_bytes(), vt.bits_bytes() as f64 / 1024.0);
+    println!("[visited] 瀵规瘮 Vec<u8> = {} bytes ({:.1} KB)\n", n, n as f64 / 1024.0);
 
     let ef_list: &[usize] = &[50, 100, 200];
 
@@ -465,10 +467,10 @@ fn main() {
         println!();
     }
 
-    // ════════════════════════════════════════════════════
-    //  Part 2: 图结构优化（saturate=true vs false）
-    // ════════════════════════════════════════════════════
-    println!("══ Part 2: 图结构优化（saturate=true vs false）══\n");
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+    //  Part 2: 鍥剧粨鏋勪紭鍖栵紙saturate=true vs false锛?
+    // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+    println!("鈺愨晲 Part 2: 鍥剧粨鏋勪紭鍖栵紙saturate=true vs false锛夆晲鈺怽n");
 
     let t0 = Instant::now();
     let mut rng2 = ChaCha8Rng::seed_from(42);
@@ -479,10 +481,12 @@ fn main() {
         r_soft: 96,
         max_iterations: 2,
         saturate: false,
+enable_layered_nav: false,
+nav_m: 16,
     };
     let graph_off = VamanaGraph::build(&train, dim, &config_off, &mut rng2);
     let build_time_off = t0.elapsed().as_secs_f64();
-    println!("建图(saturate=false): {:.1}s", build_time_off);
+    println!("寤哄浘(saturate=false): {:.1}s", build_time_off);
 
     let stats_off = graph_off.degree_stats();
     println!(
@@ -510,5 +514,5 @@ fn main() {
         println!();
     }
 
-    println!("\n=== 实验完成 ===");
+    println!("\n=== 瀹為獙瀹屾垚 ===");
 }

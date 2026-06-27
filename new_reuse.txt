@@ -1,0 +1,81 @@
+﻿
+>     ///   鍘熷疄鐜板彧棰勫彇 1 琛岋紝鐜板湪棰勫彇 4 琛岃鐩栧畬鏁撮偦灞呭垪琛?    pub fn greedy_search_vec_
+reuse(
+          vectors: &[f32],
+          dim: usize,
+          storage: &HybridBlockedCsr,
+          entry_point: u32,
+          query: &[f32],
+          l: usize,
+          visited: &mut VisitedTracker,
+      ) -> Vec<(u32, f32)> {
+          visited.reset();
+  
+          let mut pool = LinearPool::new(l);
+  
+          // 鎻掑叆鍏ュ彛鑺傜偣
+          let entry_dist = l2_simd(
+              query,
+              &vectors[entry_point as usize * dim..(entry_point as usize + 1) *
+ dim],
+          );
+          visited.visit(entry_point);
+          pool.insert(entry_point, entry_dist);
+  
+          // Prefetch offset锛氬墠鐬昏窛绂?        // 娑堣瀺瀹為獙锛歱o=8 鍦?ef=50 鏈€浣?(+38%), 
+po=4 鍦?ef=100 鏈€浣?(+39%)
+          // 鍙?po=8 浣滀负榛樿锛坋f=50 鏄渶甯哥敤鐨勫伐浣滅偣锛?        const PO: usize = 8;
+          // 鏍堜笂 edge_buf锛岄伩鍏嶅爢鍒嗛厤锛圧_max=64 鈫?64*4=256B fit 鏍堬級
+          let mut edge_buf: [u32; 128] = [0; 128];
+  
+          // 涓诲惊鐜細寮瑰嚭鏈€杩戞湭鎵╁睍鍊欓€夛紝鎵╁睍鍏堕偦灞?        while let Some((node, _dist)
+) = pool.pop() {
+              // Multi-line graph prefetch锛氶鍙栦笅涓€杞?pop 鑺傜偣鐨勫畬鏁撮偦灞呭垪琛?         
+   // R_max=64 鈫?256 bytes 鈫?4 cache lines
+              if let Some((next_node, _)) = pool.peek_unchecked() {
+                  let start = next_node as usize * storage.r_max();
+                  let ptr = storage.main_block().as_ptr().wrapping_add(start) a
+s *const i8;
+                  unsafe {
+                      std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                      std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                      std::arch::x86_64::_mm_prefetch::<0>(ptr.add(128));
+                      std::arch::x86_64::_mm_prefetch::<0>(ptr.add(192));
+                  }
+              }
+  
+              let neighbors = storage.neighbors(node);
+  
+              // 绗竴閬嶏細鏀堕泦鏈闂偦灞呭埌 edge_buf
+              let mut edge_size = 0usize;
+              for &v in neighbors {
+                  if edge_size >= 128 {
+                      break;
+                  }
+                  if visited.visit(v) {
+                      edge_buf[edge_size] = v;
+                      edge_size += 1;
+                  }
+              }
+  
+              // 棰勫彇鍓?PO 涓偦灞呯殑鍚戦噺鏁版嵁
+              let prefetch_count = PO.min(edge_size);
+              for i in 0..prefetch_count {
+                  let v = edge_buf[i] as usize;
+                  let ptr = &vectors[v * dim] as *const f32 as *const i8;
+                  unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+              }
+  
+              // 绗簩閬嶏細璁＄畻璺濈锛屽悓鏃跺墠鐬婚鍙?            for i in 0..edge_size {
+                  if i + PO < edge_size {
+                      let v = edge_buf[i + PO] as usize;
+                      let ptr = &vectors[v * dim] as *const f32 as *const i8;
+                      unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                  }
+                  let neighbor = edge_buf[i];
+                  let d = l2_simd(
+                      query,
+                      &vectors[neighbor as usize * dim..(neighbor + 1) as usize
+ * dim],
+
+

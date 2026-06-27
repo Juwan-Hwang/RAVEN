@@ -241,8 +241,11 @@ mod tests {
             r_max: 8,
             r_soft: 12,
             max_iterations: 1,
-            saturate: true,
-        };
+saturate: true,
+enable_layered_nav: false,
+nav_m: 16,
+..Default::default()
+};
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         (vectors, dim, graph)
     }

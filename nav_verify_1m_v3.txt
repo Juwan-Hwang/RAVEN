@@ -1,0 +1,26 @@
+   Compiling raven v0.8.0 (C:\Users\Juwan\Desktop\RAVEN)
+error[E0560]: struct `VamanaBuildConfig` has no field named `enable_layered_nav`
+  --> src\bin\nav_verify_1m.rs:73:9
+   |
+73 |         enable_layered_nav: true,
+   |         ^^^^^^^^^^^^^^^^^^ `VamanaBuildConfig` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `VamanaBuildConfig` has no field named `nav_m`
+  --> src\bin\nav_verify_1m.rs:74:9
+   |
+74 |         nav_m: 16,
+   |         ^^^^^ `VamanaBuildConfig` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0599]: no method named `layered_nav` found for struct `VamanaGraph` in the current scope
+  --> src\bin\nav_verify_1m.rs:88:30
+   |
+88 |     if let Some(nav) = graph.layered_nav() {
+   |                              ^^^^^^^^^^^ method not found in `VamanaGraph`
+
+Some errors have detailed explanations: E0560, E0599.
+For more information about an error, try `rustc --explain E0560`.
+error: could not compile `raven` (bin "nav_verify_1m") due to 3 previous errors

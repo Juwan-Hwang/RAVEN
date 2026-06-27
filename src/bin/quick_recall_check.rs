@@ -1,13 +1,13 @@
-//! recall + avg_visited 扫描工具（SIFT1M）
+﻿//! recall + avg_visited 扫描工具（SIFT1M）
 //!
 //! 对 CANONICAL(200/64/2) 和 GLASS-COMP(200/32/2) 两张图，
-//! 各跑 ef_search ∈ {50, 75, 100, 150, 200, 300} 扫描，
+//! 各跑 ef_search ∈ {50, 75, 100, 150, 200, 300} 扫描。
 //! 输出 (recall, QPS, avg_visited) 三元组曲线。
 //!
 //! 用法：
 //!   cargo run --release --bin quick_recall_check              # 双图全扫描
-//!   cargo run --release --bin quick_recall_check -- canonical # 仅 CANONICAL
-//!   cargo run --release --bin quick_recall_check -- glass     # 仅 GLASS-COMP
+//!   cargo run --release --bin quick_recall_check -- canonical # 只 CANONICAL
+//!   cargo run --release --bin quick_recall_check -- glass     # 只 GLASS-COMP
 //!
 //! 退出码 0 = recall OK, 1 = recall BAD
 
@@ -154,6 +154,7 @@ fn build_and_scan(
     r_max: usize,
     r_soft: usize,
     max_iterations: usize,
+    enable_nav: bool,
     train: &[f32],
     dim: usize,
     test: &[f32],
@@ -163,8 +164,8 @@ fn build_and_scan(
 ) -> Vec<ScanResult> {
     println!("\n=== {} ===", name);
     println!(
-        "构建参数: alpha={}, l_build={}, r_max={}, r_soft={}, max_iterations={}",
-        alpha, l_build, r_max, r_soft, max_iterations
+        "构建参数: alpha={}, l_build={}, r_max={}, r_soft={}, max_iterations={}, layered_nav={}",
+        alpha, l_build, r_max, r_soft, max_iterations, enable_nav
     );
 
     let t0 = Instant::now();
@@ -176,6 +177,9 @@ fn build_and_scan(
         r_soft,
         max_iterations,
         saturate: true,
+        enable_layered_nav: enable_nav,
+        nav_m: 16,
+        ..Default::default()
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();
@@ -203,11 +207,9 @@ fn print_banner() {
     let pkg_ver = env!("CARGO_PKG_VERSION");
     let git_hash = env!("RAVEN_GIT_HASH");
     let build_ts = env!("RAVEN_BUILD_TS");
-    // 多行横幅，终端中一眼可见
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║  RAVEN v{}  git:{}  build:{}  ║",
-             pkg_ver, git_hash, build_ts);
-    println!("╚══════════════════════════════════════════════════════════╝");
+    println!("==========================================================");
+    println!("  RAVEN v{}  git:{}  build:{}  ", pkg_ver, git_hash, build_ts);
+    println!("==========================================================");
 }
 
 fn main() {
@@ -235,6 +237,9 @@ fn main() {
 
     println!("数据: n={}, dim={}, nq={}", _n, dim, nq);
 
+    let enable_nav = !args.iter().any(|a| a == "no-nav" || a == "nonav");
+    println!("分层导航: {}", if enable_nav { "启用" } else { "禁用" });
+
     let mut all_results: Vec<(&str, Vec<ScanResult>)> = Vec::new();
 
     if run_canonical {
@@ -245,6 +250,7 @@ fn main() {
             64,
             96,
             2,
+            enable_nav,
             &train,
             dim,
             &test,
@@ -263,6 +269,7 @@ fn main() {
             32,
             48,
             2,
+            enable_nav,
             &train,
             dim,
             &test,
@@ -298,7 +305,7 @@ fn main() {
         );
     }
 
-    // 检查最低 recall 是否达标
+    // 检查最佳 recall 是否达标
     let min_recall: f64 = all_results
         .iter()
         .flat_map(|(_, rs)| rs.iter())

@@ -1,12 +1,12 @@
-//! NavigationLayer centroid overlay 实验
+﻿//! NavigationLayer centroid overlay 瀹為獙
 //!
-//! 验证 NavigationLayer 是否对搜索有用
-//! 对比：
-//!   A. 默认 medoid entry_point（当前生产路径）
-//!   B. 最近 centroid entry_point（NavigationLayer 提供）
+//! 楠岃瘉 NavigationLayer 鏄惁瀵规悳绱㈡湁鐢?
+//! 瀵规瘮锛?
+//!   A. 榛樿 medoid entry_point锛堝綋鍓嶇敓浜ц矾寰勶級
+//!   B. 鏈€杩?centroid entry_point锛圢avigationLayer 鎻愪緵锛?
 //!
-//! 指标：recall@10, QPS, avg_visited
-//! 若 B 的 recall/QPS 不劣于 A，则 NavigationLayer 有用，可集成
+//! 鎸囨爣锛歳ecall@10, QPS, avg_visited
+//! 鑻?B 鐨?recall/QPS 涓嶅姡浜?A锛屽垯 NavigationLayer 鏈夌敤锛屽彲闆嗘垚
 
 use std::fs::File;
 use std::io::Read;
@@ -16,7 +16,7 @@ use raven::build::ChaCha8Rng;
 use raven::distance::l2_simd;
 use raven::memory::VisitedTracker;
 
-/// f32 包装（BinaryHeap 要求 Ord）
+/// f32 鍖呰锛圔inaryHeap 瑕佹眰 Ord锛?
 #[derive(Debug, Clone, Copy)]
 struct OrdF32(f32);
 impl PartialEq for OrdF32 { fn eq(&self, o: &Self) -> bool { self.0 == o.0 } }
@@ -25,9 +25,9 @@ impl PartialOrd for OrdF32 { fn partial_cmp(&self, o: &Self) -> Option<std::cmp:
 impl Ord for OrdF32 { fn cmp(&self, o: &Self) -> std::cmp::Ordering { self.0.partial_cmp(&o.0).unwrap_or(std::cmp::Ordering::Equal) } }
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 fvecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 fvecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 fvecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 fvecs 澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -43,9 +43,9 @@ fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
 }
 
 fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 ivecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 ivecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 ivecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 ivecs 澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -60,7 +60,7 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
     (gt, dim, n)
 }
 
-/// 从指定 entry_point 搜索，返回 (top-L, visited_count)
+/// 浠庢寚瀹?entry_point 鎼滅储锛岃繑鍥?(top-L, visited_count)
 fn search_from_entry(
     vectors: &[f32],
     dim: usize,
@@ -69,7 +69,7 @@ fn search_from_entry(
     query: &[f32],
     ef_search: usize,
 ) -> (Vec<u32>, usize) {
-    // 手动实现 greedy search，统计 visited 数量
+    // 鎵嬪姩瀹炵幇 greedy search锛岀粺璁?visited 鏁伴噺
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
@@ -108,22 +108,22 @@ fn search_from_entry(
 }
 
 fn main() {
-    println!("=== NavigationLayer centroid overlay 实验 ===");
+    println!("=== NavigationLayer centroid overlay 瀹為獙 ===");
     println!();
 
-    // 1. 加载 siftsmall
+    // 1. 鍔犺浇 siftsmall
     let (mut train, dim, n) = read_fvecs("data/siftsmall_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/siftsmall_query.fvecs");
     let (gt, gt_k, _) = read_ivecs("data/siftsmall_groundtruth.ivecs");
     println!("siftsmall: dim={}, base={}, query={}, gt_k={}", dim, n, nq, gt_k);
 
-    // 归一化
+    // 褰掍竴鍖?
     for v in train.iter_mut() { *v /= 255.0; }
     for v in test.iter_mut() { *v /= 255.0; }
 
-    // 2. 构建 VamanaGraph（默认 medoid entry）
+    // 2. 鏋勫缓 VamanaGraph锛堥粯璁?medoid entry锛?
     println!();
-    println!("=== 构建 VamanaGraph（α=1.0, r_max=32, l_build=100）===");
+    println!("=== 鏋勫缓 VamanaGraph锛埼?1.0, r_max=32, l_build=100锛?==");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
@@ -132,31 +132,32 @@ fn main() {
         r_soft: 48,
         r_max: 32,
         max_iterations: 2,
+..Default::default()
     };
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
-    println!("建图: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("寤哄浘: {:.1}s", t0.elapsed().as_secs_f64());
     println!("entry_point (medoid): {}", graph.entry_point());
 
-    // 3. 构建 NavigationLayer（centroid overlay，√N 个 centroid）
+    // 3. 鏋勫缓 NavigationLayer锛坈entroid overlay锛屸垰N 涓?centroid锛?
     println!();
-    println!("=== 构建 NavigationLayer（centroid overlay, √N={}）===", (n as f64).sqrt() as usize);
+    println!("=== 鏋勫缓 NavigationLayer锛坈entroid overlay, 鈭歂={}锛?==", (n as f64).sqrt() as usize);
     let t0 = Instant::now();
     let nav_config = NavigationConfig {
         enable_centroid_overlay: true,
-        centroid_count: None, // √N
+        centroid_count: None, // 鈭歂
     };
     let nav = NavigationLayer::new(n, &train, dim, nav_config);
-    println!("NavigationLayer 构建: {:.1}s", t0.elapsed().as_secs_f64());
-    println!("centroid 数量: {}", nav.centroids().len());
+    println!("NavigationLayer 鏋勫缓: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("centroid 鏁伴噺: {}", nav.centroids().len());
 
-    // 4. 对比搜索
+    // 4. 瀵规瘮鎼滅储
     let k = 10;
     let ef_search = 100;
     let gt_stride = gt_k;
 
-    // A. 默认 medoid entry
+    // A. 榛樿 medoid entry
     println!();
-    println!("=== A. 默认 medoid entry_point ===");
+    println!("=== A. 榛樿 medoid entry_point ===");
     let t0 = Instant::now();
     let mut hits_a = 0usize;
     let mut visited_sum_a = 0usize;
@@ -178,16 +179,16 @@ fn main() {
     println!("recall@10={:.4}, QPS={:.0}, avg_visited={:.1}, avg_latency={:.3}ms",
         recall_a, qps_a, avg_visited_a, time_a * 1000.0 / nq as f64);
 
-    // B. 最近 centroid entry
+    // B. 鏈€杩?centroid entry
     println!();
-    println!("=== B. 最近 centroid entry_point（NavigationLayer）===");
+    println!("=== B. 鏈€杩?centroid entry_point锛圢avigationLayer锛?==");
     let t0 = Instant::now();
     let mut hits_b = 0usize;
     let mut visited_sum_b = 0usize;
-    let mut entry_match_count = 0usize; // centroid 恰好是 medoid 的次数
+    let mut entry_match_count = 0usize; // centroid 鎭板ソ鏄?medoid 鐨勬鏁?
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
-        // 找最近的 centroid
+        // 鎵炬渶杩戠殑 centroid
         let mut best_centroid = nav.centroids()[0];
         let mut best_dist = f32::MAX;
         for &c in nav.centroids() {
@@ -216,29 +217,29 @@ fn main() {
     let avg_visited_b = visited_sum_b as f64 / nq as f64;
     println!("recall@10={:.4}, QPS={:.0}, avg_visited={:.1}, avg_latency={:.3}ms",
         recall_b, qps_b, avg_visited_b, time_b * 1000.0 / nq as f64);
-    println!("(centroid 恰好是 medoid 的次数: {}/{})", entry_match_count, nq);
+    println!("(centroid 鎭板ソ鏄?medoid 鐨勬鏁? {}/{})", entry_match_count, nq);
 
-    // 5. 汇总
+    // 5. 姹囨€?
     println!();
-    println!("=== 汇总 ===");
-    println!("{:<25} {:>10} {:>10} {:>12} {:>12}", "方案", "recall@10", "QPS", "avg_visited", "latency_ms");
+    println!("=== 姹囨€?===");
+    println!("{:<25} {:>10} {:>10} {:>12} {:>12}", "鏂规", "recall@10", "QPS", "avg_visited", "latency_ms");
     println!("{:-<69}", "");
     println!("{:<25} {:>10.4} {:>10.0} {:>12.1} {:>12.3}", "A. medoid entry", recall_a, qps_a, avg_visited_a, time_a * 1000.0 / nq as f64);
     println!("{:<25} {:>10.4} {:>10.0} {:>12.1} {:>12.3}", "B. centroid entry", recall_b, qps_b, avg_visited_b, time_b * 1000.0 / nq as f64);
     println!();
 
-    // 判定
+    // 鍒ゅ畾
     let recall_diff = recall_b - recall_a;
     let qps_diff_pct = (qps_b - qps_a) / qps_a * 100.0;
     let visited_diff_pct = (avg_visited_b - avg_visited_a) / avg_visited_a * 100.0;
-    println!("差异: recall {:+.4}, QPS {:+.1}%, visited {:+.1}%", recall_diff, qps_diff_pct, visited_diff_pct);
+    println!("宸紓: recall {:+.4}, QPS {:+.1}%, visited {:+.1}%", recall_diff, qps_diff_pct, visited_diff_pct);
     println!();
 
     if recall_b >= recall_a - 0.001 && qps_b >= qps_a * 0.95 {
-        println!("结论: NavigationLayer centroid overlay 不劣于 medoid，可集成");
+        println!("缁撹: NavigationLayer centroid overlay 涓嶅姡浜?medoid锛屽彲闆嗘垚");
     } else if recall_b > recall_a + 0.001 || (recall_b >= recall_a - 0.001 && qps_b > qps_a * 1.05) {
-        println!("结论: NavigationLayer centroid overlay 有正向收益，建议集成");
+        println!("缁撹: NavigationLayer centroid overlay 鏈夋鍚戞敹鐩婏紝寤鸿闆嗘垚");
     } else {
-        println!("结论: NavigationLayer centroid overlay 无明显收益，建议删除");
+        println!("缁撹: NavigationLayer centroid overlay 鏃犳槑鏄炬敹鐩婏紝寤鸿鍒犻櫎");
     }
 }

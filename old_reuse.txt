@@ -1,0 +1,192 @@
+﻿
+>     /// 鏁堟灉棰勬湡锛歛vg_visited 浠?2444 闄嶅埌 100-400锛堜笌 Glass/DiskANN 鍚岀骇锛?    pub f
+n greedy_search_vec_reuse(
+          vectors: &[f32],
+          dim: usize,
+          storage: &HybridBlockedCsr,
+          entry_point: u32,
+          query: &[f32],
+          l: usize,
+          visited: &mut VisitedTracker,
+      ) -> Vec<(u32, f32)> {
+          visited.reset();
+  
+          let mut pool = LinearPool::new(l);
+  
+          // 鎻掑叆鍏ュ彛鑺傜偣
+          let entry_dist = l2_simd(
+              query,
+              &vectors[entry_point as usize * dim..(entry_point as usize + 1) *
+ dim],
+          );
+          visited.visit(entry_point);
+          pool.insert(entry_point, entry_dist);
+  
+          // 涓诲惊鐜細寮瑰嚭鏈€杩戞湭鎵╁睍鍊欓€夛紝鎵╁睍鍏堕偦灞?        while let Some((node, _dist)
+) = pool.pop() {
+              let neighbors = storage.neighbors(node);
+  
+              // 棰勫彇涓嬩竴涓寮瑰嚭鐨勮妭鐐圭殑閭诲眳鍒楄〃
+              if let Some((next_node, _)) = pool.peek_unchecked() {
+                  storage.prefetch_neighbors(next_node);
+              }
+  
+              for &neighbor in neighbors {
+                  if visited.visit(neighbor) {
+                      let d = l2_simd(
+                          query,
+                          &vectors[neighbor as usize * dim..(neighbor + 1) as u
+size * dim],
+                      );
+                      // LinearPool 鍐呴儴澶勭悊瀹归噺闄愬埗锛?                    // 姹犳弧鏃惰嚜
+鍔ㄦ嫆缁?d >= worst 鐨勫€欓€?                    pool.insert(neighbor, d);
+                  }
+              }
+          }
+  
+          pool.to_sorted_vec()
+      }
+  
+      /// 璐績鎼滅储锛堟帰绱㈡ā寮忥紝寤哄浘鏈熺涓€杞敤锛?    ///
+      /// 涓?greedy_search_vec 鐨勫尯鍒細鍊欓€?> worst 鏃朵笉 break锛岃€屾槸璺宠繃鎻掑叆缁х画鎵╁睍閭诲眳
+      /// 杩欐牱鑳?escape 灞€閮ㄦ渶浼橈紝寤鸿繛閫氬浘銆傞檺鍒?max_visited 闃叉閬嶅巻鏁翠釜鍥俱€?    pub fn gr
+eedy_search_vec_explore(
+          vectors: &[f32],
+          dim: usize,
+          storage: &HybridBlockedCsr,
+          entry_point: u32,
+          query: &[f32],
+          l: usize,
+          max_visited: usize,
+      ) -> Vec<u32> {
+          let n = vectors.len() / dim;
+          let mut visited = VisitedTracker::new(n, l);
+  
+          use std::cmp::Reverse;
+          let mut candidates: BinaryHeap<Reverse<(OrderedF32, u32)>> = BinaryHe
+ap::new();
+          let mut results: BinaryHeap<(OrderedF32, u32)> = BinaryHeap::new();
+  
+          let entry_dist = l2_simd(
+              query,
+              &vectors[entry_point as usize * dim..(entry_point as usize + 1) *
+ dim],
+          );
+          candidates.push(Reverse((OrderedF32(entry_dist), entry_point)));
+          visited.visit(entry_point);
+  
+          while let Some(Reverse((dist, node))) = candidates.pop() {
+              // 璺宠繃浣嗘墿灞曪細鍊欓€?> worst 鏃朵笉鍔犲叆 results锛屼絾缁х画鎵╁睍閭诲眳
+              let should_add = if results.len() >= l {
+                  if let Some(&(worst, _)) = results.peek() {
+                      dist.0 <= worst.0
+                  } else {
+                      true
+                  }
+              } else {
+                  true
+              };
+  
+              if should_add {
+>         let candidates = VamanaGraph::greedy_search_vec_reuse(
+              self.vectors,
+              self.dim,
+              self.graph.storage(),
+              entry_point,
+              query,
+              self.ef_search,
+              &mut self.visited,
+          );
+  
+          // 璁板綍鏈鎼滅储璁块棶鐨勫敮涓€鑺傜偣鏁帮紙avg_visited 璇婃柇锛?        self.last_visited_
+count = self.visited.visited_count();
+  
+>         // 璺濈宸插湪 greedy_search_vec_reuse 涓绠楋紝鍙渶鎺掑簭鍙?top-k
+          let mut results = candidates;
+          results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Orde
+ring::Equal));
+          results.truncate(k);
+          results
+      }
+  
+      /// 涓婃鎼滅储璁块棶鐨勫敮涓€鑺傜偣鏁帮紙avg_visited 璇婃柇鎺ュ彛锛?    ///
+      /// 杩斿洖鏈€杩戜竴娆?search() 璋冪敤鏈熼棿璁块棶鐨勫敮涓€鑺傜偣鏁般€?    /// 姝ゅ€间笉鍙?SIMD/鍐呭瓨甯冨眬骞叉壈
+锛岀函绮硅　閲忓浘瀵艰埅鏁堢巼銆?    /// 鐢ㄤ簬 搂銆?2 Pivot Criterion 瑁佸喅 Phase 1 vs Phase 3.3 浼樺厛绾
+с€?    pub fn last_visited_count(&self) -> usize {
+          self.last_visited_count
+      }
+  
+      /// 鎵炬渶杩戠殑 centroid 浣滀负 entry_point
+      /// O(鈭歂 * dim)锛屽 SIFT1M 绾?1000*128 = 128K 娆℃诞鐐硅繍绠?    #[inline]
+      fn nearest_centroid(centroids: &[u32], vectors: &[f32], dim: usize, query
+: &[f32]) -> u32 {
+          let mut best = centroids[0];
+          let mut best_dist = f32::MAX;
+          for &c in centroids {
+              let cv = &vectors[c as usize * dim..(c as usize + 1) * dim];
+              let d = l2_simd(query, cv);
+              if d < best_dist {
+                  best_dist = d;
+                  best = c;
+              }
+          }
+          best
+      }
+  }
+  
+  /// 鐢ㄤ簬 BinaryHeap 鎺掑簭鐨?f32 鍖呰锛圔inaryHeap 瑕佹眰 Ord锛?#[derive(Debug, Clone, Co
+py)]
+  struct OrderedF32(f32);
+  
+  impl PartialEq for OrderedF32 {
+      fn eq(&self, other: &Self) -> bool {
+          self.0 == other.0
+      }
+  }
+  
+  impl Eq for OrderedF32 {}
+  
+  impl PartialOrd for OrderedF32 {
+      fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+          Some(self.cmp(other))
+      }
+  }
+  
+  impl Ord for OrderedF32 {
+      fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+          self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+      }
+  }
+  
+  /// 寮曞叆 RobustPrune锛堥伩鍏嶅惊鐜紩鐢紝妯″潡鍐呬娇鐢級
+  use super::robust_prune::RobustPrune;
+  use super::quant_aware_prune::{QuantAwareRobustPrune, QuantAwarePruneConfig};
+  use super::linear_pool::LinearPool;
+  
+  #[cfg(test)]
+  mod tests {
+      use super::*;
+      use crate::build::ChaCha8Rng;
+  
+      #[test]
+      fn build_small_graph() {
+          // 10 涓?4 缁村悜閲?        let vectors: Vec<f32> = (0..40).map(|i| i as f
+32).collect();
+          let dim = 4;
+          let mut rng = ChaCha8Rng::seed_from(42);
+  let config = VamanaBuildConfig {
+  alpha: 1.0,
+  l_build: 10,
+  r_max: 4,
+  r_soft: 6,
+  max_iterations: 1,
+  saturate: true,
+  };
+          let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
+          assert_eq!(graph.len(), 10);
+          assert_eq!(graph.dim(), 4);
+      }
+  
+      #[test]
+
+

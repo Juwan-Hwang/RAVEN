@@ -1,0 +1,163 @@
+warning: fields `name`, `ef`, `recall`, `qps`, and `avg_visited` are never read
+   --> src\bin\opt_ablation.rs:301:5
+    |
+300 | struct BenchResult {
+    |        ----------- fields in this struct
+301 |     name: String,
+    |     ^^^^
+302 |     ef: usize,
+    |     ^^
+303 |     recall: f64,
+    |     ^^^^^^
+304 |     qps: f64,
+    |     ^^^
+305 |     avg_visited: f64,
+    |     ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `raven` (bin "opt_ablation") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.58s
+     Running `target\release\opt_ablation.exe`
+╔══════════════════════════════════════════════════════════╗
+║  RAVEN v0.7.1  git:7d2429f+dirty  build:2026-06-26_12:37:38  ║
+╚══════════════════════════════════════════════════════════╝
+=== v8.0 消融实验：逐项独立验证 ===
+
+数据: n=1000000, dim=128, nq=10000
+
+══ Part 1: 搜索层优化（同一张 saturate=true 图）══
+
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[594]
+[build] iter 1/2 alpha=1
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+建图完成: 1653.7s
+
+[degree] mean=64.0 p95=64 p99=64 max=64 isolated=0
+[visited] bitset 内存 = 125000 bytes (122.1 KB)
+[visited] 对比 Vec<u8> = 1000000 bytes (976.6 KB)
+
+--- ef_search=50 ---
+          baseline ef=  50  recall=0.9931  QPS=    2140  avg_visited=2444
+    two_pass(po=4) ef=  50  recall=0.9931  QPS=    2502  avg_visited=2444
+    two_pass(po=8) ef=  50  recall=0.9931  QPS=    2968  avg_visited=2444
+        multi_pref ef=  50  recall=0.9931  QPS=    2463  avg_visited=2444
+    combined(po=4) ef=  50  recall=0.9931  QPS=    2391  avg_visited=2444
+    combined(po=8) ef=  50  recall=0.9931  QPS=    2992  avg_visited=2444
+
+--- ef_search=100 ---
+          baseline ef= 100  recall=0.9992  QPS=    1286  avg_visited=4054
+    two_pass(po=4) ef= 100  recall=0.9992  QPS=    1971  avg_visited=4054
+    two_pass(po=8) ef= 100  recall=0.9992  QPS=    1541  avg_visited=4054
+        multi_pref ef= 100  recall=0.9992  QPS=    1585  avg_visited=4054
+    combined(po=4) ef= 100  recall=0.9992  QPS=    1945  avg_visited=4054
+    combined(po=8) ef= 100  recall=0.9992  QPS=    1986  avg_visited=4054
+
+--- ef_search=200 ---
+          baseline ef= 200  recall=1.0000  QPS=     474  avg_visited=6781
+    two_pass(po=4) ef= 200  recall=1.0000  QPS=     537  avg_visited=6781
+    two_pass(po=8) ef= 200  recall=1.0000  QPS=     432  avg_visited=6781
+        multi_pref ef= 200  recall=1.0000  QPS=     314  avg_visited=6781
+    combined(po=4) ef= 200  recall=1.0000  QPS=     432  avg_visited=6781
+    combined(po=8) ef= 200  recall=1.0000  QPS=     373  avg_visited=6781
+
+══ Part 2: 图结构优化（saturate=true vs false）══
+
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[594]
+[build] iter 1/2 alpha=1
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+建图(saturate=false): 1589.9s
+[degree] mean=63.5 p95=64 p99=64 max=64 isolated=0
+
+--- ef_search=50 ---
+          sat=true ef=  50  recall=0.9931  QPS=    3069  avg_visited=2444
+         sat=false ef=  50  recall=0.9931  QPS=    3362  avg_visited=2442
+
+--- ef_search=100 ---
+          sat=true ef= 100  recall=0.9992  QPS=    2100  avg_visited=4054
+         sat=false ef= 100  recall=0.9992  QPS=    1472  avg_visited=4053
+
+--- ef_search=200 ---
+          sat=true ef= 200  recall=1.0000  QPS=    1023  avg_visited=6781
+         sat=false ef= 200  recall=1.0000  QPS=     880  avg_visited=6779
+
+
+=== 实验完成 ===

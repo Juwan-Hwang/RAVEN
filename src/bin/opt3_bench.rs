@@ -1,18 +1,13 @@
-//! OPT-3 微基准：BinaryHeap vs flat sorted Vec 堆性能对比
+﻿//! OPT-3 寰熀鍑嗭細BinaryHeap vs flat sorted Vec 鍫嗘€ц兘瀵规瘮
 //!
-//! 目标：验证 flat sorted Vec 是否比 BinaryHeap 更快
+//! 鐩爣锛氶獙璇?flat sorted Vec 鏄惁姣?BinaryHeap 鏇村揩
 //!
-//! 核心假设：BinaryHeap 的堆操作涉及随机内存访问（树结构），
-//! 而 flat sorted Vec 是连续内存，cache 友好。
-//! 在 ef_search=100（堆大小约 100-200）时，flat vec 的 O(n) 插入
-//! 可能比 BinaryHeap 的 O(log n) 更快（因为 cache 命中率高）。
-//!
-//! 实验方案：
-//! - 方案 A（当前）：BinaryHeap<Reverse<(OrderedF32, u32)>>
-//! - 方案 B：flat sorted Vec（降序，pop 从尾部 O(1)，push 用 binary_search + insert）
-//!
-//! 数据：SIFT1M base + 随机图（复用 opt2_bench 框架）
-
+//! 鏍稿績鍋囪锛欱inaryHeap 鐨勫爢鎿嶄綔娑夊強闅忔満鍐呭瓨璁块棶锛堟爲缁撴瀯锛夛紝
+//! 鑰?flat sorted Vec 鏄繛缁唴瀛橈紝cache 鍙嬪ソ銆?//! 鍦?ef_search=100锛堝爢澶у皬绾?100-200锛夋椂锛宖lat vec 鐨?O(n) 鎻掑叆
+//! 鍙兘姣?BinaryHeap 鐨?O(log n) 鏇村揩锛堝洜涓?cache 鍛戒腑鐜囬珮锛夈€?//!
+//! 瀹為獙鏂规锛?//! - 鏂规 A锛堝綋鍓嶏級锛欱inaryHeap<Reverse<(OrderedF32, u32)>>
+//! - 鏂规 B锛歠lat sorted Vec锛堥檷搴忥紝pop 浠庡熬閮?O(1)锛宲ush 鐢?binary_search + insert锛?//!
+//! 鏁版嵁锛歋IFT1M base + 闅忔満鍥撅紙澶嶇敤 opt2_bench 妗嗘灦锛?
 use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
@@ -22,9 +17,9 @@ use std::collections::BinaryHeap;
 use rand::SeedableRng;
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 fvecs");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 fvecs");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -87,8 +82,7 @@ impl VisitedTracker {
     }
 }
 
-/// 方案 A：BinaryHeap（当前实现，含 OPT-2 预取策略 B）
-fn search_binary_heap(
+/// 鏂规 A锛欱inaryHeap锛堝綋鍓嶅疄鐜帮紝鍚?OPT-2 棰勫彇绛栫暐 B锛?fn search_binary_heap(
     vectors: &[f32], dim: usize, graph: &[Vec<u32>],
     entry: u32, query: &[f32], l: usize, visited: &mut VisitedTracker,
 ) -> Vec<(u32, f32)> {
@@ -109,7 +103,7 @@ fn search_binary_heap(
         results.push((dist, node));
         if results.len() > l { results.pop(); }
 
-        // OPT-2 预取策略 B
+        // OPT-2 棰勫彇绛栫暐 B
         if let Some(&Reverse((_, top_node))) = candidates.peek() {
             let top_neighbors = &graph[top_node as usize];
             let ptr = top_neighbors.as_ptr() as *const i8;
@@ -127,36 +121,32 @@ fn search_binary_heap(
     results.into_iter().map(|(dist, id)| (id, dist.0)).collect()
 }
 
-/// 方案 B：flat sorted Vec（降序，pop 从尾部取最小值 O(1)）
-fn search_flat_sorted_vec(
+/// 鏂规 B锛歠lat sorted Vec锛堥檷搴忥紝pop 浠庡熬閮ㄥ彇鏈€灏忓€?O(1)锛?fn search_flat_sorted_vec(
     vectors: &[f32], dim: usize, graph: &[Vec<u32>],
     entry: u32, query: &[f32], l: usize, visited: &mut VisitedTracker,
 ) -> Vec<(u32, f32)> {
     visited.reset();
-    // candidates: 降序 vec，最小值在尾部，pop() O(1)
-    // (dist, node)，降序排列
-    let mut candidates: Vec<(f32, u32)> = Vec::with_capacity(l * 2);
-    // results: 升序 vec，最大值在尾部，pop() O(1)
+    // candidates: 闄嶅簭 vec锛屾渶灏忓€煎湪灏鹃儴锛宲op() O(1)
+    // (dist, node)锛岄檷搴忔帓鍒?    let mut candidates: Vec<(f32, u32)> = Vec::with_capacity(l * 2);
+    // results: 鍗囧簭 vec锛屾渶澶у€煎湪灏鹃儴锛宲op() O(1)
     let mut results: Vec<(f32, u32)> = Vec::with_capacity(l + 1);
 
     let entry_dist = l2_simd(query, &vectors[entry as usize * dim..(entry as usize + 1) * dim]);
-    // push 到降序 candidates：binary_search 找位置 + insert
+    // push 鍒伴檷搴?candidates锛歜inary_search 鎵句綅缃?+ insert
     let pos = candidates.partition_point(|(d, _)| d > &entry_dist);
     candidates.insert(pos, (entry_dist, entry));
     visited.visit(entry);
 
-    while let Some((dist, node)) = candidates.pop() { // pop 从尾部取最小值
-        if results.len() >= l {
+    while let Some((dist, node)) = candidates.pop() { // pop 浠庡熬閮ㄥ彇鏈€灏忓€?        if results.len() >= l {
             if let Some(&(worst, _)) = results.last() {
                 if dist > worst { break; }
             }
         }
-        // push 到升序 results：binary_search 找位置 + insert
+        // push 鍒板崌搴?results锛歜inary_search 鎵句綅缃?+ insert
         let pos = results.partition_point(|(d, _)| d < &dist);
         results.insert(pos, (dist, node));
-        if results.len() > l { results.pop(); } // pop 从尾部取最大值
-
-        // OPT-2 预取策略 B
+        if results.len() > l { results.pop(); } // pop 浠庡熬閮ㄥ彇鏈€澶у€?
+        // OPT-2 棰勫彇绛栫暐 B
         if let Some(&(_, top_node)) = candidates.last() {
             let top_neighbors = &graph[top_node as usize];
             let ptr = top_neighbors.as_ptr() as *const i8;
@@ -167,7 +157,7 @@ fn search_flat_sorted_vec(
         for &neighbor in neighbors {
             if visited.visit(neighbor) {
                 let d = l2_simd(query, &vectors[neighbor as usize * dim..(neighbor + 1) as usize * dim]);
-                // push 到降序 candidates
+                // push 鍒伴檷搴?candidates
                 let pos = candidates.partition_point(|(cd, _)| cd > &d);
                 candidates.insert(pos, (d, neighbor));
             }
@@ -177,7 +167,7 @@ fn search_flat_sorted_vec(
 }
 
 fn main() {
-    println!("=== OPT-3 微基准：BinaryHeap vs flat sorted Vec ===");
+    println!("=== OPT-3 寰熀鍑嗭細BinaryHeap vs flat sorted Vec ===");
     println!();
 
     let t0 = Instant::now();
@@ -188,21 +178,21 @@ fn main() {
     let r = 32;
     let t0 = Instant::now();
     let graph = gen_random_graph(n, r, 42);
-    println!("随机图 R={}: {:.1}s", r, t0.elapsed().as_secs_f64());
+    println!("闅忔満鍥?R={}: {:.1}s", r, t0.elapsed().as_secs_f64());
 
     let (queries, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
     let ef_search = 100;
-    println!("查询: {} queries, ef_search={}", nq, ef_search);
+    println!("鏌ヨ: {} queries, ef_search={}", nq, ef_search);
     println!();
 
     let mut visited = VisitedTracker::new(n);
-    // 预热
+    // 棰勭儹
     search_binary_heap(&vectors, dim, &graph, 0, &queries[0..dim], ef_search, &mut visited);
     search_flat_sorted_vec(&vectors, dim, &graph, 0, &queries[0..dim], ef_search, &mut visited);
-    println!("预热完成");
+    println!("棰勭儹瀹屾垚");
     println!();
 
-    // 方案 A：BinaryHeap
+    // 鏂规 A锛欱inaryHeap
     let t0 = Instant::now();
     let mut sum_a = 0u64;
     for q in 0..nq {
@@ -212,11 +202,11 @@ fn main() {
     }
     let time_a = t0.elapsed().as_secs_f64();
     let qps_a = nq as f64 / time_a;
-    println!("方案 A: BinaryHeap");
-    println!("  时间={:.4}s, QPS={:.0}, avg_latency={:.2}us, results={}",
+    println!("鏂规 A: BinaryHeap");
+    println!("  鏃堕棿={:.4}s, QPS={:.0}, avg_latency={:.2}us, results={}",
         time_a, qps_a, time_a * 1e6 / nq as f64, sum_a);
 
-    // 方案 B：flat sorted Vec
+    // 鏂规 B锛歠lat sorted Vec
     let t0 = Instant::now();
     let mut sum_b = 0u64;
     for q in 0..nq {
@@ -226,14 +216,13 @@ fn main() {
     }
     let time_b = t0.elapsed().as_secs_f64();
     let qps_b = nq as f64 / time_b;
-    println!("方案 B: flat sorted Vec");
-    println!("  时间={:.4}s, QPS={:.0}, avg_latency={:.2}us, results={}",
+    println!("鏂规 B: flat sorted Vec");
+    println!("  鏃堕棿={:.4}s, QPS={:.0}, avg_latency={:.2}us, results={}",
         time_b, qps_b, time_b * 1e6 / nq as f64, sum_b);
     println!();
 
-    // 汇总
-    println!("=== 汇总 ===");
-    println!("{:<25} {:>10} {:>12} {:>10}", "方案", "QPS", "avg_latency", "加速比");
+    // 姹囨€?    println!("=== 姹囨€?===");
+    println!("{:<25} {:>10} {:>12} {:>10}", "鏂规", "QPS", "avg_latency", "鍔犻€熸瘮");
     println!("{:-<60}", "");
     println!("{:<25} {:>10.0} {:>10.2}us {:>10.2}x", "A: BinaryHeap", qps_a, time_a * 1e6 / nq as f64, 1.0);
     println!("{:<25} {:>10.0} {:>10.2}us {:>10.2}x", "B: flat sorted Vec", qps_b, time_b * 1e6 / nq as f64, qps_b / qps_a);
@@ -241,10 +230,10 @@ fn main() {
 
     let speedup = qps_b / qps_a;
     if speedup >= 1.05 {
-        println!("结论: flat sorted Vec 加速 {:.2}x (≥1.05x)，达到 OPT-3 验收标准", speedup);
+        println!("缁撹: flat sorted Vec 鍔犻€?{:.2}x (鈮?.05x)锛岃揪鍒?OPT-3 楠屾敹鏍囧噯", speedup);
     } else if speedup >= 1.02 {
-        println!("结论: flat sorted Vec 加速 {:.2}x (1.02-1.05x)，收益有限", speedup);
+        println!("缁撹: flat sorted Vec 鍔犻€?{:.2}x (1.02-1.05x)锛屾敹鐩婃湁闄?, speedup);
     } else {
-        println!("结论: flat sorted Vec 加速 {:.2}x (<1.02x)，无收益，OPT-3 否决", speedup);
+        println!("缁撹: flat sorted Vec 鍔犻€?{:.2}x (<1.02x)锛屾棤鏀剁泭锛孫PT-3 鍚﹀喅", speedup);
     }
 }

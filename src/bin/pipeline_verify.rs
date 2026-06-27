@@ -1,10 +1,7 @@
-//! Pipeline 验证实验
+﻿//! Pipeline 楠岃瘉瀹為獙
 //!
-//! 验证 S1-S5 修复后 pipeline 能正常工作
-//! 跑 beta=0.0 和 beta=0.3 两种配置，对比 recall@10
-//! - beta=0.0：quant_aware_prune 跳过（标准 RobustPrune）
-//! - beta=0.3：quant_aware_prune 真正执行（S1 修复验证）
-
+//! 楠岃瘉 S1-S5 淇鍚?pipeline 鑳芥甯稿伐浣?//! 璺?beta=0.0 鍜?beta=0.3 涓ょ閰嶇疆锛屽姣?recall@10
+//! - beta=0.0锛歲uant_aware_prune 璺宠繃锛堟爣鍑?RobustPrune锛?//! - beta=0.3锛歲uant_aware_prune 鐪熸鎵ц锛圫1 淇楠岃瘉锛?
 use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
@@ -12,9 +9,9 @@ use raven::build::{BuildConfig, BuildPipeline};
 use raven::graph::{VamanaGraph, GraphSearcher};
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 fvecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 fvecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 fvecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 fvecs 澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -30,9 +27,9 @@ fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
 }
 
 fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
-    let mut file = File::open(path).expect("无法打开 ivecs 文件");
+    let mut file = File::open(path).expect("鏃犳硶鎵撳紑 ivecs 鏂囦欢");
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).expect("读取 ivecs 失败");
+    file.read_to_end(&mut bytes).expect("璇诲彇 ivecs 澶辫触");
     let dim = i32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let record_bytes = (4 + dim * 4) as usize;
     let n = bytes.len() / record_bytes;
@@ -75,28 +72,27 @@ fn eval_recall(
 }
 
 fn main() {
-    println!("=== Pipeline 验证实验（S1-S5 修复后）===");
-    println!("验证 pipeline 能正常工作，beta=0.0 和 beta=0.3 两种配置");
+    println!("=== Pipeline 楠岃瘉瀹為獙锛圫1-S5 淇鍚庯級===");
+    println!("楠岃瘉 pipeline 鑳芥甯稿伐浣滐紝beta=0.0 鍜?beta=0.3 涓ょ閰嶇疆");
     println!();
 
-    // 1. 加载 siftsmall 数据
+    // 1. 鍔犺浇 siftsmall 鏁版嵁
     let t0 = Instant::now();
     let (mut train, dim, n) = read_fvecs("data/siftsmall_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/siftsmall_query.fvecs");
     let (gt, _, _) = read_ivecs("data/siftsmall_groundtruth.ivecs");
-    println!("数据加载: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("鏁版嵁鍔犺浇: {:.1}s", t0.elapsed().as_secs_f64());
     println!("siftsmall: dim={}, base={}, query={}", dim, n, nq);
     println!();
 
-    // 归一化到 [0,1]（设计文档：SIFT 数据 0-255 范围会导致梯度爆炸）
+    // 褰掍竴鍖栧埌 [0,1]锛堣璁℃枃妗ｏ細SIFT 鏁版嵁 0-255 鑼冨洿浼氬鑷存搴︾垎鐐革級
     for v in train.iter_mut() { *v /= 255.0; }
     for v in test.iter_mut() { *v /= 255.0; }
 
     let k = 10;
     let ef_search = 100;
 
-    // 2. 跑 pipeline（beta=0.0：标准 RobustPrune，quant_aware_prune 跳过）
-    println!("=== Pipeline beta=0.0（标准 RobustPrune）===");
+    // 2. 璺?pipeline锛坆eta=0.0锛氭爣鍑?RobustPrune锛宷uant_aware_prune 璺宠繃锛?    println!("=== Pipeline beta=0.0锛堟爣鍑?RobustPrune锛?==");
     let config0 = BuildConfig {
         beta: 0.0,
         r_max: 32,
@@ -107,9 +103,9 @@ fn main() {
     let pipeline0 = BuildPipeline::new(config0);
     let t0 = Instant::now();
     let result0 = pipeline0.run(train.clone(), dim);
-    println!("Pipeline beta=0.0 构建: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("Pipeline beta=0.0 鏋勫缓: {:.1}s", t0.elapsed().as_secs_f64());
 
-    // 用返回的 opq 旋转 train 和 test
+    // 鐢ㄨ繑鍥炵殑 opq 鏃嬭浆 train 鍜?test
     let opq0 = result0.opq.as_ref().expect("opq should be trained");
     let train_rot0 = opq0.apply(&train, dim);
     let test_rot0 = opq0.apply(&test, dim);
@@ -120,8 +116,7 @@ fn main() {
     println!("final_stage: {:?}", result0.final_stage);
     println!();
 
-    // 3. 跑 pipeline（beta=0.3：quant_aware_prune 真正执行，S1 修复验证）
-    println!("=== Pipeline beta=0.3（量化感知 RobustPrune，S1 修复验证）===");
+    // 3. 璺?pipeline锛坆eta=0.3锛歲uant_aware_prune 鐪熸鎵ц锛孲1 淇楠岃瘉锛?    println!("=== Pipeline beta=0.3锛堥噺鍖栨劅鐭?RobustPrune锛孲1 淇楠岃瘉锛?==");
     let config3 = BuildConfig {
         beta: 0.3,
         r_max: 32,
@@ -132,7 +127,7 @@ fn main() {
     let pipeline3 = BuildPipeline::new(config3);
     let t0 = Instant::now();
     let result3 = pipeline3.run(train.clone(), dim);
-    println!("Pipeline beta=0.3 构建: {:.1}s", t0.elapsed().as_secs_f64());
+    println!("Pipeline beta=0.3 鏋勫缓: {:.1}s", t0.elapsed().as_secs_f64());
 
     let opq3 = result3.opq.as_ref().expect("opq should be trained");
     let train_rot3 = opq3.apply(&train, dim);
@@ -144,15 +139,14 @@ fn main() {
     println!("final_stage: {:?}", result3.final_stage);
     println!();
 
-    // 4. 汇总
-    println!("=== 汇总 ===");
-    println!("beta=0.0（标准 RobustPrune）: recall={:.4}", recall0);
-    println!("beta=0.3（量化感知 RobustPrune）: recall={:.4}", recall3);
+    // 4. 姹囨€?    println!("=== 姹囨€?===");
+    println!("beta=0.0锛堟爣鍑?RobustPrune锛? recall={:.4}", recall0);
+    println!("beta=0.3锛堥噺鍖栨劅鐭?RobustPrune锛? recall={:.4}", recall3);
     println!();
 
     if recall0 > 0.9 && recall3 > 0.9 {
-        println!("PASS: S1-S5 修复后 pipeline 正常工作，两个配置 recall 都合理");
+        println!("PASS: S1-S5 淇鍚?pipeline 姝ｅ父宸ヤ綔锛屼袱涓厤缃?recall 閮藉悎鐞?);
     } else {
-        println!("FAIL: recall 异常，需要检查 S1-S5 修复");
+        println!("FAIL: recall 寮傚父锛岄渶瑕佹鏌?S1-S5 淇");
     }
 }

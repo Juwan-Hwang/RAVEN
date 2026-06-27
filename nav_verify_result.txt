@@ -1,0 +1,109 @@
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running `target\release\nav_verify.exe`
+=== v9 导航层 avg_visited 验证（10K 子集）===
+数据: n=10000, dim=128, nq=200
+计算暴力 ground truth...
+ground truth 计算完毕
+
+--- A: flat Vamana（无分层导航）---
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[3732]
+[build] iter 1/2 alpha=1
+[build] 500/10000 (5%)
+[build] 1000/10000 (10%)
+[build] 1500/10000 (15%)
+[build] 2000/10000 (20%)
+[build] 2500/10000 (25%)
+[build] 3000/10000 (30%)
+[build] 3500/10000 (35%)
+[build] 4000/10000 (40%)
+[build] 4500/10000 (45%)
+[build] 5000/10000 (50%)
+[build] 5500/10000 (55%)
+[build] 6000/10000 (60%)
+[build] 6500/10000 (65%)
+[build] 7000/10000 (70%)
+[build] 7500/10000 (75%)
+[build] 8000/10000 (80%)
+[build] 8500/10000 (85%)
+[build] 9000/10000 (90%)
+[build] 9500/10000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 500/10000 (5%)
+[build] 1000/10000 (10%)
+[build] 1500/10000 (15%)
+[build] 2000/10000 (20%)
+[build] 2500/10000 (25%)
+[build] 3000/10000 (30%)
+[build] 3500/10000 (35%)
+[build] 4000/10000 (40%)
+[build] 4500/10000 (45%)
+[build] 5000/10000 (50%)
+[build] 5500/10000 (55%)
+[build] 6000/10000 (60%)
+[build] 6500/10000 (65%)
+[build] 7000/10000 (70%)
+[build] 7500/10000 (75%)
+[build] 8000/10000 (80%)
+[build] 8500/10000 (85%)
+[build] 9000/10000 (90%)
+[build] 9500/10000 (95%)
+建图: 1.0s
+  ef= 50  recall=0.9970  QPS= 16663  avg_visited=792.3
+  ef=100  recall=1.0000  QPS= 14243  avg_visited=1192.1
+  ef=200  recall=1.0000  QPS=  8774  avg_visited=1754.2
+
+--- B: v9 分层导航（独立上层图 + 双向 RobustPrune + 多入口）---
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[3732]
+[build] iter 1/2 alpha=1
+[build] 500/10000 (5%)
+[build] 1000/10000 (10%)
+[build] 1500/10000 (15%)
+[build] 2000/10000 (20%)
+[build] 2500/10000 (25%)
+[build] 3000/10000 (30%)
+[build] 3500/10000 (35%)
+[build] 4000/10000 (40%)
+[build] 4500/10000 (45%)
+[build] 5000/10000 (50%)
+[build] 5500/10000 (55%)
+[build] 6000/10000 (60%)
+[build] 6500/10000 (65%)
+[build] 7000/10000 (70%)
+[build] 7500/10000 (75%)
+[build] 8000/10000 (80%)
+[build] 8500/10000 (85%)
+[build] 9000/10000 (90%)
+[build] 9500/10000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 500/10000 (5%)
+[build] 1000/10000 (10%)
+[build] 1500/10000 (15%)
+[build] 2000/10000 (20%)
+[build] 2500/10000 (25%)
+[build] 3000/10000 (30%)
+[build] 3500/10000 (35%)
+[build] 4000/10000 (40%)
+[build] 4500/10000 (45%)
+[build] 5000/10000 (50%)
+[build] 5500/10000 (55%)
+[build] 6000/10000 (60%)
+[build] 6500/10000 (65%)
+[build] 7000/10000 (70%)
+[build] 7500/10000 (75%)
+[build] 8000/10000 (80%)
+[build] 8500/10000 (85%)
+[build] 9000/10000 (90%)
+[build] 9500/10000 (95%)
+[build] constructing layered navigation (M=16)...
+[nav] level 1: 614 nodes → brute-force
+[nav] level 2: 44 nodes → brute-force
+[build] layered nav done in 0.0s (max_level=2)
+建图: 0.9s
+  max_level=2
+  ef= 50  recall=0.9970  QPS= 24009  avg_visited=735.6
+  ef=100  recall=1.0000  QPS= 14729  avg_visited=1143.4
+  ef=200  recall=1.0000  QPS=  9112  avg_visited=1715.2
+
+=== 验证完毕 ===

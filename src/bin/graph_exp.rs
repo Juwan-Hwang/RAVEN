@@ -1,9 +1,9 @@
-//! 图结构快速实验器（100K 子集，~5s/配置）
+﻿//! 鍥剧粨鏋勫揩閫熷疄楠屽櫒锛?00K 瀛愰泦锛寏5s/閰嶇疆锛?
 //!
-//! 用 SIFT1M 前 100K 向量建图，1000 条查询，
-//! 快速验证图质量改进对 avg_visited 的影响。
+//! 鐢?SIFT1M 鍓?100K 鍚戦噺寤哄浘锛?000 鏉℃煡璇紝
+//! 蹇€熼獙璇佸浘璐ㄩ噺鏀硅繘瀵?avg_visited 鐨勫奖鍝嶃€?
 //!
-//! 用法：
+//! 鐢ㄦ硶锛?
 //!   cargo run --release --bin graph_exp
 
 use std::fs::File;
@@ -56,7 +56,7 @@ fn run_exp(
     nq: usize,
     gt: &[Vec<u32>],
 ) {
-    print!("\n--- {} (α={}, R={}, R_soft={}, iter={}) ---\n",
+    print!("\n--- {} (伪={}, R={}, R_soft={}, iter={}) ---\n",
            cfg.name, cfg.alpha, cfg.r_max, cfg.r_soft, cfg.max_iterations);
 
     let t0 = Instant::now();
@@ -68,6 +68,7 @@ fn run_exp(
         r_soft: cfg.r_soft,
         max_iterations: cfg.max_iterations,
         saturate: cfg.saturate,
+        ..Default::default()
     };
     let graph = VamanaGraph::build(train, dim, &config, &mut rng);
     let build_time = t0.elapsed().as_secs_f64();
@@ -78,7 +79,7 @@ fn run_exp(
         sample_degrees.push(graph.neighbors(i as u32).len());
     }
 
-    print!("建图: {:.1}s\n", build_time);
+    print!("寤哄浘: {:.1}s\n", build_time);
     print!("[degree] mean={:.1} p95={} p99={} max={} isolated={} sample={:?}\n",
            stats.mean_degree, stats.p95_degree, stats.p99_degree,
            stats.max_degree, stats.isolated_nodes, sample_degrees);
@@ -99,7 +100,7 @@ fn run_exp(
             visited_counts.push(vc);
 
             let found: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
-            // gt[q] 是在 100K 子集上暴力计算的 top-100，取前 10 计算 recall@10
+            // gt[q] 鏄湪 100K 瀛愰泦涓婃毚鍔涜绠楃殑 top-100锛屽彇鍓?10 璁＄畻 recall@10
             for &g in gt[q].iter().take(10) {
                 if found.contains(&g) {
                     hits += 1;
@@ -125,26 +126,26 @@ fn run_exp(
 fn main() {
     let pkg_ver = env!("CARGO_PKG_VERSION");
     let git_hash = option_env!("RAVEN_GIT_HASH").unwrap_or("n/a");
-    println!("╔══════════════════════════════════════════════╗");
-    println!("║  RAVEN v{}  git:{}  graph_exp", pkg_ver, git_hash);
-    println!("╚══════════════════════════════════════════════╝");
-    println!("子集: {} 向量, {} 查询, ef={:?}", SUBSET_N, NQ, EF_LIST);
+    println!("鈺斺晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晽");
+    println!("鈺? RAVEN v{}  git:{}  graph_exp", pkg_ver, git_hash);
+    println!("鈺氣晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨暆");
+    println!("瀛愰泦: {} 鍚戦噺, {} 鏌ヨ, ef={:?}", SUBSET_N, NQ, EF_LIST);
 
     let (mut train, dim, _n_train) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, _n_test) = read_fvecs("data/sift/sift_query.fvecs");
 
-    // SIFT 数据归一化
+    // SIFT 鏁版嵁褰掍竴鍖?
     for v in train.iter_mut() { *v /= 255.0; }
     for v in test.iter_mut() { *v /= 255.0; }
 
-    // 取子集
+    // 鍙栧瓙闆?
     train.truncate(SUBSET_N * dim);
     test.truncate(NQ * dim);
-    println!("实际: n={}, dim={}, nq={}", SUBSET_N, dim, NQ);
+    println!("瀹為檯: n={}, dim={}, nq={}", SUBSET_N, dim, NQ);
 
-    // ── 暴力计算 100K 子集上的 ground truth ──
-    // 原因：SIFT1M 的 GT 索引指向 1M 向量，100K 子集上索引无效
-    println!("计算暴力 ground truth ({} × {})...", NQ, SUBSET_N);
+    // 鈹€鈹€ 鏆村姏璁＄畻 100K 瀛愰泦涓婄殑 ground truth 鈹€鈹€
+    // 鍘熷洜锛歋IFT1M 鐨?GT 绱㈠紩鎸囧悜 1M 鍚戦噺锛?00K 瀛愰泦涓婄储寮曟棤鏁?
+    println!("璁＄畻鏆村姏 ground truth ({} 脳 {})...", NQ, SUBSET_N);
     let t_gt = Instant::now();
     let gt: Vec<Vec<u32>> = (0..NQ)
         .into_par_iter()
@@ -160,23 +161,23 @@ fn main() {
             dists.iter().take(GT_K).map(|(_, id)| *id).collect()
         })
         .collect();
-    println!("暴力 GT 完成: {:.1}s", t_gt.elapsed().as_secs_f64());
+    println!("鏆村姏 GT 瀹屾垚: {:.1}s", t_gt.elapsed().as_secs_f64());
 
-    // 实验矩阵：saturate on/off × α × R
+    // 瀹為獙鐭╅樀锛歴aturate on/off 脳 伪 脳 R
     let exps = vec![
         // baseline
-        ExpConfig { name: "sat-on  α=1.2 R=32", alpha: 1.2, r_max: 32, r_soft: 48, max_iterations: 2, saturate: true },
-        // 去 saturation：图自然稀疏，邻居全是 RobustPrune 精选
-        ExpConfig { name: "sat-off α=1.2 R=32", alpha: 1.2, r_max: 32, r_soft: 48, max_iterations: 2, saturate: false },
-        // 去 saturation + 大 R 容纳更多精选边
-        ExpConfig { name: "sat-off α=1.2 R=48", alpha: 1.2, r_max: 48, r_soft: 72, max_iterations: 2, saturate: false },
-        // 去 saturation + 大 α 保留长程导航边
-        ExpConfig { name: "sat-off α=1.5 R=32", alpha: 1.5, r_max: 32, r_soft: 48, max_iterations: 2, saturate: false },
+        ExpConfig { name: "sat-on  伪=1.2 R=32", alpha: 1.2, r_max: 32, r_soft: 48, max_iterations: 2, saturate: true },
+        // 鍘?saturation锛氬浘鑷劧绋€鐤忥紝閭诲眳鍏ㄦ槸 RobustPrune 绮鹃€?
+        ExpConfig { name: "sat-off 伪=1.2 R=32", alpha: 1.2, r_max: 32, r_soft: 48, max_iterations: 2, saturate: false },
+        // 鍘?saturation + 澶?R 瀹圭撼鏇村绮鹃€夎竟
+        ExpConfig { name: "sat-off 伪=1.2 R=48", alpha: 1.2, r_max: 48, r_soft: 72, max_iterations: 2, saturate: false },
+        // 鍘?saturation + 澶?伪 淇濈暀闀跨▼瀵艰埅杈?
+        ExpConfig { name: "sat-off 伪=1.5 R=32", alpha: 1.5, r_max: 32, r_soft: 48, max_iterations: 2, saturate: false },
     ];
 
     for exp in &exps {
         run_exp(exp, &train, dim, &test, NQ, &gt);
     }
 
-    println!("\n=== 实验完成 ===");
+    println!("\n=== 瀹為獙瀹屾垚 ===");
 }
