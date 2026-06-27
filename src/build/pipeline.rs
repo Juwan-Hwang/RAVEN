@@ -153,14 +153,17 @@ impl BuildPipeline {
     /// Vamana 图构建阶段
     fn vamana_build(&self, state: PipelineState) -> PipelineState {
         let mut rng = ChaCha8Rng::seed_from(self.config.rng_seed);
-        let vamana_config = VamanaBuildConfig {
-            alpha: self.config.alpha,
-            l_build: self.config.l_build,
-            r_max: self.config.r_max,
-            r_soft: self.config.r_soft,
-            max_iterations: 2,
-            saturate: true,
-        };
+let vamana_config = VamanaBuildConfig {
+alpha: self.config.alpha,
+l_build: self.config.l_build,
+r_max: self.config.r_max,
+r_soft: self.config.r_soft,
+max_iterations: 2,
+saturate: true,
+enable_layered_nav: true,
+nav_m: 16,
+..Default::default()
+};
         let graph = VamanaGraph::build(&state.vectors, state.dim, &vamana_config, &mut rng);
         PipelineState {
             graph: Some(graph),

@@ -46,6 +46,9 @@ pub struct VamanaBuildConfig {
     pub enable_layered_nav: bool,
     /// 分层导航参数 M（层间缩减比，默认 16）
     pub nav_m: usize,
+    /// 剪枝策略：RobustPrune（Vamana 标准）或 DirectionalPrune（RAVEN 超越方案）
+    /// DirectionalPrune 无 saturation，用 r_min 连通性补底替代 r_max 填充
+    pub prune_strategy: super::robust_prune::PruneStrategy,
 }
 
 impl Default for VamanaBuildConfig {
@@ -62,6 +65,7 @@ max_iterations: 2,
 saturate: true,
 enable_layered_nav: true,
 nav_m: 16,
+prune_strategy: super::robust_prune::PruneStrategy::RobustPrune,
         }
     }
 }
@@ -145,7 +149,8 @@ impl VamanaGraph {
                                 vectors, dim, &storage, entry_point, query, config.l_build,
                                 visited,
                             );
-                            let pruned = RobustPrune::prune(
+                            let pruned = prune_dispatch(
+                                config.prune_strategy,
                                 visited.visited_nodes(), node_id, vectors, dim, alpha, config.r_max,
                                 config.saturate && alpha > 1.0,
                             );
@@ -164,7 +169,7 @@ impl VamanaGraph {
         }
 
         // 3. 全局 final prune 到 R_max（用 RobustPrune，不是 truncate）
-        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate);
+        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate, config.prune_strategy);
 
         // 创建构建元数据（设计文档 F.7）
         let build_config = BuildConfig::default();
@@ -272,7 +277,7 @@ impl VamanaGraph {
             }
         }
 
-        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate);
+        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate, config.prune_strategy);
 
         let build_config = BuildConfig::default();
         let metadata = BuildMetadata::from_config(&build_config, n, dim);
@@ -740,7 +745,8 @@ impl VamanaGraph {
                 let (main, overflow) = storage.neighbors_full(nb);
                 let mut all: Vec<u32> = main.to_vec();
                 all.extend_from_slice(overflow);
-                let pruned = RobustPrune::prune(
+                let pruned = prune_dispatch(
+                    config.prune_strategy,
                     &all, nb, vectors, dim, alpha, config.r_max,
                     config.saturate && alpha > 1.0,
                 );
@@ -759,6 +765,7 @@ impl VamanaGraph {
         alpha: f32,
         r_max: usize,
         saturate: bool,
+        strategy: PruneStrategy,
     ) {
         for node in 0..storage.len() as u32 {
             let (main, overflow) = storage.neighbors_full(node);
@@ -767,7 +774,7 @@ impl VamanaGraph {
             }
             let mut all: Vec<u32> = main.to_vec();
             all.extend_from_slice(overflow);
-            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, r_max, saturate);
+            let pruned = prune_dispatch(strategy, &all, node, vectors, dim, alpha, r_max, saturate);
             storage.set_neighbors(node, &pruned);
         }
     }
@@ -1173,7 +1180,7 @@ impl Ord for OrderedF32 {
 }
 
 /// 引入 RobustPrune（避免循环引用，模块内使用）
-use super::robust_prune::RobustPrune;
+use super::robust_prune::{prune_dispatch, PruneStrategy};
 use super::quant_aware_prune::{QuantAwareRobustPrune, QuantAwarePruneConfig};
 use super::linear_pool::LinearPool;
 
@@ -1197,6 +1204,7 @@ max_iterations: 1,
 saturate: true,
 enable_layered_nav: false,
 nav_m: 16,
+prune_strategy: Default::default(),
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         assert_eq!(graph.len(), 10);
@@ -1217,6 +1225,7 @@ max_iterations: 1,
 saturate: true,
 enable_layered_nav: false,
 nav_m: 16,
+prune_strategy: Default::default(),
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         let mut searcher = GraphSearcher::new(&vectors, &graph, 20);
@@ -1254,6 +1263,7 @@ max_iterations: 1,
 saturate: true,
 enable_layered_nav: false,
 nav_m: 16,
+prune_strategy: Default::default(),
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
 
@@ -1299,6 +1309,7 @@ max_iterations: 1,
 saturate: true,
 enable_layered_nav: false,
 nav_m: 16,
+prune_strategy: Default::default(),
 };
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
 
