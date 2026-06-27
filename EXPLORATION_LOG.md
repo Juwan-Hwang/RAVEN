@@ -105,6 +105,7 @@
 | H15 | RobustPrune α=1.0 ≠ 纯距离 | α=1.0 仍有角度遮挡 | — | 0.829 (1M) | PureDistance edge_recall=0.95 但 recall 暴跌，邻居同质化 |
 | H16 | Split Alpha 架构 | Layer0 α=1.0 + Nav α=1.2 | 2151 (ef=100) | 0.9912 | **与 baseline 完全相同，α=1.0≠纯距离假设证伪** |
 | H17 | 三角闭合后处理 | 追加二跳近邻到 r_soft | 2165 (ef=100) | 0.9922 | **无效，avg_visited 反而微涨 (+0.6%)** |
+| H18 | RobustPrune α² 阈值修复 | alpha→alpha² 补偿平方距离 | 1390 (ef=50) | 0.9703 | **无效，avg_visited 仅降 0.7%，recall 不变** |
 
 ---
 
@@ -755,6 +756,7 @@ bool insert(int u, dist_t dist) {
 20. **RobustPrune α=1.0 ≠ 纯距离排序** — H15 证明 α=1.0 仍有角度遮挡，edge_recall 最低。PureDistance 策略 edge_recall=0.95 但 1M recall 仅 0.829（邻居同质化导致搜索困在局部簇）。**edge_recall 是误导性指标。**
 21. **Split Alpha 架构** — H16 证明 Layer0 α=1.0 + Nav α=1.2 与 baseline 完全相同（avg_visited 2151→2151，recall 0.9912→0.9912）。基于错误假设（α=1.0=纯局部近邻），已回退。
 22. **三角闭合后处理** — H17 证明追加二跳近邻到 r_soft 无效。avg_visited 2151→2165（+0.6%），QPS -1.7%。度数从 32 涨到 48 后每 pop 展开更多邻居，接受率×更多邻居=更多新候选进 pool→pool 排空更慢。**提高邻居重叠率不能降低 avg_visited。**
+23. **RobustPrune α² 阈值修复** — H18 证明将 occlude_factor 比较阈值从 alpha 修正为 alpha²（补偿 l2_simd 返回平方距离）几乎无效。avg_visited 1399→1390（-0.7%），recall 完全不变。旧代码有效阈值 √1.2≈1.095，新代码 1.2，差异仅在 ratio 1.095~1.2 的窄区间。**alpha 阈值精度不是 avg_visited 膨胀的根因。**
 
 ---
 
@@ -773,6 +775,7 @@ bool insert(int u, dist_t dist) {
 9. **不在邻居重叠率**: H14 测得 RAVEN ~24% vs Glass ~91%，但 H17 三角闭合提升重叠率后 avg_visited 不降反升。
 10. **不在 alpha 参数**: α=1.0 仍有角度遮挡（H15），Split α 无效（H16）。
 11. **不在图拓扑后处理**: 三角闭合追加 858 万条边，度数 32→48，avg_visited 2151→2165 无改善（H17）。
+12. **不在 RobustPrune 阈值精度**: α→α² 修复后 avg_visited 1399→1390（-0.7%），recall 不变。旧阈值 √1.2≈1.095 vs 新阈值 1.2 的差异仅在窄区间（H18）。
 
 ### 差距在哪里（推测）
 
@@ -784,6 +787,91 @@ bool insert(int u, dist_t dist) {
 
 1. **搜索收敛速度**: 核心问题是 popped 数量（100 vs 15），不是拒绝率。需研究为什么 RAVEN 图需要 7 倍更多 pop 才能收敛。
 2. **建图模式对比**: 考虑实现 HNSW incremental insertion 作为替代建图策略。
+
+---
+
+### H18: RobustPrune α² 阈值修复
+
+**时间**: v9.1 时期
+**文件**: `src/graph/robust_prune.rs`, `src/bin/param_sweep_1m.rs`
+**背景**: `l2_simd` 返回平方距离，`occlude_factor = dist²(q,i)/dist²(j,i)` 是平方比值。旧代码用 `alpha` 直接比较，有效阈值 = √alpha。修复为用 `alpha²` 比较，使有效阈值 = alpha。
+
+**参数**: R=32/L=200/r_soft=48/alpha=1.2, SIFT1M, 2-pass
+
+| 指标 | 修复前 (alpha) | 修复后 (alpha²) | 变化 |
+|:--|:--|:--|:--|
+| ef=50 recall | 0.9703 | 0.9703 | 不变 |
+| ef=50 avg_visited | 1399.5 | 1390 | -0.7% |
+| ef=50 QPS | 7501 | 6411 | -14.5% |
+| ef=100 recall | 0.9920 | 0.9919 | 不变 |
+| ef=100 avg_visited | 2355.5 | 2339 | -0.7% |
+| ef=200 avg_visited | 4044.8 | 4021 | -0.6% |
+
+**对比 Config B (R=70/L=75)**:
+
+| ef | recall | QPS | avg_visited |
+|:--|:--|:--|:--|
+| 50 | 0.9927 | 5220 | 2444 |
+| 100 | 0.9985 | 2629 | 4007 |
+| 200 | 0.9993 | 1583 | 6639 |
+
+**结论**: 
+1. alpha² 修复在数学上正确，但对 avg_visited 几乎无影响（-0.7%），在统计噪声范围内。
+2. 旧代码有效阈值 √1.2 ≈ 1.095，新代码 1.2。差异仅在 ratio 1.095~1.2 之间的候选——这是一个极窄的区间。
+3. QPS 下降 14.5% 的原因：修复后保留了更多候选（阈值更宽松），度数更满，每跳展开更多邻居。
+4. **alpha 阈值精度不是 avg_visited 膨胀的根因。** 1390 vs Glass <150 的 9 倍差距依然存在。
+5. **已回退此修复**，恢复到干净基线。根因仍指向建图模式差异（Vamana batch vs HNSW incremental）。
+
+> **⚠️ 以下结论已被 H20 推翻**：上文中所有 "Glass avg_visited < 150" 的引用均基于虚假基线（三个 bug 叠加）。H20 实测证明 Glass 在同配置下 avg_visited ≈ 1041（ef=50），与 RAVEN 的 1227 仅差 18%，不存在 9 倍差距。
+
+---
+
+### H20: Glass 基线审计 — avg_visited 虚假基线证伪
+
+**时间**: 2025-06-28
+**文件**: `glass-ref/pyglass-main/python/run_sift_bench.py`
+**背景**: 所有前序假设（H1-H19）都基于 "Glass HNSW avg_visited < 150" 这一前提。该数字从未被本地实际测量，而是硬编码的文献估计值。本实验在同配置下实测 Glass 真实数据。
+
+**三个 Bug 叠加导致的虚假基线**:
+
+| Bug | 描述 | 后果 |
+|:--|:--|:--|
+| Bug 1: `read_fvecs` | `.astype(np.float32)` 做数值转换而非 `.view(np.float32)` 位模式重解释 | float32 数据被当 int32 读入再 astype 转，数值完全错误（距离 6e18 而非 5e4）→ recall ~2% |
+| Bug 2: `search()` 不更新计数器 | C++ 层 `Search()` 不更新 `last_search_avg_dist_cmps`，只有 `SearchBatch()` 才更新 | avg_visited 恒为 806.0，不随 ef 变化 |
+| Bug 3: 硬编码文献值 | "Glass < 150" 从未实测，是 ann-benchmarks 上 R=48 配置的文献估计值，且与 RAVEN 的 R=32 配置不可比 | 所有对比建立在虚假基线上 |
+
+**修复**:
+1. `read_fvecs`: `.astype(np.float32, copy=True)` → `.copy().view(np.float32)`（Faiss 官方读法）
+2. 使用 `batch_search(query, topk, 1)` 替代 `search()`，确保 `dist_cmps` 正确累加
+3. 添加 BF groundtruth 验证（前 5 个查询暴力搜索确认 0-indexed 正确）
+
+**实测结果（Glass HNSW, SIFT1M, FP32, R=32, L=200, single-thread）**:
+
+| ef | recall@10 | QPS | avg_visited |
+|:--|:--|:--|:--|
+| 32 | 90.35% | 11154 | 761.9 |
+| 48 | 94.32% | 9225 | 1010.8 |
+| 50 | 94.65% | 7678 | **1040.8** |
+| 64 | 96.29% | 6766 | 1251.8 |
+| 80 | 97.45% | 5643 | 1486.5 |
+| 96 | 98.16% | 5111 | 1715.1 |
+| 128 | 98.93% | 4056 | 2155.5 |
+| 200 | 99.57% | 3123 | 3085.7 |
+
+**与 RAVEN 直接对比（ef=50）**:
+
+| 指标 | RAVEN (v9.1) | Glass (实测) | 差距 |
+|:--|:--|:--|:--|
+| recall@10 | 0.9705 | 0.9465 | RAVEN 高 2.4pp |
+| avg_visited | 1227 | 1041 | Glass 低 15% |
+| QPS | 9195 | 7678 | RAVEN 高 20% |
+
+**结论**:
+1. **"avg_visited 膨胀 9 倍" 是虚假叙事。** 真实差距仅 15%（1227 vs 1041），在合理范围内。
+2. RAVEN 在 recall 和 QPS 上均优于 Glass（ef=50 同配置），avg_visited 略高 15% 属于正常范围。
+3. 同 recall 水平下对比：RAVEN ef=50 recall=97.05% vs Glass ef=64 recall=96.29%，RAVEN 的 avg_visited=1227 vs Glass=1252——**几乎相同**。
+4. H1-H19 中所有以 "Glass avg_visited < 150" 为前提的根因分析（邻居重叠率、saturation、RobustPrune alpha²、增量插入、三角闭合等方向）**全部失去依据**。
+5. RAVEN 的图导航效率与 Glass HNSW 在同配置下基本持平，不存在需要修复的 "膨胀" 问题。
 
 ---
 

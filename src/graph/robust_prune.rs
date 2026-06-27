@@ -5,7 +5,7 @@
 //! 2. DirectionalPrune（RAVEN 超越方案）：方向性扫描 + 自适应连通性补底，无 saturation
 //!
 //! DirectionalPrune 的设计动机：
-//!   RobustPrune 的 saturation 用远距离候选填满 r_max → avg_visited 膨胀（1227 vs Glass <150）
+//!   RobustPrune 的 saturation 用远距离候选填满 r_max → avg_visited 略高（1227 vs Glass 1041, H20 实测）
 //!   Glass Heuristic2 纯方向性无连通性保证 → 依赖 HNSW 多层结构补偿
 //!   DirectionalPrune 融合两者优势：方向直 + 保连通 + 无垃圾边
 
@@ -243,7 +243,7 @@ impl Default for DirectionalPruneConfig {
 /// │ 长程边          │ α=1.2 多轮补充   │ 无                │ α=backfill 补到 r_min    │
 /// │ Saturation      │ 填到 r_max（垃圾）│ 无               │ 无                       │
 /// │ 连通性保证      │ 靠 saturation    │ 靠 HNSW 多层      │ 靠 r_min 补底             │
-/// │ avg_visited     │ 高（1227）       │ 低（<150）        │ 目标：低                 │
+/// │ avg_visited     │ 1227             │ 1041 (H20 实测)   │ 目标：低                 │
 /// └─────────────────┴──────────────────┴───────────────────┴──────────────────────────┘
 ///
 /// 算法：

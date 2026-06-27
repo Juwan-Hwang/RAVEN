@@ -259,5 +259,5 @@ fn main() {
     );
     println!("\n  历史基线:");
     println!("    v9.1 ef=50 po=8:  recall=0.9705  QPS=7,131  avg_visited=1,227.4");
-    println!("    Glass HNSW:       recall=0.9523  QPS=15,171  avg_visited=<150");
+    println!("    Glass HNSW (H20):  recall=0.9465  QPS=7,678  avg_visited=1,041");
 }

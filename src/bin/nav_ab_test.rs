@@ -162,5 +162,5 @@ fn main() {
 
     println!("\n=== 历史基线参照 ===");
     println!("  v3 旧导航:    recall=0.9703  QPS=7,501  avg_visited=1,399.5");
-    println!("  Glass HNSW:   recall=0.9523  QPS=15,171 avg_visited=<150");
+    println!("  Glass HNSW (H20 实测):   recall=0.9465  QPS=7,678 avg_visited=1,041");
 }

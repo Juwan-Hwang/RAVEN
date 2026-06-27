@@ -183,7 +183,7 @@ fn main() {
     println!("  r_max=20: recall=0.9324  QPS=11690  avg_visited=811    degree=20.0");
     println!("  r_max=16: recall=0.8995  QPS=14678  avg_visited=664    degree=16.0");
     println!();
-    println!("  Glass HNSW: recall=0.9523  QPS=15171  avg_visited=<150");
+    println!("  Glass HNSW (H20 实测): recall=0.9465  QPS=7678  avg_visited=1041");
     println!();
     println!("Key question: does DirectionalPrune beat RobustPrune at same r_max?");
     println!("If DirPrune r_max=16 recall > 0.8995, directionality edges are higher quality.");

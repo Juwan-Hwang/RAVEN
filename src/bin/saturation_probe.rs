@@ -181,7 +181,7 @@ fn main() {
 
     println!("\n=== 历史基线参照 ===");
     println!("  v9.1 baseline:   recall=0.9705  QPS=9195  avg_visited=1227");
-    println!("  Glass HNSW:      recall=0.9523  QPS=15171 avg_visited=<150");
+    println!("  Glass HNSW (H20 实测): recall=0.9465  QPS=7678 avg_visited=1041");
     println!("\n如果 no_sat_r24 或 no_sat_r20 的 avg_visited < 1227 且 recall >= 0.95，");
     println!("则 DirectionalPrune 的 r_min 补底方向正确，值得实现。");
 }

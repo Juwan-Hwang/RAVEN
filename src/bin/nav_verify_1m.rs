@@ -130,7 +130,7 @@ fn main() {
     println!("\n=== 对比基线（GLASS-COMP v3）===");
     println!("ef=50  recall=0.9703  QPS=7,501  avg_visited=1,399.5");
     println!("\n=== 对比 Glass HNSW ===");
-    println!("avg_visited < 150");
+    println!("avg_visited=1041 (H20 实测)");
 
     if avg_visited < 300.0 {
         println!("\n✅ avg_visited < 300，分层导航有效！");
