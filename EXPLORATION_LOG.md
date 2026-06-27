@@ -100,6 +100,11 @@
 | H10 | DirectionalPrune A/B | 方向性剪枝 vs RobustPrune | 1178.8 vs 1227.4 | 0.9657 vs 0.9705 | 度数降 14%，visited 仅降 4%，recall 降 0.5% |
 | H11 | r_soft 1.5→1.3 | slack factor 对齐 DiskANN | 1227.9 vs 1227.4 | 0.9710 vs 0.9705 | **完全无效** |
 | H12 | 搜索终止条件对比 | RAVEN vs Glass LinearPool | — | — | **算法逻辑完全相同，非差异来源** |
+| H13 | insert 拒绝率诊断 | popped/inserted/rejected 计数 | 1247 (ef=50) | 0.9710 | nav 拒绝率 86.3%，Glass ~91%，差距不大 |
+| H14 | overlap_probe 邻居重叠率 | RAVEN vs Glass 重叠率 | — | — | RAVEN ~24%，Glass ~91%，但**提升重叠率不降 avg_visited** |
+| H15 | RobustPrune α=1.0 ≠ 纯距离 | α=1.0 仍有角度遮挡 | — | 0.829 (1M) | PureDistance edge_recall=0.95 但 recall 暴跌，邻居同质化 |
+| H16 | Split Alpha 架构 | Layer0 α=1.0 + Nav α=1.2 | 2151 (ef=100) | 0.9912 | **与 baseline 完全相同，α=1.0≠纯距离假设证伪** |
+| H17 | 三角闭合后处理 | 追加二跳近邻到 r_soft | 2165 (ef=100) | 0.9922 | **无效，avg_visited 反而微涨 (+0.6%)** |
 
 ---
 
@@ -745,6 +750,12 @@ bool insert(int u, dist_t dist) {
 
 19. **独立上层图分层导航** — H4/H5/H8 证明 1M 规模仅降 12% avg_visited，绝对值仍太高（1228 vs <150）。
 
+### 图拓扑层
+
+20. **RobustPrune α=1.0 ≠ 纯距离排序** — H15 证明 α=1.0 仍有角度遮挡，edge_recall 最低。PureDistance 策略 edge_recall=0.95 但 1M recall 仅 0.829（邻居同质化导致搜索困在局部簇）。**edge_recall 是误导性指标。**
+21. **Split Alpha 架构** — H16 证明 Layer0 α=1.0 + Nav α=1.2 与 baseline 完全相同（avg_visited 2151→2151，recall 0.9912→0.9912）。基于错误假设（α=1.0=纯局部近邻），已回退。
+22. **三角闭合后处理** — H17 证明追加二跳近邻到 r_soft 无效。avg_visited 2151→2165（+0.6%），QPS -1.7%。度数从 32 涨到 48 后每 pop 展开更多邻居，接受率×更多邻居=更多新候选进 pool→pool 排空更慢。**提高邻居重叠率不能降低 avg_visited。**
+
 ---
 
 ## 九、核心结论
@@ -759,19 +770,20 @@ bool insert(int u, dist_t dist) {
 6. **不在并行调度层**: rayon task 开销 0.2%（B3）。
 7. **不在随机图初始化**: Fisher-Yates 采样导致 recall 暴跌（B1）。
 8. **不在 entry point**: centroid overlay SIFT1M 上收益可忽略（A6）。
+9. **不在邻居重叠率**: H14 测得 RAVEN ~24% vs Glass ~91%，但 H17 三角闭合提升重叠率后 avg_visited 不降反升。
+10. **不在 alpha 参数**: α=1.0 仍有角度遮挡（H15），Split α 无效（H16）。
+11. **不在图拓扑后处理**: 三角闭合追加 858 万条边，度数 32→48，avg_visited 2151→2165 无改善（H17）。
 
 ### 差距在哪里（推测）
 
 1. **在建图模式**: Vamana batch build 产出的图导航质量远不如 HNSW incremental insertion。同样的搜索器在 Glass 图上走几跳就收敛，在 RAVEN 图上要展开上千个节点。
 2. **在图结构质量**: RAVEN 度数全部饱和到 32.0（均匀），Glass 度数自然分布（avg=20.7, min=1）。Glass 的稀疏节点可能充当"高速公路"。
-3. **在邻居重叠率**: Glass 图上搜索快速收敛到一个局部簇，后续展开的邻居几乎全是已访问节点（高重叠）。RAVEN 图上邻居分散，每次展开都引入大量新节点（低重叠）。
+3. **在搜索收敛速度（popped 数量）**: H13 证明 RAVEN nav popped=100.8 vs Glass ~15（ef=100）。拒绝率 86.3% vs 91% 只差 5pp，但 popped 差 7 倍 → avg_visited 差 15 倍。根因是搜索需要更多跳才能收敛，不是每跳展开太多无效候选。
 
 ### 下一步方向
 
-1. **图结构指标对比**: 测量 RAVEN vs Glass 的聚类系数、平均路径长度、邻居重叠率，定位具体结构差异。
-2. **搜索过程诊断**: 在搜索中统计 result_set 更新次数（improvements），判断是否在"无效展开"。
-3. **建图模式对比**: 考虑实现 HNSW incremental insertion 作为替代建图策略。
-4. **visited 标记时机**: 确认 RAVEN 在 `insert` 拒绝前就标记了 `visited`（当前代码确认如此），评估是否应改为 insert 成功后才标记。
+1. **搜索收敛速度**: 核心问题是 popped 数量（100 vs 15），不是拒绝率。需研究为什么 RAVEN 图需要 7 倍更多 pop 才能收敛。
+2. **建图模式对比**: 考虑实现 HNSW incremental insertion 作为替代建图策略。
 
 ---
 
@@ -779,10 +791,11 @@ bool insert(int u, dist_t dist) {
 
 | 编号 | 任务 | 优先级 | 来源 | 状态 |
 |:--|:--|:--|:--|:--|
-| D1 | 实现随机层级导航 (HNSW 风格分层) | 🔴 P0 | 冲刺计划 0C.2 | 待执行 |
+| D1 | 实现随机层级导航 (HNSW 风格分层) | 🔴 P0 | 冲刺计划 0C.2 | ✅ 已实现 (v9)，仅降 12% avg_visited |
 | D5 | parking_lot 接入 | 🟢 P2 | 冲刺计划 0C.6 | 待执行 |
 | D8 | 内存带宽 profiling (LLC miss) | 🟢 P2 | 冲刺计划 0C.7 | 待执行 |
 | OPT-13 | cargo check 警告清理 | 🟢 P3 | 优化方案 | 待执行 |
 | OPT-14 | 魔法数字具名常量化 | 🟢 P3 | 优化方案 | 待执行 |
-| — | 图结构指标对比 (聚类系数等) | 🟡 P1 | 本文核心结论 | 待执行 |
-| — | 搜索过程 result_set 更新次数诊断 | 🟡 P1 | 本文核心结论 | 待执行 |
+| — | 图结构指标对比 (聚类系数等) | 🟡 P1 | 本文核心结论 | ✅ 完成 (overlap_probe H14) |
+| — | 搜索过程 result_set 更新次数诊断 | 🟡 P1 | 本文核心结论 | ✅ 完成 (reject_rate H13) |
+| — | 搜索收敛速度 (popped 数量) 诊断 | 🔴 P0 | H13/H17 结论 | 待执行 |
