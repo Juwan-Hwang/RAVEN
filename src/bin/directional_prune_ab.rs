@@ -114,7 +114,7 @@ fn build_and_bench(
 ) {
     let label = format!("DirPrune r_max={}", r_max);
     println!("\n--- {} ---", label);
-    let r_soft = (r_max as f32 * 1.5) as usize;
+    let r_soft = (r_max as f32 * 1.3) as usize;
     let mut rng = ChaCha8Rng::seed_from(42);
     let config = VamanaBuildConfig {
         alpha: 1.2,

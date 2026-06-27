@@ -77,7 +77,7 @@ fn run_config(
 ) {
     println!("\n--- {} (r_max={}, saturate={}) ---", cfg.label, cfg.r_max, cfg.saturate);
 
-    let r_soft = (cfg.r_max as f32 * 1.5) as usize;
+    let r_soft = (cfg.r_max as f32 * 1.3) as usize;
     let mut rng = ChaCha8Rng::seed_from(42);
     let build_config = VamanaBuildConfig {
         alpha: 1.2,

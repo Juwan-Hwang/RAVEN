@@ -32,8 +32,9 @@ pub struct VamanaBuildConfig {
     pub l_build: usize,
     /// 最终图最大出度 R_max（设计文档第四层：硬上限）
     pub r_max: usize,
-    /// 构建期软上限 R_soft = 1.5 × R_max（设计文档第四层：延迟剪枝）
-    pub r_soft: usize,
+/// 构建期软上限 R_soft = 1.3 × R_max（对齐 DiskANN GRAPH_SLACK_FACTOR）
+/// 度数超过 R_soft 时触发延迟剪枝；R_soft 越小，反向边积累越少，低质量边更早被清除
+pub r_soft: usize,
     /// 最大迭代轮数
     pub max_iterations: usize,
     /// 是否在 RobustPrune 后用剩余候选填充到 R_max（saturation）
@@ -58,7 +59,7 @@ impl Default for VamanaBuildConfig {
             alpha: 1.2,
             l_build: 200,
             r_max,
-            r_soft: (r_max as f32 * 1.5) as usize, // 设计文档：1.5 × R_max
+            r_soft: (r_max as f32 * 1.3) as usize, // DiskANN GRAPH_SLACK_FACTOR=1.3
             // Vamana 论文要求 two passes：第一轮 α=1.0（连通性），第二轮 α=config（长程边）
             // max_iterations=1 只跑连通性轮，图质量显著下降（recall 0.33→0.95 的差距来源之一）
 max_iterations: 2,
