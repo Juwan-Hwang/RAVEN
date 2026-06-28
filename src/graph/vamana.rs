@@ -12,6 +12,7 @@
 
 use crate::distance::l2_simd;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
+use crate::quant::SQ8Dataset;
 use crate::build::ChaCha8Rng;
 use crate::build::{BuildConfig, BuildMetadata};
 use crate::graph::navigation::NavigationLayer;
@@ -636,6 +637,87 @@ impl VamanaGraph {
         pool.to_sorted_vec()
     }
 
+    /// SQ8 量化贪心搜索（Phase 1 Step 0）
+    ///
+    /// 与 `greedy_search_vec_reuse` 相同的 Two-Pass Prefetch 架构，
+    /// 但距离计算用 SQ8 u8 码代替 f32 全精度向量。
+    ///
+    /// 优势：
+    /// - 内存带宽降 4x（128B/vector → 32B/vector for SIFT-128）
+    /// - AVX2 u8 运算每次处理 16 维（vs f32 的 8 维）
+    ///
+    /// 搜索结束后对全部候选用 f32 重排序（rerank），恢复精确距离排序。
+    pub fn greedy_search_sq8(
+        sq8: &SQ8Dataset,
+        storage: &HybridBlockedCsr,
+        entry_point: u32,
+        query_code: &[u8],
+        l: usize,
+        visited: &mut VisitedTracker,
+        po: usize,
+    ) -> Vec<(u32, f32)> {
+        visited.reset();
+
+        let mut pool = LinearPool::new(l);
+
+        // 入口节点距离（SQ8）
+        let entry_dist = sq8.distance(query_code, entry_point as usize);
+        visited.visit(entry_point);
+        pool.insert(entry_point, entry_dist);
+
+        let mut edge_buf: [u32; 128] = [0; 128];
+
+        while let Some((node, _dist)) = pool.pop() {
+            // Multi-line graph prefetch（与 f32 路径相同，邻居列表大小不变）
+            if let Some((next_node, _)) = pool.peek_unchecked() {
+                let start = next_node as usize * storage.r_max();
+                let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(128));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(192));
+                }
+            }
+
+            let neighbors = storage.neighbors(node);
+
+            // 第一遍：收集未访问邻居
+            let mut edge_size = 0usize;
+            for &v in neighbors {
+                if edge_size >= 128 {
+                    break;
+                }
+                if visited.visit(v) {
+                    edge_buf[edge_size] = v;
+                    edge_size += 1;
+                }
+            }
+
+            // 预取前 po 个邻居的 SQ8 码（dim bytes，比 f32 小 4x）
+            let prefetch_count = po.min(edge_size);
+            for i in 0..prefetch_count {
+                let v = edge_buf[i] as usize;
+                let ptr = sq8.code(v).as_ptr() as *const i8;
+                unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+            }
+
+            // 第二遍：SQ8 距离计算 + 前瞻预取
+            for i in 0..edge_size {
+                if i + po < edge_size {
+                    let v = edge_buf[i + po] as usize;
+                    let ptr = sq8.code(v).as_ptr() as *const i8;
+                    unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                }
+                let neighbor = edge_buf[i];
+                let d = sq8.distance(query_code, neighbor as usize);
+                pool.insert(neighbor, d);
+            }
+        }
+
+        pool.to_sorted_vec()
+    }
+
     /// 贪心搜索（探索模式，建图期第一轮用）
     ///
     /// 与 greedy_search_vec 的区别：候选 > worst 时不 break，而是跳过插入继续扩展邻居
@@ -1035,6 +1117,9 @@ pub struct GraphSearcher<'a> {
     /// Prefetch offset：Two-Pass Prefetch 的前瞻距离
     /// po=8 适合 ef=50，po=4 适合 ef=100；po=0 禁用向量预取
     prefetch_offset: usize,
+    /// 可选的 SQ8 量化数据集（Phase 1 Step 0）
+    /// 启用后 search_sq8() 使用 SQ8 距离进行图遍历 + f32 rerank
+    sq8: Option<&'a SQ8Dataset>,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1053,6 +1138,7 @@ impl<'a> GraphSearcher<'a> {
             navigation: None,
             last_visited_count: 0,
             prefetch_offset: 8,
+            sq8: None,
         }
     }
 
@@ -1077,6 +1163,7 @@ impl<'a> GraphSearcher<'a> {
             navigation: Some(navigation),
             last_visited_count: 0,
             prefetch_offset: 8,
+            sq8: None,
         }
     }
 
@@ -1086,6 +1173,15 @@ impl<'a> GraphSearcher<'a> {
     /// 返回 &mut Self 以支持链式调用
     pub fn with_prefetch_offset(&mut self, po: usize) -> &mut Self {
         self.prefetch_offset = po;
+        self
+    }
+
+    /// 启用 SQ8 量化搜索（Phase 1 Step 0）
+    ///
+    /// 设置后可调用 search_sq8() 使用 SQ8 量化距离进行图遍历。
+    /// 需要预先构建 SQ8Dataset（SQ8Dataset::build）。
+    pub fn with_sq8(&mut self, sq8: &'a SQ8Dataset) -> &mut Self {
+        self.sq8 = Some(sq8);
         self
     }
 
@@ -1124,6 +1220,58 @@ impl<'a> GraphSearcher<'a> {
 
         // 距离已在 greedy_search_vec_reuse 中计算，只需排序取 top-k
         let mut results = candidates;
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+        results
+    }
+
+    /// SQ8 量化搜索（Phase 1 Step 0）
+    ///
+    /// 图遍历使用 SQ8 u8 量化距离（4x 内存带宽降低），
+    /// 终态对全部候选用 f32 精确距离重排序（rerank）。
+    ///
+    /// 返回 (节点ID, f32精确距离) 列表，按距离升序。
+    /// 需先调用 with_sq8() 设置 SQ8Dataset。
+    pub fn search_sq8(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let sq8 = self.sq8.expect("search_sq8 requires with_sq8() first");
+        let dim = self.dim;
+
+        // 1. 编码查询向量为 SQ8
+        let query_code = sq8.params.encode(query);
+
+        // 2. 选择 entry_point（f32 路径，开销极小）
+        let entry_point = if let Some(nav) = self.graph.layered_nav() {
+            nav.initialize(self.vectors, dim, query).0
+        } else if let Some(nav) = self.navigation {
+            Self::nearest_centroid(nav.centroids(), self.vectors, dim, query)
+        } else {
+            self.graph.entry_point()
+        };
+
+        // 3. SQ8 图遍历
+        let candidates = VamanaGraph::greedy_search_sq8(
+            sq8,
+            self.graph.storage(),
+            entry_point,
+            &query_code,
+            self.ef_search,
+            &mut self.visited,
+            self.prefetch_offset,
+        );
+
+        self.last_visited_count = self.visited.visited_count();
+
+        // 4. f32 rerank：用精确距离重排序全部候选
+        let mut results: Vec<(u32, f32)> = candidates
+            .into_iter()
+            .map(|(id, _sq8_dist)| {
+                let f32_dist = l2_simd(
+                    query,
+                    &self.vectors[id as usize * dim..(id as usize + 1) * dim],
+                );
+                (id, f32_dist)
+            })
+            .collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
         results
