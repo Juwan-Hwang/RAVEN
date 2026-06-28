@@ -12,7 +12,7 @@
 
 use crate::distance::l2_simd;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
-use crate::quant::SQ8Dataset;
+use crate::quant::{SQ8Dataset, PQ4Dataset, PQ8Dataset};
 use crate::build::ChaCha8Rng;
 use crate::build::{BuildConfig, BuildMetadata};
 use crate::graph::navigation::NavigationLayer;
@@ -718,6 +718,174 @@ impl VamanaGraph {
         pool.to_sorted_vec()
     }
 
+    /// PQ4 图遍历（Phase 1 Step 1）
+    ///
+    /// 使用 4-bit PQ LUT-ADC 距离进行图遍历，码大小仅 M/2 bytes/vector（SIFT: 16B）。
+    /// LUT (2KB) 完全在 L1 cache，距离计算为纯算术 + L1 查表。
+    ///
+    /// 返回 (节点ID, PQ4-ADC距离) 列表，需外部 f32 rerank。
+    pub fn greedy_search_pq4(
+        pq4: &PQ4Dataset,
+        storage: &HybridBlockedCsr,
+        entry_point: u32,
+        lut: &[f32],
+        ef_search: usize,
+        visited: &mut VisitedTracker,
+        po: usize,
+    ) -> Vec<(u32, f32)> {
+        if ef_search == 0 {
+            return Vec::new();
+        }
+
+        visited.reset();
+
+        let l = ef_search;
+        let mut pool = LinearPool::new(l);
+        let m = pq4.codebook.m;
+
+        // entry_point 距离
+        let ep_dist = PQ4Dataset::adc_distance(lut, pq4.code(entry_point as usize), m);
+        pool.insert(entry_point, ep_dist);
+        visited.visit(entry_point);
+
+        let mut edge_buf = [0u32; 128];
+
+        while let Some((node, _dist)) = pool.pop() {
+            // Multi-line graph prefetch
+            if let Some((next_node, _)) = pool.peek_unchecked() {
+                let start = next_node as usize * storage.r_max();
+                let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(128));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(192));
+                }
+            }
+
+            let neighbors = storage.neighbors(node);
+
+            // 第一遍：收集未访问邻居
+            let mut edge_size = 0usize;
+            for &v in neighbors {
+                if edge_size >= 128 {
+                    break;
+                }
+                if visited.visit(v) {
+                    edge_buf[edge_size] = v;
+                    edge_size += 1;
+                }
+            }
+
+            // 预取前 po 个邻居的 PQ4 码（M/2 bytes，比 f32 小 16x）
+            let prefetch_count = po.min(edge_size);
+            for i in 0..prefetch_count {
+                let v = edge_buf[i] as usize;
+                let ptr = pq4.code(v).as_ptr() as *const i8;
+                unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+            }
+
+            // 第二遍：PQ4 ADC 距离计算 + 前瞻预取
+            for i in 0..edge_size {
+                if i + po < edge_size {
+                    let v = edge_buf[i + po] as usize;
+                    let ptr = pq4.code(v).as_ptr() as *const i8;
+                    unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                }
+                let neighbor = edge_buf[i];
+                let d = PQ4Dataset::adc_distance(lut, pq4.code(neighbor as usize), m);
+                pool.insert(neighbor, d);
+            }
+        }
+
+        pool.to_sorted_vec()
+    }
+
+    /// PQ8 图遍历（Phase 1 Step 1, K=256 标量 LUT-ADC）
+    ///
+    /// 使用 8-bit PQ LUT-ADC 距离进行图遍历，码大小 M bytes/vector（SIFT: 32B）。
+    /// LUT (32KB) 在 L2 cache 内，距离计算为 M 次 table lookup。
+    /// K=256 精度接近 SQ8，但带宽降低 4x（32B vs 128B per vector）。
+    ///
+    /// 返回 (节点ID, PQ8-ADC距离) 列表，需外部 f32 rerank。
+    pub fn greedy_search_pq8(
+        pq8: &PQ8Dataset,
+        storage: &HybridBlockedCsr,
+        entry_point: u32,
+        lut: &[f32],
+        ef_search: usize,
+        visited: &mut VisitedTracker,
+        po: usize,
+    ) -> Vec<(u32, f32)> {
+        if ef_search == 0 {
+            return Vec::new();
+        }
+
+        visited.reset();
+
+        let l = ef_search;
+        let mut pool = LinearPool::new(l);
+        let m = pq8.codebook.m;
+        let k = pq8.codebook.k;
+
+        // entry_point 距离
+        let ep_dist = PQ8Dataset::adc_distance(lut, pq8.code(entry_point as usize), m, k);
+        pool.insert(entry_point, ep_dist);
+        visited.visit(entry_point);
+
+        let mut edge_buf = [0u32; 128];
+
+        while let Some((node, _dist)) = pool.pop() {
+            // Multi-line graph prefetch
+            if let Some((next_node, _)) = pool.peek_unchecked() {
+                let start = next_node as usize * storage.r_max();
+                let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(128));
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(192));
+                }
+            }
+
+            let neighbors = storage.neighbors(node);
+
+            // 第一遍：收集未访问邻居
+            let mut edge_size = 0usize;
+            for &v in neighbors {
+                if edge_size >= 128 {
+                    break;
+                }
+                if visited.visit(v) {
+                    edge_buf[edge_size] = v;
+                    edge_size += 1;
+                }
+            }
+
+            // 预取前 po 个邻居的 PQ8 码（M bytes，比 f32 小 16x）
+            let prefetch_count = po.min(edge_size);
+            for i in 0..prefetch_count {
+                let v = edge_buf[i] as usize;
+                let ptr = pq8.code(v).as_ptr() as *const i8;
+                unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+            }
+
+            // 第二遍：PQ8 ADC 距离计算 + 前瞻预取
+            for i in 0..edge_size {
+                if i + po < edge_size {
+                    let v = edge_buf[i + po] as usize;
+                    let ptr = pq8.code(v).as_ptr() as *const i8;
+                    unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                }
+                let neighbor = edge_buf[i];
+                let d = PQ8Dataset::adc_distance(lut, pq8.code(neighbor as usize), m, k);
+                pool.insert(neighbor, d);
+            }
+        }
+
+        pool.to_sorted_vec()
+    }
+
     /// 贪心搜索（探索模式，建图期第一轮用）
     ///
     /// 与 greedy_search_vec 的区别：候选 > worst 时不 break，而是跳过插入继续扩展邻居
@@ -1120,6 +1288,12 @@ pub struct GraphSearcher<'a> {
     /// 可选的 SQ8 量化数据集（Phase 1 Step 0）
     /// 启用后 search_sq8() 使用 SQ8 距离进行图遍历 + f32 rerank
     sq8: Option<&'a SQ8Dataset>,
+    /// 可选的 4-bit PQ 量化数据集（Phase 1 Step 1）
+    /// 启用后 search_pq4() 使用 LUT-ADC 距离进行图遍历 + f32 rerank
+    pq4: Option<&'a PQ4Dataset>,
+    /// 可选的 8-bit PQ 量化数据集（Phase 1 Step 1, K=256）
+    /// 启用后 search_pq8() 使用 LUT-ADC 距离进行图遍历 + f32 rerank
+    pq8: Option<&'a PQ8Dataset>,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1139,6 +1313,8 @@ impl<'a> GraphSearcher<'a> {
             last_visited_count: 0,
             prefetch_offset: 8,
             sq8: None,
+            pq4: None,
+            pq8: None,
         }
     }
 
@@ -1164,6 +1340,8 @@ impl<'a> GraphSearcher<'a> {
             last_visited_count: 0,
             prefetch_offset: 8,
             sq8: None,
+            pq4: None,
+            pq8: None,
         }
     }
 
@@ -1182,6 +1360,24 @@ impl<'a> GraphSearcher<'a> {
     /// 需要预先构建 SQ8Dataset（SQ8Dataset::build）。
     pub fn with_sq8(&mut self, sq8: &'a SQ8Dataset) -> &mut Self {
         self.sq8 = Some(sq8);
+        self
+    }
+
+    /// 启用 4-bit PQ 量化搜索（Phase 1 Step 1）
+    ///
+    /// 设置后可调用 search_pq4() 使用 4-bit PQ LUT-ADC 距离进行图遍历。
+    /// 需要预先构建 PQ4Dataset（PQ4Dataset::build）。
+    pub fn with_pq4(&mut self, pq4: &'a PQ4Dataset) -> &mut Self {
+        self.pq4 = Some(pq4);
+        self
+    }
+
+    /// 启用 8-bit PQ 量化搜索（Phase 1 Step 1, K=256）
+    ///
+    /// 设置后可调用 search_pq8() 使用 8-bit PQ LUT-ADC 距离进行图遍历。
+    /// 需要预先构建 PQ8Dataset（PQ8Dataset::build）。
+    pub fn with_pq8(&mut self, pq8: &'a PQ8Dataset) -> &mut Self {
+        self.pq8 = Some(pq8);
         self
     }
 
@@ -1265,6 +1461,110 @@ impl<'a> GraphSearcher<'a> {
         let mut results: Vec<(u32, f32)> = candidates
             .into_iter()
             .map(|(id, _sq8_dist)| {
+                let f32_dist = l2_simd(
+                    query,
+                    &self.vectors[id as usize * dim..(id as usize + 1) * dim],
+                );
+                (id, f32_dist)
+            })
+            .collect();
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+        results
+    }
+
+    /// 4-bit PQ 量化搜索（Phase 1 Step 1）
+    ///
+    /// 图遍历使用 4-bit PQ LUT-ADC 距离（16B/vector，比 SQ8 再小 8x），
+    /// 终态对全部候选用 f32 精确距离重排序（rerank）。
+    ///
+    /// 返回 (节点ID, f32精确距离) 列表，按距离升序。
+    /// 需先调用 with_pq4() 设置 PQ4Dataset。
+    pub fn search_pq4(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let pq4 = self.pq4.expect("search_pq4 requires with_pq4() first");
+        let dim = self.dim;
+
+        // 1. 预计算 LUT（M×K f32 = 2KB，完全 L1 cache）
+        let lut = pq4.codebook.compute_lut(query);
+
+        // 2. 选择 entry_point（f32 路径，开销极小）
+        let entry_point = if let Some(nav) = self.graph.layered_nav() {
+            nav.initialize(self.vectors, dim, query).0
+        } else if let Some(nav) = self.navigation {
+            Self::nearest_centroid(nav.centroids(), self.vectors, dim, query)
+        } else {
+            self.graph.entry_point()
+        };
+
+        // 3. PQ4 图遍历
+        let candidates = VamanaGraph::greedy_search_pq4(
+            pq4,
+            self.graph.storage(),
+            entry_point,
+            &lut,
+            self.ef_search,
+            &mut self.visited,
+            self.prefetch_offset,
+        );
+
+        self.last_visited_count = self.visited.visited_count();
+
+        // 4. f32 rerank：用精确距离重排序全部候选
+        let mut results: Vec<(u32, f32)> = candidates
+            .into_iter()
+            .map(|(id, _pq4_dist)| {
+                let f32_dist = l2_simd(
+                    query,
+                    &self.vectors[id as usize * dim..(id as usize + 1) * dim],
+                );
+                (id, f32_dist)
+            })
+            .collect();
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+        results
+    }
+
+    /// 8-bit PQ 量化搜索（Phase 1 Step 1, K=256）
+    ///
+    /// 图遍历使用 8-bit PQ LUT-ADC 距离（32B/vector，比 SQ8 小 4x），
+    /// 终态对全部候选用 f32 精确距离重排序（rerank）。
+    ///
+    /// 返回 (节点ID, f32精确距离) 列表，按距离升序。
+    /// 需先调用 with_pq8() 设置 PQ8Dataset。
+    pub fn search_pq8(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let pq8 = self.pq8.expect("search_pq8 requires with_pq8() first");
+        let dim = self.dim;
+
+        // 1. 预计算 LUT（M×K f32 = 32KB，L2 cache 内）
+        let lut = pq8.codebook.compute_lut(query);
+
+        // 2. 选择 entry_point（f32 路径，开销极小）
+        let entry_point = if let Some(nav) = self.graph.layered_nav() {
+            nav.initialize(self.vectors, dim, query).0
+        } else if let Some(nav) = self.navigation {
+            Self::nearest_centroid(nav.centroids(), self.vectors, dim, query)
+        } else {
+            self.graph.entry_point()
+        };
+
+        // 3. PQ8 图遍历
+        let candidates = VamanaGraph::greedy_search_pq8(
+            pq8,
+            self.graph.storage(),
+            entry_point,
+            &lut,
+            self.ef_search,
+            &mut self.visited,
+            self.prefetch_offset,
+        );
+
+        self.last_visited_count = self.visited.visited_count();
+
+        // 4. f32 rerank：用精确距离重排序全部候选
+        let mut results: Vec<(u32, f32)> = candidates
+            .into_iter()
+            .map(|(id, _pq8_dist)| {
                 let f32_dist = l2_simd(
                     query,
                     &self.vectors[id as usize * dim..(id as usize + 1) * dim],
