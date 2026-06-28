@@ -1,16 +1,24 @@
-﻿//! ann-benchmarks 接入二进制（全优化叠加版）
+﻿//! ann-benchmarks 接入二进制
 //!
-//! 默认启用全部已验证优化：
+//! ann-benchmarks 评测口径（源码审计确认）：
+//!   - runner.py:38  batch = False（硬编码，即使传 --batch 也无效）
+//!   - runner.py:136 逐条顺序查询 [single_query(x) for x in X_test]
+//!   - metrics.py:71  QPS = 1.0 / best_search_time（avg 单条耗时）
+//!   - hnswlib 显式 set_num_threads(1)，Glass 用 prepare_query 逐条
+//!   - Docker --parallelism 仅控制算法间并行，非查询内并行
+//!
+//! 因此默认配置：单线程 + SQ8 + 固定 ef（自适应 ef 单线程 -11% 故关闭）
+//!
+//! 默认启用：
 //!   1. 分层导航 (LayeredNavigation) — 建图时构建
 //!   2. Two-Pass Prefetch (po=8) — GraphSearcher 默认
 //!   3. SQ8 标量量化 — 1.47x QPS，recall 几乎无损
-//!   4. 自适应 ef (gamma=2.0 幂律) — +9.2% QPS
-//!   5. 多线程 batch_search (rayon) — 8 线程 ~7x
+//!   4. 自适应 ef (gamma=3.0, min=40, max=75) — Pareto 最优 +11.3%
 //!
-//! 可选回退标志（调试/对比用）：
+//! 可选标志：
 //!   --no-sq8           禁用 SQ8，回退 f32 全精度
 //!   --no-adaptive-ef   禁用自适应 ef，用固定 ef
-//!   --no-multithread   禁用多线程，单线程查询
+//!   --multithread      启用多线程 batch_search（ann-benchmarks 不使用）
 //!   --threads N        指定线程数（默认全部核心）
 //!
 //! 数据格式（由 Python wrapper 准备）：
@@ -36,10 +44,11 @@ use raven::quant::SQ8Dataset;
 use raven::build::ChaCha8Rng;
 use raven::memory::serialize::Serializable;
 
-/// 自适应 ef 最佳参数（Phase 4.5 实测，gamma=2.0 幂律变换）
-const ADAPTIVE_EF_MIN: usize = 35;
+/// 自适应 ef 最佳参数（密集参数扫描 Pareto 最优，gamma=3.0）
+/// recall=0.9660, QPS=12952 (+11.3% vs fixed ef=50)
+const ADAPTIVE_EF_MIN: usize = 40;
 const ADAPTIVE_EF_MAX: usize = 75;
-const ADAPTIVE_EF_GAMMA: f32 = 2.0;
+const ADAPTIVE_EF_GAMMA: f32 = 3.0;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -59,10 +68,10 @@ fn main() {
     let mut save_path = String::new();
     let mut load_path = String::new();
 
-    // 优化控制标志（默认全部启用）
+    // 优化控制标志（默认符合 ann-benchmarks 单线程口径）
     let mut use_sq8 = true;
-    let mut use_adaptive_ef = true;
-    let mut use_multithread = true;
+    let mut use_adaptive_ef = true;   // Pareto 最优 γ3(40,75): +11.3% QPS, recall 无损
+    let mut use_multithread = false;   // ann-benchmarks 逐条顺序查询
     let mut num_threads: Option<usize> = None;
 
     let mut i = 1;
@@ -85,7 +94,7 @@ fn main() {
             "--ef-search" => { i += 1; ef_search = args[i].parse().expect("invalid ef_search"); }
             "--no-sq8" => { use_sq8 = false; }
             "--no-adaptive-ef" => { use_adaptive_ef = false; }
-            "--no-multithread" => { use_multithread = false; }
+            "--multithread" => { use_multithread = true; }
             "--threads" => { i += 1; num_threads = Some(args[i].parse().expect("invalid threads")); }
             "--help" | "-h" => { print_help(); return; }
             _ => { eprintln!("unknown argument: {}", args[i]); std::process::exit(1); }
@@ -354,10 +363,10 @@ fn print_help() {
     println!("    --dim <N> --n <N> --nq <N> --k <N> \\");
     println!("    --alpha <F> --l-build <N> --r-max <N> --ef-search <N>");
     println!();
-    println!("优化控制（默认全部启用）:");
+    println!("优化控制（默认: SQ8 开 / 自适应 ef 开 / 多线程关）:");
     println!("  --no-sq8             禁用 SQ8 量化");
     println!("  --no-adaptive-ef     禁用自适应 ef");
-    println!("  --no-multithread     禁用多线程");
+    println!("  --multithread        启用多线程（ann-benchmarks 不使用）");
     println!("  --threads N          指定线程数");
     println!();
     println!("可选:");

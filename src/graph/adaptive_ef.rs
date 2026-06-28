@@ -65,6 +65,19 @@ impl AdaptiveEfConfig {
         Self { sorted_distances, min_ef, max_ef, gamma }
     }
 
+    /// 用相同距离分布但不同参数创建变体（零采样开销）
+    ///
+    /// 参数扫描专用：构建一次 `build_with_layered_nav` 获取距离分布，
+    /// 然后用 `with_params` 快速创建数百个变体进行网格搜索。
+    pub fn with_params(&self, min_ef: usize, max_ef: usize, gamma: f32) -> Self {
+        Self {
+            sorted_distances: self.sorted_distances.clone(),
+            min_ef,
+            max_ef,
+            gamma,
+        }
+    }
+
     /// 用 f32 距离构建（用于 f32 搜索路径）
     ///
     /// 采样最多 2000 个向量，计算它们到入口点的 f32 L2 距离，排序构建分布。
