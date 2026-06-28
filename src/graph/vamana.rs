@@ -13,6 +13,7 @@
 use crate::distance::l2_simd;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
 use crate::quant::{SQ8Dataset, PQ4Dataset, PQ8Dataset};
+use super::adaptive_ef::AdaptiveEfConfig;
 use crate::build::ChaCha8Rng;
 use crate::build::{BuildConfig, BuildMetadata};
 use crate::graph::navigation::NavigationLayer;
@@ -1282,6 +1283,9 @@ pub struct GraphSearcher<'a> {
     /// 上次搜索访问的唯一节点数（avg_visited 诊断接口）
     /// 此值在 search() 结束后被设置，不受 SIMD/内存布局干扰，纯粹衡量图导航效率
     last_visited_count: usize,
+    /// 上次搜索实际使用的 ef 值（自适应 ef 诊断接口）
+    /// 固定 ef 模式下等于 ef_search；自适应模式下等于 estimate_ef 返回值
+    last_ef_used: usize,
     /// Prefetch offset：Two-Pass Prefetch 的前瞻距离
     /// po=8 适合 ef=50，po=4 适合 ef=100；po=0 禁用向量预取
     prefetch_offset: usize,
@@ -1294,6 +1298,9 @@ pub struct GraphSearcher<'a> {
     /// 可选的 8-bit PQ 量化数据集（Phase 1 Step 1, K=256）
     /// 启用后 search_pq8() 使用 LUT-ADC 距离进行图遍历 + f32 rerank
     pq8: Option<&'a PQ8Dataset>,
+    /// 可选的自适应 ef 配置（Phase 4.5）
+    /// 启用后 search()/search_sq8()/batch_search() 根据查询难度动态分配 ef
+    adaptive_ef: Option<AdaptiveEfConfig>,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1311,10 +1318,12 @@ impl<'a> GraphSearcher<'a> {
             visited: VisitedTracker::new(n, ef_search),
             navigation: None,
             last_visited_count: 0,
+            last_ef_used: ef_search,
             prefetch_offset: 8,
             sq8: None,
             pq4: None,
             pq8: None,
+            adaptive_ef: None,
         }
     }
 
@@ -1338,10 +1347,12 @@ impl<'a> GraphSearcher<'a> {
             visited: VisitedTracker::new(n, ef_search),
             navigation: Some(navigation),
             last_visited_count: 0,
+            last_ef_used: ef_search,
             prefetch_offset: 8,
             sq8: None,
             pq4: None,
             pq8: None,
+            adaptive_ef: None,
         }
     }
 
@@ -1381,6 +1392,23 @@ impl<'a> GraphSearcher<'a> {
         self
     }
 
+    /// 启用自适应 ef（Phase 4.5）
+    ///
+    /// 启用后 search()/search_sq8()/batch_search() 根据查询到入口点的距离
+    /// 动态分配 ef：简单查询用小 ef（快），难查询用大 ef（准）。
+    ///
+    /// 需预先构建 AdaptiveEfConfig（AdaptiveEfConfig::build_with_layered_nav 等）。
+    /// gamma 参数控制幂律曲率：gamma=1.0 线性，gamma>1 把多数查询压到小 ef。
+    pub fn with_adaptive_ef(&mut self, config: AdaptiveEfConfig) -> &mut Self {
+        // 若 max_ef > ef_search，扩容 VisitedTracker 的 history 容量
+        // 避免难查询时 Vec 增长触发 reallocation
+        if config.max_ef() > self.ef_search {
+            self.visited = VisitedTracker::new(self.visited.len(), config.max_ef());
+        }
+        self.adaptive_ef = Some(config);
+        self
+    }
+
     /// 搜索最近邻
     ///
     /// 返回 (节点ID, 距离) 列表，按距离升序
@@ -1392,13 +1420,30 @@ impl<'a> GraphSearcher<'a> {
     /// 否则用 medoid entry_point
     pub fn search(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
         // 选择 entry_point 优先级：分层导航 > centroid overlay > medoid
-        let entry_point = if let Some(nav) = self.graph.layered_nav() {
-            nav.initialize(self.vectors, self.dim, query).0
+        // 同时捕获 nav.initialize() 返回的 f32 距离用于自适应 ef 预测（Phase 4.5）
+        let (entry_point, nav_entry_dist) = if let Some(nav) = self.graph.layered_nav() {
+            let (ep, dist) = nav.initialize(self.vectors, self.dim, query);
+            (ep, Some(dist))
         } else if let Some(nav) = self.navigation {
-            Self::nearest_centroid(nav.centroids(), self.vectors, self.dim, query)
+            (Self::nearest_centroid(nav.centroids(), self.vectors, self.dim, query), None)
         } else {
-            self.graph.entry_point()
+            (self.graph.entry_point(), None)
         };
+
+        // 自适应 ef：用 nav.initialize 返回的 f32 距离预测（零额外开销）
+        let ef = if let Some(ref adaptive) = self.adaptive_ef {
+            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
+                l2_simd(
+                    query,
+                    &self.vectors[entry_point as usize * self.dim
+                        ..(entry_point as usize + 1) * self.dim],
+                )
+            });
+            adaptive.estimate_ef(entry_dist).max(k)
+        } else {
+            self.ef_search
+        };
+        self.last_ef_used = ef;
 
         let candidates = VamanaGraph::greedy_search_vec_reuse(
             self.vectors,
@@ -1406,7 +1451,7 @@ impl<'a> GraphSearcher<'a> {
             self.graph.storage(),
             entry_point,
             query,
-            self.ef_search,
+            ef,
             &mut self.visited,
             self.prefetch_offset,
         );
@@ -1435,22 +1480,39 @@ impl<'a> GraphSearcher<'a> {
         // 1. 编码查询向量为 SQ8
         let query_code = sq8.params.encode(query);
 
-        // 2. 选择 entry_point（f32 路径，开销极小）
-        let entry_point = if let Some(nav) = self.graph.layered_nav() {
-            nav.initialize(self.vectors, dim, query).0
+        // 2. 选择 entry_point + 捕获 nav.initialize 的 f32 距离
+        let (entry_point, nav_entry_dist) = if let Some(nav) = self.graph.layered_nav() {
+            let (ep, dist) = nav.initialize(self.vectors, dim, query);
+            (ep, Some(dist))
         } else if let Some(nav) = self.navigation {
-            Self::nearest_centroid(nav.centroids(), self.vectors, dim, query)
+            (Self::nearest_centroid(nav.centroids(), self.vectors, dim, query), None)
         } else {
-            self.graph.entry_point()
+            (self.graph.entry_point(), None)
         };
 
-        // 3. SQ8 图遍历
+        // 3. 自适应 ef：用 nav.initialize 返回的 f32 距离预测（零额外开销）
+        //    f32 距离比 SQ8 距离更精确，且分层导航已计算，不增加开销
+        let ef = if let Some(ref adaptive) = self.adaptive_ef {
+            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
+                l2_simd(
+                    query,
+                    &self.vectors[entry_point as usize * dim
+                        ..(entry_point as usize + 1) * dim],
+                )
+            });
+            adaptive.estimate_ef(entry_dist).max(k)
+        } else {
+            self.ef_search
+        };
+        self.last_ef_used = ef;
+
+        // 4. SQ8 图遍历
         let candidates = VamanaGraph::greedy_search_sq8(
             sq8,
             self.graph.storage(),
             entry_point,
             &query_code,
-            self.ef_search,
+            ef,
             &mut self.visited,
             self.prefetch_offset,
         );
@@ -1586,6 +1648,14 @@ impl<'a> GraphSearcher<'a> {
         self.last_visited_count
     }
 
+    /// 上次搜索实际使用的 ef 值（自适应 ef 诊断接口）
+    ///
+    /// 固定 ef 模式下等于 ef_search；自适应模式下等于 estimate_ef 返回值。
+    /// 用于 benchmark 追踪 avg_ef 而无需重复调用 nav.initialize()。
+    pub fn last_ef_used(&self) -> usize {
+        self.last_ef_used
+    }
+
     /// 找最近的 centroid 作为 entry_point
     /// O(√N * dim)，对 SIFT1M 约 1000*128 = 128K 次浮点运算
     #[inline]
@@ -1623,7 +1693,7 @@ impl<'a> GraphSearcher<'a> {
         use rayon::prelude::*;
 
         let n = self.vectors.len() / self.dim;
-        let ef = self.ef_search;
+        let default_ef = self.ef_search;
         let po = self.prefetch_offset;
         let vectors = self.vectors;
         let dim = self.dim;
@@ -1631,6 +1701,7 @@ impl<'a> GraphSearcher<'a> {
         let sq8 = self.sq8;
         let graph = self.graph;
         let navigation = self.navigation;
+        let adaptive_ef = self.adaptive_ef.as_ref();
 
         queries
             .par_iter()
@@ -1645,7 +1716,10 @@ impl<'a> GraphSearcher<'a> {
                 TLS_VISITED.with(|cell| {
                     let mut borrow = cell.borrow_mut();
                     if borrow.is_none() {
-                        *borrow = Some(VisitedTracker::new(n, ef));
+                        let cap = adaptive_ef
+                            .map(|c| c.max_ef())
+                            .unwrap_or(default_ef);
+                        *borrow = Some(VisitedTracker::new(n, cap));
                     }
                     let visited = borrow.as_mut().unwrap();
 
@@ -1653,12 +1727,25 @@ impl<'a> GraphSearcher<'a> {
                     if let Some(sq8) = sq8 {
                         let query_code = sq8.params.encode(query);
 
-                        let entry_point = if let Some(nav) = graph.layered_nav() {
-                            nav.initialize(vectors, dim, query).0
+                        let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
+                            let (ep, dist) = nav.initialize(vectors, dim, query);
+                            (ep, Some(dist))
                         } else if let Some(nav) = navigation {
-                            Self::nearest_centroid(nav.centroids(), vectors, dim, query)
+                            (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
                         } else {
-                            graph.entry_point()
+                            (graph.entry_point(), None)
+                        };
+
+                        // 自适应 ef（Phase 4.5）：用 nav.initialize 的 f32 距离
+                        let ef = if let Some(ref adaptive) = adaptive_ef {
+                            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
+                                l2_simd(query,
+                                    &vectors[entry_point as usize * dim
+                                        ..(entry_point as usize + 1) * dim])
+                            });
+                            adaptive.estimate_ef(entry_dist).max(k)
+                        } else {
+                            default_ef
                         };
 
                         let cands = VamanaGraph::greedy_search_sq8(
@@ -1688,12 +1775,25 @@ impl<'a> GraphSearcher<'a> {
                         results.truncate(k);
                         results
                     } else {
-                        let entry_point = if let Some(nav) = graph.layered_nav() {
-                            nav.initialize(vectors, dim, query).0
+                        let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
+                            let (ep, dist) = nav.initialize(vectors, dim, query);
+                            (ep, Some(dist))
                         } else if let Some(nav) = navigation {
-                            Self::nearest_centroid(nav.centroids(), vectors, dim, query)
+                            (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
                         } else {
-                            graph.entry_point()
+                            (graph.entry_point(), None)
+                        };
+
+                        // 自适应 ef（Phase 4.5）：用 nav.initialize 的 f32 距离
+                        let ef = if let Some(ref adaptive) = adaptive_ef {
+                            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
+                                l2_simd(query,
+                                    &vectors[entry_point as usize * dim
+                                        ..(entry_point as usize + 1) * dim])
+                            });
+                            adaptive.estimate_ef(entry_dist).max(k)
+                        } else {
+                            default_ef
                         };
 
                         let mut cands = VamanaGraph::greedy_search_vec_reuse(
