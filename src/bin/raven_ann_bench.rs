@@ -7,13 +7,15 @@
 //!   - hnswlib 显式 set_num_threads(1)，Glass 用 prepare_query 逐条
 //!   - Docker --parallelism 仅控制算法间并行，非查询内并行
 //!
-//! 因此默认配置：单线程 + SQ8 + 固定 ef（自适应 ef 单线程 -11% 故关闭）
+//! 默认配置：单线程 + SQ8 + 自适应 ef（ann-benchmarks 逐条顺序查询口径）
 //!
 //! 默认启用：
 //!   1. 分层导航 (LayeredNavigation) — 建图时构建
 //!   2. Two-Pass Prefetch (po=8) — GraphSearcher 默认
 //!   3. SQ8 标量量化 — 1.47x QPS，recall 几乎无损
 //!   4. 自适应 ef (gamma=3.0, min=40, max=75) — Pareto 最优 +11.3%
+//!   5. degrees 数组 O(1) neighbors() — 建图路径加速，查询路径 +0.2%（噪声）
+//!   6. target-cpu=native — .cargo/config.toml 全局生效
 //!
 //! 可选标志：
 //!   --no-sq8           禁用 SQ8，回退 f32 全精度
