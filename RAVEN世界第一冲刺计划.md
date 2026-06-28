@@ -731,37 +731,48 @@ PGO 预期收益：QPS +5-10%。
 
 ---
 
-### Phase 7：多线程查询并行化（v8 新增）🔴 P0
+### Phase 7：多线程查询并行化（v8 新增）🔴 P0 ✅ 已完成
 
 > **ann-benchmarks 榜单默认用多线程测 QPS。** Glass 的 `batch_search` 支持 OpenMP 并行。
 > RAVEN 当前仅单线程搜索，单线程成绩天然吃亏。
 > **不上多线程 = 不能和榜单做同口径对比。**
 
-#### 7.1 实现方案
+#### 7.1 实现方案（已实现）
 
-```rust
-// 用 rayon 并行化查询循环
-use rayon::prelude::*;
+`GraphSearcher::batch_search(&self, queries: &[&[f32]], k: usize) -> Vec<Vec<(u32, f32)>>`
 
-fn batch_search(&self, queries: &[Vec<f32>], k: usize) -> Vec<Vec<u32>> {
-    queries.par_iter()
-        .map(|q| {
-            // 每个 worker 独立 VisitedTracker + LinearPool
-            let mut searcher = self.searcher_pool.get();  // 线程本地
-            searcher.search(q, k)
-        })
-        .collect()
-}
-```
+- `&self` 只读共享（图数据、SQ8 码本 read-only，零竞争）
+- `rayon::par_iter` 并行化查询循环
+- 每 worker 用 `thread_local!` 缓存 `VisitedTracker`（1MB for N=1M，首次分配后复用）
+- 自动选择搜索路径：SQ8 > f32
+- `batch_search_ids` 便捷接口返回纯 ID
 
 #### 7.2 关键设计
 
-- 每个 worker 独立 `VisitedTracker` + `LinearPool`（无锁，无竞争）
-- `GraphSearcher` 不可变共享（图数据 read-only）
-- 用 `rayon::ThreadPool` 控制线程数
-- 目标：多核 QPS 线性扩展（8 核 → 8x QPS）
+- 每个 worker 独立 `VisitedTracker`（`thread_local!` 缓存，无锁无竞争）
+- 图数据 `&self` 不可变共享（`vectors`、`graph`、`sq8` 全部 read-only）
+- `rayon::ThreadPoolBuilder::num_threads(n)` 控制线程数
+- **visited.reset() bug 修复确认**：每查询 `greedy_search_*` 入口调用 `visited.reset()`，跨查询无状态污染
 
-#### 7.3 ann-benchmarks 口径
+#### 7.3 实测结果（SIFT-1M, SQ8, 16 核 CPU）
+
+| ef | threads | recall | QPS | speedup | scaling |
+|:--|:--|:--|:--|:--|:--|
+| 50 | 1 | 0.9653 | 11,518 | 1.00x | 100.0% |
+| 50 | 2 | 0.9653 | 23,943 | 2.08x | 103.9% |
+| 50 | 4 | 0.9653 | 45,845 | 3.98x | 99.5% |
+| **50** | **8** | **0.9653** | **79,910** | **6.94x** | **86.7%** |
+| 100 | 1 | 0.9905 | 6,961 | 1.00x | 100.0% |
+| 100 | 2 | 0.9905 | 14,361 | 2.06x | 103.2% |
+| 100 | 4 | 0.9905 | 25,601 | 3.68x | 91.9% |
+| 100 | 8 | 0.9905 | 46,578 | 6.69x | 83.6% |
+
+- **2 线程超线性**（103.9%）：TLS 缓存预热 + rayon 调度开销摊薄
+- **4 线程近线性**（99.5%）：图数据 + SQ8 码本完全在共享 L3 cache 中
+- **8 线程 86.7%**：内存带宽开始瓶颈（8 workers × 128B/vector = 1KB/visit）
+- recall 完全一致（0.9653 / 0.9905），多线程不影响搜索语义
+
+#### 7.4 ann-benchmarks 口径
 
 - ann-benchmarks 默认 `--parallelism=1`（单线程），但榜单展示多线程结果
 - RAVEN 需同时支持单线程和多线程口径

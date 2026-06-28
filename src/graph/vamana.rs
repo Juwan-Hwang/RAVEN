@@ -1602,6 +1602,134 @@ impl<'a> GraphSearcher<'a> {
         }
         best
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Phase 7: 多线程批量搜索（rayon 并行）
+    // ──────────────────────────────────────────────────────────────────
+
+    /// 批量搜索（多线程并行）
+    ///
+    /// 图数据（vectors、graph、sq8）以 `&self` 只读共享，零竞争。
+    /// 每个 rayon worker 独立创建 VisitedTracker（thread_local 缓存复用）。
+    ///
+    /// 使用 SQ8 量化路径（若已配置），否则回退 f32。
+    ///
+    /// 返回 Vec<Vec<(u32, f32)>>，每个查询的 top-k 结果按距离升序。
+    pub fn batch_search(
+        &self,
+        queries: &[&[f32]],
+        k: usize,
+    ) -> Vec<Vec<(u32, f32)>> {
+        use rayon::prelude::*;
+
+        let n = self.vectors.len() / self.dim;
+        let ef = self.ef_search;
+        let po = self.prefetch_offset;
+        let vectors = self.vectors;
+        let dim = self.dim;
+        let storage = self.graph.storage();
+        let sq8 = self.sq8;
+        let graph = self.graph;
+        let navigation = self.navigation;
+
+        queries
+            .par_iter()
+            .map(|query| {
+                // 线程本地 VisitedTracker：每 worker 分配一次后复用
+                // 设计文档 F.2：热路径零分配
+                thread_local! {
+                    static TLS_VISITED: std::cell::RefCell<Option<VisitedTracker>> =
+                        std::cell::RefCell::new(None);
+                }
+
+                TLS_VISITED.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    if borrow.is_none() {
+                        *borrow = Some(VisitedTracker::new(n, ef));
+                    }
+                    let visited = borrow.as_mut().unwrap();
+
+                    // 选择搜索路径：SQ8 > f32
+                    if let Some(sq8) = sq8 {
+                        let query_code = sq8.params.encode(query);
+
+                        let entry_point = if let Some(nav) = graph.layered_nav() {
+                            nav.initialize(vectors, dim, query).0
+                        } else if let Some(nav) = navigation {
+                            Self::nearest_centroid(nav.centroids(), vectors, dim, query)
+                        } else {
+                            graph.entry_point()
+                        };
+
+                        let cands = VamanaGraph::greedy_search_sq8(
+                            sq8,
+                            storage,
+                            entry_point,
+                            &query_code,
+                            ef,
+                            visited,
+                            po,
+                        );
+
+                        // f32 rerank
+                        let mut results: Vec<(u32, f32)> = cands
+                            .into_iter()
+                            .map(|(id, _)| {
+                                let d = l2_simd(
+                                    query,
+                                    &vectors[id as usize * dim..(id as usize + 1) * dim],
+                                );
+                                (id, d)
+                            })
+                            .collect();
+                        results.sort_by(|a, b| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        results.truncate(k);
+                        results
+                    } else {
+                        let entry_point = if let Some(nav) = graph.layered_nav() {
+                            nav.initialize(vectors, dim, query).0
+                        } else if let Some(nav) = navigation {
+                            Self::nearest_centroid(nav.centroids(), vectors, dim, query)
+                        } else {
+                            graph.entry_point()
+                        };
+
+                        let mut cands = VamanaGraph::greedy_search_vec_reuse(
+                            vectors,
+                            dim,
+                            storage,
+                            entry_point,
+                            query,
+                            ef,
+                            visited,
+                            po,
+                        );
+                        cands.sort_by(|a, b| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        cands.truncate(k);
+                        cands
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// 批量搜索（返回纯 ID，用于 benchmark/ann-benchmarks 接口）
+    ///
+    /// 内部调用 batch_search，提取 ID
+    pub fn batch_search_ids(
+        &self,
+        queries: &[&[f32]],
+        k: usize,
+    ) -> Vec<Vec<u32>> {
+        self.batch_search(queries, k)
+            .into_iter()
+            .map(|results| results.into_iter().map(|(id, _)| id).collect())
+            .collect()
+    }
 }
 
 /// 用于 BinaryHeap 排序的 f32 包装（BinaryHeap 要求 Ord）
