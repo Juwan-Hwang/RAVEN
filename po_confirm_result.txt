@@ -1,0 +1,105 @@
+warning: missing documentation for a struct field
+  --> src\graph\robust_prune.rs:78:5
+   |
+78 |     pub alpha: f32,
+   |     ^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> src\lib.rs:19:9
+   |
+19 | #![warn(missing_docs)]
+   |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src\graph\robust_prune.rs:79:5
+   |
+79 |     pub r_max: usize,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: `raven` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running `target\release\po_confirm.exe`
+=== po=6 vs po=8 确认实验 (ef=50) ===
+
+数据: n=1000000, dim=128, nq=10000
+
+--- 建图 ---
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[594]
+[build] iter 1/2 alpha=1
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 50000/1000000 (5%)
+[build] 100000/1000000 (10%)
+[build] 150000/1000000 (15%)
+[build] 200000/1000000 (20%)
+[build] 250000/1000000 (25%)
+[build] 300000/1000000 (30%)
+[build] 350000/1000000 (35%)
+[build] 400000/1000000 (40%)
+[build] 450000/1000000 (45%)
+[build] 500000/1000000 (50%)
+[build] 550000/1000000 (55%)
+[build] 600000/1000000 (60%)
+[build] 650000/1000000 (65%)
+[build] 700000/1000000 (70%)
+[build] 750000/1000000 (75%)
+[build] 800000/1000000 (80%)
+[build] 850000/1000000 (85%)
+[build] 900000/1000000 (90%)
+[build] 950000/1000000 (95%)
+[build] constructing layered navigation (M=16)...
+[nav] level 1: 62343 nodes → graph-guided
+[nav] level 2: 3886 nodes → graph-guided
+[nav] level 3: 243 nodes → brute-force
+[nav] level 4: 14 nodes → brute-force
+[build] layered nav done in 5.4s (max_level=4)
+建图: 391.0s
+
+--- warm-up ---
+warm-up done
+
+--- 5 轮交替测量 (ef=50, po=6 vs po=8) ---
+
+  round     QPS(po=6)     QPS(po=8)       diff%
+  --------------------------------------------
+      1          8634          8737       -1.2%
+      2          8588          8414       +2.1%
+      3          8612          8689       -0.9%
+      4          9049          8637       +4.8%
+      5          8719          9144       -4.6%
+
+--- 统计 ---
+
+  po=6: mean=8720  std=170  cv=1.95%
+  po=8: mean=8724  std=237  cv=2.72%
+
+  差距: -0.0% (po=6 vs po=8)
+
+--- 判定 ---
+
+  结论：差距 -0.0% 在噪声带内（2σ=5.4%），无法确认统计显著性
+  → 保留 po=8 不变
+
+thread 'main' (25924) panicked at src\bin\po_confirm.rs:229:55:
+create result file: Os { code: 32, kind: Uncategorized, message: "另一个程序正在使用此文件，进程无法访问。" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: process didn't exit successfully: `target\release\po_confirm.exe` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
