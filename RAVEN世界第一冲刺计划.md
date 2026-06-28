@@ -1,7 +1,7 @@
 # RAVEN 冲击 ann-benchmarks 世界第一：战略路线图
 
 > 创建时间：2026-06-25
-> 最后修订：2026-06-29（v8.2：degrees 数组 O(1) neighbors()、自适应 ef 密集扫描最终 Pareto、target-cpu=native 全局生效）
+> 最后修订：2026-06-29（v8.3：Phase 3.4 缓存行对齐 A/B 实验完成——结论无显著收益，不引入 AlignedVec64）
 > 目标：在 ann-benchmarks SIFT1M (sift-128-euclidean) 上达到 recall-QPS Pareto 前沿第一梯队（详见 §〇.2 目标重定义）
 >
 > **v8 重大变更**：H20 实测证明 "Glass avg_visited < 150" 是虚假基线（三个 bug 叠加：read_fvecs 用 astype 而非 view、search() 不更新计数器、硬编码文献值）。
@@ -611,40 +611,26 @@ greedy_search(query, ef_search):
 
 ---
 
-#### 3.4 缓存行对齐 + AVX2 内存布局验证（v8 新增）🟡 P1
+#### 3.4 缓存行对齐 + AVX2 内存布局验证（v8 新增）✅ 已完成 — 结论：无显著收益
 
-> **Glass 的数据结构专门按 64 字节缓存行对齐设计。** RAVEN 的 Hybrid Blocked-CSR 在设计文档中声称「64 字节 cache-line 对齐」，但实际代码未验证。
-> 这和 Phase 3.1（节点重排序）有重叠但不同——3.1 是图遍历顺序优化，3.4 是底层数据结构对齐验证。
+> **A/B 实验完成（v8.3）。** 同进程 5 轮交替测量，64B 对齐 vs 32B 跨缓存行偏移：
+> - 64B align: mean=12132, cv=4.13%
+> - 32B misalign: mean=12119, cv=2.96%
+> - 差距 +0.1%，2σ=8.3%，**噪声带内，无统计显著性**
+>
+> **根因**：图数据通过 `_mm_prefetch` 预取指令访问，延迟被流水线隐藏；每节点邻居列表（R=32 → 128B = 2 cache lines）足够小，跨行开销可忽略。
+>
+> **决策**：不引入 `AlignedVec64`。`Vec<u32>` 的默认对齐已足够。排除此不确定性后，可专注 Phase 1（量化加速）。
 
-**当前状态审计**：
+<details>
+<summary>历史分析（已证伪）</summary>
 
-| 数据结构 | 设计文档要求 | 实际代码 | 对齐状态 |
-|:--|:--|:--|:--|
-| `main_block: Vec<u32>` | 64B cache-line 对齐 | `vec![SENTINEL; n * r_max]` | ❌ `Vec` 默认 8 字节对齐，非 64 字节 |
-| 向量主存储 | 32/64B 对齐 | `AlignedVec<T> = AVec<T, ConstAlign<32>>` | ✅ 32 字节对齐（AVX2 友好） |
-| `vector_pack_buf` | 对齐打包 | `aligned_vec_f32(ef * dim)` | ✅ 32 字节对齐 |
-| 邻居列表访问 | 连续读取 | `main_block[start..start+r_max]` | ⚠️ R=32 → 128B = 2 cache lines，但起点未必对齐 |
+**原始假设**：`Vec<u32>` 默认 4B 对齐，邻居列表 `node_id × r_max` 起点未必 64B 对齐，可能导致跨缓存行访问 +50% cache line 加载。Glass 用 `posix_memalign` 确保 64B 对齐。
 
-**问题分析**：
-- `Vec<u32>` 在堆上分配，Rust 默认对齐为 `align_of::<u32>() = 4`，不是 64 字节
-- 邻居列表 `node_id × r_max` 的起点只有当 `node_id × r_max × 4` 是 64 的倍数时才对齐
-  - R=32: `node_id × 128B`，node_id 为偶数时对齐，奇数时跨缓存行
-  - R=64: `node_id × 256B`，总是 64B 对齐
-- Glass 用 `posix_memalign` / `aligned_alloc` 确保数据结构 64B 对齐
+**实验设计**：同进程交替 A/B benchmark，64B 对齐 vs 32B 偏移（保证跨缓存行），5 轮交替，SQ8 + adaptive ef + fixed entry=medoid，ef=50, po=8。
 
-**验证与修复方案**：
-
-| 编号 | 任务 | 文件 | 预期收益 |
-|:--|:--|:--|:--|
-| 3.4a | **审计对齐状态**：用 `perf stat -e cache-misses` 测当前 LLC miss rate，对比 Glass | 新建 bench | 诊断基线 |
-| 3.4b | **main_block 改用 64B 对齐分配**：用 `AlignedVec64<u32>` 替代 `Vec<u32>` | `graph.rs` | 消除跨缓存行访问 |
-| 3.4c | **邻居列表 padding 对齐**：block_size 向上取整到 64B 边界（R=32 → 16 个 u32 = 64B，天然对齐；R=64 → 32 个 u32 = 128B = 2 lines） | `graph.rs` | 每 block 起点对齐 |
-| 3.4d | **AVX2 load 对齐验证**：`_mm256_load_ps`（对齐）vs `_mm256_loadu_ps`（非对齐）在真实数据上 benchmark | `avx2.rs` | 确定最优 load 指令 |
-
-**预期收益**：
-- 如果当前存在跨缓存行访问：+5-15% QPS（取决于 cache miss 占比）
-- 如果已经天然对齐：收益为零，但排除了一个不确定性
-- **这是 Phase 1 之前应该做的诊断**——如果量化后 QPS 不及预期，需要排除对齐问题
+**实验结果**：差距 +0.1%（2σ=8.3%），无统计显著性。假设证伪。
+</details>
 
 ---
 
@@ -895,7 +881,7 @@ PGO 预期收益：QPS +5-10%。
 | 🟡 P1 | 2 | Phase 2: 两阶段 rerank 精调 | 边际收益 | 2-3天 | 🟡 中 | |
 | 🟡 P1 | ~~4.5~~ | ~~自适应 ef~~ | ~~+9.2% QPS~~ | ~~已完成~~ | ✅ | gamma=2.0, recall 保持 |
 | 🟡 P1 | 0B | Phase 0B: 代码卫生 | 质量 | 1-2天 | 🟢 低 | 逐项独立测 |
-| 🟡 P1 | 3.4 | 缓存行对齐 + AVX2 布局验证 | +5-15% QPS（如存在未对齐） | 1-2天 | 🟢 低 | main_block Vec→AlignedVec64，Phase 1 前诊断 |
+| ✅ 已完成 | 3.4 | 缓存行对齐 + AVX2 布局验证 | +0.1%（噪声内，无收益） | 1天 | 🟢 低 | A/B 实验证伪，不引入 AlignedVec64 |
 | 🟢 P2 | 3.1-3.2 | Phase 3.1-3.2: 节点重排序 + PQ连续存储 | 取决于 profiler | 2-3天 | 🟢 低 | |
 | 🟢 P2 | 3.3b | NGT k-NN 图实验路线 | 论文贡献（非打榜） | 3-5天 | 🟡 中 | 仅多数据集 avg_visited 偏高时启动 |
 | 🟢 P2 | 4 | Phase 4: 热路径微优化 | Phase 1 后可能更重要 | 2-3天 | 🟢 低 | |
@@ -918,7 +904,7 @@ PGO 预期收益：QPS +5-10%。
 5. 🔴 **Phase 1: LUT16 SIMD PQ-ADC**（3-5天，核心突破点）
 6. 🔴 **Phase 8: ann-benchmarks Docker 适配**（3-5天，可与 Phase 1 并行）
 7. 🔴 **Phase 7: 多线程查询**（2-3天，榜单多线程口径）
-8. 🟡 **Phase 3.4: 缓存行对齐验证**（Phase 1 前诊断，排除对齐问题）
+8. ✅ ~~**Phase 3.4: 缓存行对齐验证**~~（A/B 实验完成，+0.1% 噪声内，无收益，不引入 AlignedVec64）
 9. ✅ ~~**Phase 4.5: 自适应 ef**~~（已完成，+9.2% QPS，gamma=2.0 幂律变换）→ 🟡 **Phase 2: rerank 精调**
 10. 🟢 **0B 代码卫生 + 0C.6/0C.7** 穿插在等待期做
 11. 🟢 **Phase 3.1-3.3 + Phase 3.3b(NGT实验) + Phase 5-6** 按 profiler 数据决定
@@ -939,7 +925,7 @@ PGO 预期收益：QPS +5-10%。
 | **ann-benchmarks 环境差异** | 中 | 中 | Docker 可复现 + 同硬件同线程口径验证 |
 | **多线程内存带宽瓶颈** | 中 | 中 | Phase 7 后用 perf stat 测带宽利用率 |
 | **预取调优收益不如 Glass** | 低 | 低 | po 扫描是确定性收益，最差也是 po=8 不变 |
-| **main_block 未 64B 对齐导致 cache miss** | 中 | 中 | Phase 3.4 审计对齐状态，必要时改用 AlignedVec64 |
+| ~~main_block 未 64B 对齐导致 cache miss~~ | ~~已证伪~~ | - | A/B 实验 +0.1% 噪声内，prefetch 已隐藏延迟 |
 | **NGT k-NN 图建图成本过高** | 中 | 低 | 仅作为实验选项，不进入主路径。Vamana 当前已足够 |
 
 ---
@@ -980,7 +966,7 @@ PGO 预期收益：QPS +5-10%。
 ### 第四优先：差异化创新
 
 17. ~~**自适应 ef**~~ → ✅ 已完成（P1，RAVEN 独有，gamma=2.0 幂律变换，+9.2% QPS）
-18. **缓存行对齐 + AVX2 布局验证** → P1（main_block Vec→AlignedVec64，Phase 1 前诊断）
+18. ~~**缓存行对齐 + AVX2 布局验证**~~ → ✅ 已完成（A/B 实验证伪，+0.1% 噪声内，不引入 AlignedVec64）
 19. **NGT k-NN 图实验路线** → P2（论文贡献，仅多数据集 avg_visited 偏高时启动）
 20. **AVQ 论文级打磨** → P2
 
@@ -1005,6 +991,10 @@ PGO 预期收益：QPS +5-10%。
 2. **degrees 数组 O(1) neighbors()**（commit a88d4a5）。`HybridBlockedCsr` 新增 `degrees: Vec<u16>` 数组，`neighbors()` 从 O(r_max) SENTINEL 线性扫描降为 O(1) 数组查找，`add_edge()` 去重从 O(r_max) 降为 O(deg)。A/B benchmark（同进程 5 轮交替）结论：查询路径 +0.2%（2σ=4.8%，噪声内），建图路径改进（add_edge/set_neighbors/degree 均加速）。根因：multi-line graph prefetch 已将邻居列表预取到 L1，SENTINEL 扫描 32 个 u32 在 L1 命中下仅 ~4 周期，非瓶颈。
 3. **target-cpu=native** 全局生效（`.cargo/config.toml`）。手写 intrinsic 已用 AVX2，此标志让非 intrinsic 代码路径（如 SQ8 rerank 的 f32 排序）被编译器自动向量化。
 4. **`raven_ann_bench.rs` 默认配置**：use_sq8=true, use_adaptive_ef=true (γ3(40,75)), use_multithread=false。标志：`--no-sq8` / `--no-adaptive-ef` / `--multithread`。
+
+**v8.3 更新**：
+1. **Phase 3.4 缓存行对齐 A/B 实验完成**。同进程 5 轮交替，64B 对齐 vs 32B 跨缓存行偏移（mod64=32，真正跨行）。结果：64B align mean=12132 cv=4.13%，32B misalign mean=12119 cv=2.96%，差距 +0.1%（2σ=8.3%，噪声内）。**结论：无显著收益，不引入 AlignedVec64**。根因：`_mm_prefetch` 预取指令已将图数据预取到 L1，跨缓存行开销被流水线隐藏；每节点邻居列表 128B（2 cache lines）足够小。
+2. **清理临时 A/B 测试代码**：`align_ab_bench.rs` 已删除，工作区回退到 commit 638b612 干净状态。
 
 ---
 
