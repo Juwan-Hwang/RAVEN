@@ -1,0 +1,5 @@
+[build]
+# 启用 AVX2 自动向量化 + 所有当前 CPU 支持的指令集
+# 手写 intrinsic 已用 AVX2，但非 intrinsic 代码路径（如 SQ8 rerank 的 f32 排序）
+# 需要此标志才能被编译器自动向量化
+rustflags = ["-C", "target-cpu=native"]
