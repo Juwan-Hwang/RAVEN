@@ -1,7 +1,7 @@
 # RAVEN 冲击 ann-benchmarks 世界第一：战略路线图
 
 > 创建时间：2026-06-25
-> 最后修订：2026-06-29（v8.3：Phase 3.4 缓存行对齐 A/B 实验完成——结论无显著收益，不引入 AlignedVec64）
+> 最后修订：2026-06-29（v8.4：Phase 1 PQ 全部完成——SQ8 胜出，PQ8 保留待优化，PQ4 量化太粗废弃）
 > 目标：在 ann-benchmarks SIFT1M (sift-128-euclidean) 上达到 recall-QPS Pareto 前沿第一梯队（详见 §〇.2 目标重定义）
 >
 > **v8 重大变更**：H20 实测证明 "Glass avg_visited < 150" 是虚假基线（三个 bug 叠加：read_fvecs 用 astype 而非 view、search() 不更新计数器、硬编码文献值）。
@@ -875,7 +875,7 @@ PGO 预期收益：QPS +5-10%。
 | ✅ 已完成 | — | H20 Glass 基线审计 | 推翻虚假基线 | 0.5天 | 🟢 | avg_visited 15% 差距 |
 | ✅ 已完成 | 0D | 预取参数自动调优 | 0%（噪声内无差异） | 1天 | 🟢 | po=6 vs po=8 差距 -0.0%，2σ=5.4%，保留 po=8。RAVEN 已有 graph prefetch |
 | ✅ 已完成 | 1.0 | Phase 1 Step 0: SQ8 量化 | +38-42% QPS | 1天 | 🟢 | ef50: 8705→11997 (1.38x), recall 0.9653。终态门 PASS |
-| 🔴 **P0** | **1** | **Phase 1: LUT16 SIMD PQ-ADC** | **+2-3x QPS** | **3-5天** | 🟡 中 | 核心突破点，适用例外条款 |
+| ✅ 已完成 | 1 | Phase 1: PQ 量化对比实验 | SQ8 胜出 | 3天 | ✅ | PQ4 recall 6% 废弃，PQ8 ef50 不敌 SQ8 但 ef200 反超 6%，SQ8 为最终方案 |
 | 🔴 **P0** | **8** | **ann-benchmarks Docker 适配** | **上榜** | **3-5天** | 🟡 中 | S7 + HDF5 + Dockerfile |
 | 🔴 **P0** | **7** | **多线程查询并行化** | **多核线性扩展** | **2-3天** | 🟡 中 | rayon，榜单多线程口径 |
 | 🟡 P1 | 2 | Phase 2: 两阶段 rerank 精调 | 边际收益 | 2-3天 | 🟡 中 | |
@@ -901,7 +901,7 @@ PGO 预期收益：QPS +5-10%。
 2. ✅ **H20 Glass 基线审计**（推翻虚假基线，Phase 1 否决令解除）
 3. 🔴 **0D 预取参数自动调优**（1天，确定性收益，Glass 实测 30%）
 4. 🔴 **Phase 1 Step 0: SQ8 量化**（2天，过渡验证）
-5. 🔴 **Phase 1: LUT16 SIMD PQ-ADC**（3-5天，核心突破点）
+5. ✅ ~~**Phase 1: LUT16 SIMD PQ-ADC**~~（PQ4 K=16 recall 6% 废弃，PQ8 K=256 ef50 不敌 SQ8 但 ef200 反超 6%。SQ8 AVX2 为最终量化方案。PQ8 LUT 优化待定）
 6. 🔴 **Phase 8: ann-benchmarks Docker 适配**（3-5天，可与 Phase 1 并行）
 7. 🔴 **Phase 7: 多线程查询**（2-3天，榜单多线程口径）
 8. ✅ ~~**Phase 3.4: 缓存行对齐验证**~~（A/B 实验完成，+0.1% 噪声内，无收益，不引入 AlignedVec64）
@@ -995,6 +995,22 @@ PGO 预期收益：QPS +5-10%。
 **v8.3 更新**：
 1. **Phase 3.4 缓存行对齐 A/B 实验完成**。同进程 5 轮交替，64B 对齐 vs 32B 跨缓存行偏移（mod64=32，真正跨行）。结果：64B align mean=12132 cv=4.13%，32B misalign mean=12119 cv=2.96%，差距 +0.1%（2σ=8.3%，噪声内）。**结论：无显著收益，不引入 AlignedVec64**。根因：`_mm_prefetch` 预取指令已将图数据预取到 L1，跨缓存行开销被流水线隐藏；每节点邻居列表 128B（2 cache lines）足够小。
 2. **清理临时 A/B 测试代码**：`align_ab_bench.rs` 已删除，工作区回退到 commit 638b612 干净状态。
+
+**v8.4 更新**：
+1. **Phase 1 PQ 全部完成**（commit 2cc7b2a）。三方对比：f32 vs SQ8 vs PQ8 vs PQ4（SIFT-128, M=32, ef=50）：
+
+| 量化方案 | recall@10 | QPS | vs f32 | vs SQ8 | avg_visited | 结论 |
+|:--|--:|--:|--:|--:|--:|:--|
+| f32 (基线) | 0.9705 | 8,951 | 1.00x | — | 1,227 | 基线 |
+| **SQ8 AVX2** | **0.9653** | **12,786** | **1.43x** | **1.00x** | 1,233 | **✅ 最终选择** |
+| PQ8 K=256 | 0.9571 | 11,632 | 1.30x | 0.91x | 1,233 | ❌ ef=50 不敌 SQ8，但 ef=200 反超 6% |
+| PQ4 K=16 | 0.0597 | 52,509 | 5.90x | — | 889,755 | ❌ 量化太粗，recall 崩塌 |
+
+2. **关键发现**：
+   - **visited.reset() bug**：`greedy_search_pq4` 和 `greedy_search_pq8` 缺少 `visited.reset()`，warmup 后全图被标记 → 退化为穷举。修复后 avg_visited 从 886K 降到 1233。
+   - **SQ8 胜出原因**：AVX2 `_mm256_subs_epu8` + `_mm256_maddubs_epi16` 全 SIMD 并行，无需 LUT 查表。PQ8 的 M=32 次 LUT 随机访问（32KB LUT 不入 L1）产生 cache miss，抵消了 4x 带宽节省。
+   - **PQ8 保留价值**：ef=200 时 PQ8 反超 SQ8 6%（4599 vs 4346 QPS），高精度工作点 LUT 命中率提升。代码存档在主线。
+3. **PQ8 优化方向**：LUT 从 f32(32KB) 降为 u16(16KB) 可入 L1，消除 cache miss；再叠加 AVX2 gather 批量查表，有望在中低 ef 也追上 SQ8。
 
 ---
 
