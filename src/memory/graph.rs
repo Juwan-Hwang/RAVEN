@@ -30,6 +30,13 @@ pub struct HybridBlockedCsr {
     /// overflow 区：度数超 R_max 的节点的额外邻居
     /// key = node_id, value = 溢出的邻居列表
     overflow: Vec<Vec<u32>>,
+    /// 每个节点在主块中的实际邻居数（不含 overflow）
+    ///
+    /// O(1) neighbors() 切片：消除 SENTINEL 线性扫描。
+    /// 每次 neighbors() 调用从 O(r_max) 线性扫描降为 O(1) 数组查找。
+    /// r_max=32 时，每查询 ~1200 次 neighbors() 调用节省 ~38K 次比较。
+    /// 同时 add_edge() 去重扫描从 O(r_max) 降为 O(degree)。
+    degrees: Vec<u16>,
 }
 
 impl HybridBlockedCsr {
@@ -38,11 +45,13 @@ impl HybridBlockedCsr {
     /// n: 节点数
     /// r_max: 每个节点主块的最大出度
     pub fn new(n: usize, r_max: usize) -> Self {
+        debug_assert!(r_max <= u16::MAX as usize, "r_max exceeds u16::MAX");
         Self {
             n,
             r_max,
             main_block: vec![SENTINEL; n * r_max],
             overflow: vec![Vec::new(); n],
+            degrees: vec![0u16; n],
         }
     }
 
@@ -63,14 +72,13 @@ impl HybridBlockedCsr {
 
     /// 获取节点 node_id 的邻居切片（主块部分）
     ///
-    /// 邻居起点 = node_id × r_max，无需 offset 数组
+    /// 邻居起点 = node_id × r_max，无需 offset 数组。
+    /// 使用 degrees 数组直接切片，O(1) 复杂度（无需 SENTINEL 线性扫描）。
     #[inline(always)]
     pub fn neighbors(&self, node_id: u32) -> &[u32] {
         let start = node_id as usize * self.r_max;
-        let slice = &self.main_block[start..start + self.r_max];
-        // 截断到第一个 SENTINEL 之前（空槽）
-        let len = slice.iter().position(|&x| x == SENTINEL).unwrap_or(self.r_max);
-        &slice[..len]
+        let len = self.degrees[node_id as usize] as usize;
+        &self.main_block[start..start + len]
     }
 
     /// 预取节点 node_id 的邻居列表（OPT-2: 方案 B 预取策略）
@@ -106,18 +114,20 @@ impl HybridBlockedCsr {
     pub fn add_edge(&mut self, from: u32, to: u32) {
         debug_assert!(to != SENTINEL, "cannot add edge to sentinel");
         let start = from as usize * self.r_max;
+        let deg = self.degrees[from as usize] as usize;
 
-        // 去重：检查主块中是否已存在该边
-        for i in 0..self.r_max {
-            match self.main_block[start + i] {
-                SENTINEL => {
-                    // 找到空槽，写入
-                    self.main_block[start + i] = to;
-                    return;
-                }
-                v if v == to => return, // 已存在，跳过
-                _ => {}
+        // 去重：只扫描有效条目（O(deg) 而非 O(r_max)）
+        for i in 0..deg {
+            if self.main_block[start + i] == to {
+                return; // 已存在，跳过
             }
+        }
+
+        // 主块有空槽，直接写入（槽位 [deg] 一定是 SENTINEL，由不变式保证）
+        if deg < self.r_max {
+            self.main_block[start + deg] = to;
+            self.degrees[from as usize] += 1;
+            return;
         }
 
         // 主块已满，检查 overflow
@@ -132,8 +142,10 @@ impl HybridBlockedCsr {
     /// 如果邻居数超过 r_max，主块填满后剩余写入 overflow
     pub fn set_neighbors(&mut self, node_id: u32, neighbors: &[u32]) {
         let start = node_id as usize * self.r_max;
-        // 清空主块
-        for i in 0..self.r_max {
+        let old_deg = self.degrees[node_id as usize] as usize;
+
+        // 清空旧主块条目（只需清 old_deg 个，剩余槽位已由不变式保证为 SENTINEL）
+        for i in 0..old_deg {
             self.main_block[start + i] = SENTINEL;
         }
         // 清空 overflow
@@ -148,13 +160,15 @@ impl HybridBlockedCsr {
         if neighbors.len() > self.r_max {
             self.overflow[node_id as usize].extend_from_slice(&neighbors[self.r_max..]);
         }
+
+        // 更新度数
+        self.degrees[node_id as usize] = main_count as u16;
     }
 
     /// 获取节点的出度（主块 + overflow）
+    #[inline]
     pub fn degree(&self, node_id: u32) -> usize {
-        let main = self.neighbors(node_id).len();
-        let overflow = self.overflow[node_id as usize].len();
-        main + overflow
+        self.degrees[node_id as usize] as usize + self.overflow[node_id as usize].len()
     }
 
     /// 度数分位数统计钩子
@@ -216,7 +230,18 @@ impl HybridBlockedCsr {
     ) -> Self {
         debug_assert_eq!(main_block.len(), n * r_max, "main_block size mismatch");
         debug_assert_eq!(overflow.len(), n, "overflow size mismatch");
-        Self { n, r_max, main_block, overflow }
+        debug_assert!(r_max <= u16::MAX as usize, "r_max exceeds u16::MAX");
+
+        // 从 main_block 一次性计算 degrees（O(n*r_max)，仅加载时执行一次）
+        let degrees: Vec<u16> = (0..n)
+            .map(|i| {
+                let start = i * r_max;
+                let slice = &main_block[start..start + r_max];
+                slice.iter().position(|&x| x == SENTINEL).unwrap_or(r_max) as u16
+            })
+            .collect();
+
+        Self { n, r_max, main_block, overflow, degrees }
     }
 
     /// 导出主块引用（用于序列化）
