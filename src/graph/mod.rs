@@ -14,8 +14,10 @@ pub mod quant_aware_prune;
 pub mod ablation;
 pub mod navigation;
 pub mod linear_pool;
+pub mod adaptive_ef;
 
 pub use vamana::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
+pub use adaptive_ef::AdaptiveEfConfig;
 pub use robust_prune::{RobustPrune, RobustPruneConfig, PruneStrategy, DirectionalPrune, DirectionalPruneConfig, prune_dispatch};
 pub use rp_tuning::{RPTuning, RPTuningConfig, AlphaVariant};
 pub use quant_aware_prune::{QuantAwareRobustPrune, QuantAwarePruneConfig, NormalizationScheme};

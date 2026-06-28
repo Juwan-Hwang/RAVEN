@@ -1,7 +1,7 @@
 # RAVEN 冲击 ann-benchmarks 世界第一：战略路线图
 
 > 创建时间：2026-06-25
-> 最后修订：2026-06-29（v8.4：Phase 1 PQ 全部完成——SQ8 胜出，PQ8 保留待优化，PQ4 量化太粗废弃）
+> 最后修订：2026-06-29（v8.5：PQ4 pshufb SIMD + M=64 实验完成，PQ4 方案彻底终止；转向 PQ8 u8 LUT 优化）
 > 目标：在 ann-benchmarks SIFT1M (sift-128-euclidean) 上达到 recall-QPS Pareto 前沿第一梯队（详见 §〇.2 目标重定义）
 >
 > **v8 重大变更**：H20 实测证明 "Glass avg_visited < 150" 是虚假基线（三个 bug 叠加：read_fvecs 用 astype 而非 view、search() 不更新计数器、硬编码文献值）。
@@ -1011,6 +1011,24 @@ PGO 预期收益：QPS +5-10%。
    - **SQ8 胜出原因**：AVX2 `_mm256_subs_epu8` + `_mm256_maddubs_epi16` 全 SIMD 并行，无需 LUT 查表。PQ8 的 M=32 次 LUT 随机访问（32KB LUT 不入 L1）产生 cache miss，抵消了 4x 带宽节省。
    - **PQ8 保留价值**：ef=200 时 PQ8 反超 SQ8 6%（4599 vs 4346 QPS），高精度工作点 LUT 命中率提升。代码存档在主线。
 3. **PQ8 优化方向**：LUT 从 f32(32KB) 降为 u16(16KB) 可入 L1，消除 cache miss；再叠加 AVX2 gather 批量查表，有望在中低 ef 也追上 SQ8。
+
+**v8.5 更新**：
+1. **PQ4 pshufb SIMD 实验完成——方案彻底终止**。三轮实验全部失败：
+
+| 实验 | ef=50 recall | ef=50 QPS | vs PQ4 标量 | vs SQ8 | 结论 |
+|:--|--:|--:|--:|--:|:--|
+| PQ4 M=32 标量（基线） | 0.7678 | 15,412 | 1.00x | 1.29x | recall 差 SQ8 20pp |
+| PQ4 M=32 SIMD v1（散落指针 gather） | 0.7683 | 10,260 | 0.67x | 0.83x | ❌ cache miss + 预取不匹配，QPS 倒退 33% |
+| PQ4 M=32 SIMD v2（连续栈缓冲区 + 批量预取） | 0.7683 | 12,759 | 0.83x | 1.01x | ❌ transpose 开销 > pshufb 收益，仍低标量 17% |
+| PQ4 M=64（sub_dim=2，recall 验证） | 0.9221 | 10,448 | 0.68x | 0.82x | ❌ recall 仍差 SQ8 4.3pp，32B/neighbor 带宽翻倍比 SQ8 还慢 |
+
+2. **PQ4 终止根因分析**：
+   - **K=16 码字太少**：4-bit 表达力不足，M=32 recall 0.77@ef=50，M=64 recall 0.92@ef=50 仍不过 0.95 门槛。
+   - **recall 税吞噬带宽优势**：PQ4 M=32 的 16B/neighbor 带宽优势（8x vs SQ8）在 ef=300+ 的高 recall 工作点被访问次数翻 4 倍完全抵消。
+   - **M=64 双重打击**：带宽翻倍到 32B/neighbor（与 SQ8 128B 差距缩小到 4x），recall 仍不够，QPS 反而比 SQ8 还慢。
+   - **pshufb SIMD 失败**：批量 16 邻居方案的 transpose（256 次 stack 读写 + column gather）开销吃掉 pshufb 查表加速。只有 ef=200（计算密度高）才勉强持平标量。
+3. **代码处理**：PQ4 SIMD 代码已全部回退，保留 PQ4 标量版（M=32, f32 LUT）作为实验存档。`adaptive_ef` 模块导出修复保留。
+4. **转向 PQ8 u8 LUT 优化**：PQ8（K=256）是当前最优路线——recall 0.9571@ef=50 已过线，瓶颈是 f32 LUT 32KB 超出 L1。u8 LUT 8KB 可完全放入 L1d cache，预期 ef=50 QPS 从 11,632 提升到 ≥13,000（超过 SQ8 12,786）。
 
 ---
 
