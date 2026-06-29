@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use raven::build::ChaCha8Rng;
 use raven::graph::{GraphSearcher, VamanaBuildConfig, VamanaGraph};
+use raven::memory::serialize::Serializable;
 use raven::quant::SQ8Dataset;
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
@@ -116,22 +117,35 @@ fn main() {
     eprintln!("=== OPT Benchmark (SQ8, ef={}, k={}) ===", ef, k);
     eprintln!("data: n={}, dim={}, nq={}", n, dim, nq);
 
-    // 建图
-    let t0 = Instant::now();
-    let mut rng = ChaCha8Rng::seed_from(42);
-    let config = VamanaBuildConfig {
-        alpha: 1.2,
-        l_build: 200,
-        r_max: 32,
-        r_soft: 48,
-        max_iterations: 2,
-        saturate: true,
-        enable_layered_nav: true,
-        nav_m: 16,
-        ..Default::default()
+    // 建图（带缓存：首次建图后存盘，后续直接加载，消除 ~400s 建图热源）
+    let graph_path = std::path::Path::new("data/sift/graph_cache.bin");
+    let graph = if graph_path.exists() {
+        eprintln!("loading cached graph...");
+        let t0 = Instant::now();
+        let g = VamanaGraph::load(graph_path).expect("load graph cache");
+        eprintln!("load: {:.1}s", t0.elapsed().as_secs_f64());
+        g
+    } else {
+        eprintln!("building graph (first run)...");
+        let t0 = Instant::now();
+        let mut rng = ChaCha8Rng::seed_from(42);
+        let config = VamanaBuildConfig {
+            alpha: 1.2,
+            l_build: 200,
+            r_max: 32,
+            r_soft: 48,
+            max_iterations: 2,
+            saturate: true,
+            enable_layered_nav: true,
+            nav_m: 16,
+            ..Default::default()
+        };
+        let g = VamanaGraph::build(&train, dim, &config, &mut rng);
+        eprintln!("build: {:.1}s", t0.elapsed().as_secs_f64());
+        let _ = g.save(graph_path);
+        eprintln!("graph cached to data/sift/graph_cache.bin");
+        g
     };
-    let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
-    eprintln!("build: {:.1}s", t0.elapsed().as_secs_f64());
 
     // SQ8 编码
     let sq8 = SQ8Dataset::build(&train, dim);

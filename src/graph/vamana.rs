@@ -1481,7 +1481,7 @@ impl<'a> GraphSearcher<'a> {
 
         // 距离已在 greedy_search_vec_reuse 中计算，只需排序取 top-k
         let mut results = candidates;
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         results.truncate(k);
         results
     }
@@ -1554,7 +1554,7 @@ impl<'a> GraphSearcher<'a> {
                 (id, f32_dist)
             })
             .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         results.truncate(k);
         results
     }
@@ -1607,7 +1607,7 @@ impl<'a> GraphSearcher<'a> {
                 (id, f32_dist)
             })
             .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         results.truncate(k);
         results
     }
@@ -1660,7 +1660,7 @@ impl<'a> GraphSearcher<'a> {
                 (id, f32_dist)
             })
             .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         results.truncate(k);
         results
     }
@@ -1804,9 +1804,7 @@ impl<'a> GraphSearcher<'a> {
                                 (id, d)
                             })
                             .collect();
-                        results.sort_by(|a, b| {
-                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
                         results.truncate(k);
                         results
                     } else {
@@ -1842,9 +1840,7 @@ impl<'a> GraphSearcher<'a> {
                             pool,
                             po,
                         );
-                        cands.sort_by(|a, b| {
-                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        cands.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
                         cands.truncate(k);
                         cands
                     }
