@@ -668,6 +668,11 @@ impl VamanaGraph {
 
         let mut edge_buf: [u32; 128] = [0; 128];
 
+        // SQ8 码大小 = dim bytes。SIFT-128 → 128B = 2 cache lines
+        // 预取必须覆盖完整码，否则距离计算时第二个 cache line miss
+        let dim = sq8.dim;
+        let code_lines = (dim + 63) / 64; // cache lines per code
+
         while let Some((node, _dist)) = pool.pop() {
             // Multi-line graph prefetch（与 f32 路径相同，邻居列表大小不变）
             if let Some((next_node, _)) = pool.peek_unchecked() {
@@ -695,12 +700,18 @@ impl VamanaGraph {
                 }
             }
 
-            // 预取前 po 个邻居的 SQ8 码（dim bytes，比 f32 小 4x）
+            // 预取前 po 个邻居的 SQ8 码（完整覆盖所有 cache lines）
             let prefetch_count = po.min(edge_size);
             for i in 0..prefetch_count {
                 let v = edge_buf[i] as usize;
                 let ptr = sq8.code(v).as_ptr() as *const i8;
-                unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    // SIFT-128: 128B = 2 cache lines，必须预取第二行
+                    if code_lines > 1 {
+                        std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                    }
+                }
             }
 
             // 第二遍：SQ8 距离计算 + 前瞻预取
@@ -708,10 +719,16 @@ impl VamanaGraph {
                 if i + po < edge_size {
                     let v = edge_buf[i + po] as usize;
                     let ptr = sq8.code(v).as_ptr() as *const i8;
-                    unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+                    unsafe {
+                        std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                        if code_lines > 1 {
+                            std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
+                        }
+                    }
                 }
                 let neighbor = edge_buf[i];
-                let d = sq8.distance(query_code, neighbor as usize);
+                // 热路径：跳过 bounds check（neighbor 已通过 visited.visit 验证有效）
+                let d = unsafe { sq8.distance_unchecked(query_code, neighbor as usize) };
                 pool.insert(neighbor, d);
             }
         }
