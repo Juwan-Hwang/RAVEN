@@ -72,6 +72,7 @@ fn run_round(
     ef: usize,
     sq8: &SQ8Dataset,
     repeats: usize,
+    weighted: bool,
 ) -> RoundResult {
     let mut searcher = GraphSearcher::new(train, graph, ef);
     searcher.with_sq8(sq8);
@@ -81,7 +82,11 @@ fn run_round(
     let mut total = 0usize;
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
-        let result = searcher.search_sq8(query, k);
+        let result = if weighted {
+            searcher.search_sq8_weighted(query, k)
+        } else {
+            searcher.search_sq8(query, k)
+        };
         let gt_slice = &gt[q * gt_k..q * gt_k + k];
         for &g in gt_slice {
             if result.iter().any(|(id, _)| *id == g as u32) {
@@ -98,7 +103,11 @@ fn run_round(
     for _ in 0..repeats {
         for q in 0..nq {
             let query = &test[q * dim..(q + 1) * dim];
-            let result = searcher.search_sq8(query, k);
+            let result = if weighted {
+                searcher.search_sq8_weighted(query, k)
+            } else {
+                searcher.search_sq8(query, k)
+            };
             sink = sink.wrapping_add(result[0].0 as u64);
         }
     }
@@ -118,6 +127,7 @@ fn run_round(
 }
 
 fn main() {
+    let weighted = std::env::args().any(|a| a == "--weighted");
     let (mut train, dim, n) = read_fvecs("data/sift/sift_base.fvecs");
     let (mut test, _, nq) = read_fvecs("data/sift/sift_query.fvecs");
     let (gt, gt_k, _) = read_ivecs("data/sift/sift_groundtruth.ivecs");
@@ -134,7 +144,7 @@ fn main() {
     const REPEATS: usize = 10; // 10K × 10 = 100K queries/轮 ≈ 7s
     const ROUNDS: usize = 5;
 
-    eprintln!("=== OPT Benchmark v2 (SQ8, ef={}, k={}) ===", ef, k);
+    eprintln!("=== OPT Benchmark v2 (SQ8 {}, ef={}, k={}) ===", if weighted { "WEIGHTED" } else { "RAW" }, ef, k);
     eprintln!("data: n={}, dim={}, nq={}, repeats={}, rounds={}", n, dim, nq, REPEATS, ROUNDS);
 
     // 建图（带缓存：首次建图后存盘，后续直接加载，消除 ~400s 建图热源）
@@ -172,12 +182,12 @@ fn main() {
 
     // warmup
     eprintln!("warmup...");
-    let _ = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8, REPEATS);
+    let _ = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8, REPEATS, weighted);
 
     // 5 rounds
     let mut rounds = Vec::with_capacity(ROUNDS);
     for i in 0..ROUNDS {
-        let r = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8, REPEATS);
+        let r = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8, REPEATS, weighted);
         eprintln!(
             "round {}: QPS={:.0} recall={:.4} ({:.1}s)",
             i + 1, r.qps, r.recall, r.elapsed_secs

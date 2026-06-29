@@ -90,7 +90,7 @@ fn run_sweep(
             (graph.entry_point(), None)
         };
 
-        let candidates = VamanaGraph::greedy_search_sq8(
+        let candidates = VamanaGraph::greedy_search_sq8::<false>(
             sq8,
             storage,
             entry_point,

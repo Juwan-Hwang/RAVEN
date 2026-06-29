@@ -649,7 +649,7 @@ impl VamanaGraph {
     /// - AVX2 u8 运算每次处理 16 维（vs f32 的 8 维）
     ///
     /// 搜索结束后对全部候选用 f32 重排序（rerank），恢复精确距离排序。
-    pub fn greedy_search_sq8(
+    pub fn greedy_search_sq8<const RAW: bool>(
         sq8: &SQ8Dataset,
         storage: &HybridBlockedCsr,
         entry_point: u32,
@@ -663,7 +663,11 @@ impl VamanaGraph {
         pool.reset_for(l);
 
         // 入口节点距离（SQ8）
-        let entry_dist = sq8.distance(query_code, entry_point as usize);
+        let entry_dist = if RAW {
+            sq8.distance_raw(query_code, entry_point as usize)
+        } else {
+            sq8.distance(query_code, entry_point as usize)
+        };
         visited.visit(entry_point);
         pool.insert(entry_point, entry_dist);
 
@@ -724,7 +728,11 @@ impl VamanaGraph {
                 }
                 let neighbor = edge_buf[i];
                 // 热路径：跳过 bounds check（neighbor 已通过 visited.visit 验证有效）
-                let d = unsafe { sq8.distance_unchecked(query_code, neighbor as usize) };
+                let d = if RAW {
+                    unsafe { sq8.distance_raw_unchecked(query_code, neighbor as usize) }
+                } else {
+                    unsafe { sq8.distance_unchecked(query_code, neighbor as usize) }
+                };
                 pool.insert(neighbor, d);
             }
         }
@@ -1493,7 +1501,7 @@ impl<'a> GraphSearcher<'a> {
     ///
     /// 返回 (节点ID, f32精确距离) 列表，按距离升序。
     /// 需先调用 with_sq8() 设置 SQ8Dataset。
-    pub fn search_sq8(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+    fn search_sq8_impl<const RAW: bool>(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
         let sq8 = self.sq8.expect("search_sq8 requires with_sq8() first");
         let dim = self.dim;
 
@@ -1527,7 +1535,7 @@ impl<'a> GraphSearcher<'a> {
         self.last_ef_used = ef;
 
         // 4. SQ8 图遍历
-        let candidates = VamanaGraph::greedy_search_sq8(
+        let candidates = VamanaGraph::greedy_search_sq8::<RAW>(
             sq8,
             self.graph.storage(),
             entry_point,
@@ -1557,6 +1565,29 @@ impl<'a> GraphSearcher<'a> {
         results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         results.truncate(k);
         results
+    }
+
+    /// SQ8 量化搜索（Phase 1 Step 0）
+    ///
+    /// 图遍历使用无加权 SQ8 距离（OPT-15：跳过 scale_sq），
+    /// 终态对 top-N 候选用 f32 精确距离重排序（rerank）。
+    ///
+    /// 无加权距离在 SIFT-1M 上实测 recall +0.44pp（0.9680 vs 0.9636），
+    /// QPS neutral-to-positive（scale_sq 加权扭曲了距离排序）。
+    ///
+    /// 返回 (节点ID, f32精确距离) 列表，按距离升序。
+    /// 需先调用 with_sq8() 设置 SQ8Dataset。
+    #[inline(always)]
+    pub fn search_sq8(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        self.search_sq8_impl::<true>(query, k)
+    }
+
+    /// SQ8 加权量化搜索（OPT-15 之前的原始路径，保留用于对比）
+    ///
+    /// 图遍历使用加权 SQ8 距离（d = Σ (qa[i] - qb[i])² × scale_sq[i]）。
+    #[inline(always)]
+    pub fn search_sq8_weighted(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        self.search_sq8_impl::<false>(query, k)
     }
 
     /// 4-bit PQ 量化搜索（Phase 1 Step 1）
@@ -1780,7 +1811,7 @@ impl<'a> GraphSearcher<'a> {
                             default_ef
                         };
 
-                        let cands = VamanaGraph::greedy_search_sq8(
+                        let cands = VamanaGraph::greedy_search_sq8::<true>(
                             sq8,
                             storage,
                             entry_point,

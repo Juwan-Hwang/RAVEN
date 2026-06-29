@@ -23,5 +23,5 @@ pub mod pq4;
 pub use pq::{PQCodebook, PQ, PQ8Dataset};
 pub use opq::OPQRotation;
 pub use avq::{AVQCodebook, AVQ, QuantizationMode, TrainingSignal};
-pub use sq8::{SQ8Params, SQ8Dataset, l2_sq8, l2_sq8_avx2, is_sq8_avx2_supported};
+pub use sq8::{SQ8Params, SQ8Dataset, l2_sq8, l2_sq8_avx2, l2_sq8_raw, l2_sq8_raw_avx2, is_sq8_avx2_supported};
 pub use pq4::{PQ4Codebook, PQ4Dataset};

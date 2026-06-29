@@ -213,6 +213,89 @@ unsafe fn horizontal_sum_128(v: __m128) -> f32 {
     _mm_cvtss_f32(sums2)
 }
 
+// ─── i32 水平求和（无加权距离核专用） ──────────────────────────────────
+
+/// __m256i 水平求和（8 个 i32 → 1 个 i32）
+#[inline(always)]
+unsafe fn horizontal_sum_i32_256(v: __m256i) -> i32 {
+    let hi128 = _mm256_extracti128_si256::<1>(v);
+    let lo128 = _mm256_castsi256_si128(v);
+    let sum128 = _mm_add_epi32(lo128, hi128); // [s0+s4, s1+s5, s2+s6, s3+s7]
+    horizontal_sum_i32_128(sum128)
+}
+
+/// __m128i 水平求和（4 个 i32 → 1 个 i32）
+///
+/// 两步 shuffle+add：
+///   [s0, s1, s2, s3] → shuffle 0x4E → [s2, s3, s0, s1]
+///   add → [s0+s2, s1+s3, ...] → shuffle 0x01 → [s1+s3, s0+s2, ...]
+///   add → [s0+s1+s2+s3, ...]
+#[inline(always)]
+unsafe fn horizontal_sum_i32_128(v: __m128i) -> i32 {
+    let shuf = _mm_shuffle_epi32::<0x4E>(v); // _MM_SHUFFLE(1,0,3,2): [s2, s3, s0, s1]
+    let sum1 = _mm_add_epi32(v, shuf);      // [s0+s2, s1+s3, ...]
+    let shuf2 = _mm_shuffle_epi32::<0x01>(sum1); // _MM_SHUFFLE(0,0,0,1): [s1+s3, ...]
+    let sum2 = _mm_add_epi32(sum1, shuf2);  // [s0+s1+s2+s3, ...]
+    _mm_cvtsi128_si32(sum2)
+}
+
+// ─── 无加权 L2 距离核（OPT-15） ───────────────────────────────────────
+
+/// SQ8 无加权 L2 距离（AVX2 256-bit）：跳过 scale_sq 加权
+///
+/// 计算 d_raw = Σ (qa[i] - qb[i])²
+///
+/// 与 `l2_sq8_avx2` 的区别：
+/// - i32 累加（跳过 cvtepi32_ps）
+/// - 无 scale_sq 加权（跳过 loadu_ps + fmadd_ps）
+/// - 每 32 维节省 6 条指令（2× cvtepi32_ps + 2× loadu_ps + 2× fmadd_ps → 2× add_epi32）
+/// - SIFT-128 共 4 chunks，净节省 24 条指令
+///
+/// 用途：图导航只需相对排序，最终 f32 rerank 保证精度
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+pub unsafe fn l2_sq8_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
+    let n = qa.len();
+    debug_assert_eq!(qb.len(), n);
+
+    let zero = _mm256_setzero_si256();
+    let mut acc = _mm256_setzero_si256(); // 8 个 i32 累加器
+
+    let chunks = n / 32;
+    for c in 0..chunks {
+        let base = c * 32;
+
+        let a = _mm256_loadu_si256(qa.as_ptr().add(base) as *const __m256i);
+        let b = _mm256_loadu_si256(qb.as_ptr().add(base) as *const __m256i);
+
+        let a_lo = _mm256_unpacklo_epi8(a, zero);
+        let a_hi = _mm256_unpackhi_epi8(a, zero);
+        let b_lo = _mm256_unpacklo_epi8(b, zero);
+        let b_hi = _mm256_unpackhi_epi8(b, zero);
+
+        let d_lo = _mm256_sub_epi16(a_lo, b_lo);
+        let d_hi = _mm256_sub_epi16(a_hi, b_hi);
+
+        let sq_lo = _mm256_madd_epi16(d_lo, d_lo);
+        let sq_hi = _mm256_madd_epi16(d_hi, d_hi);
+
+        // i32 累加（跳过 cvtepi32_ps + scale_sq load + fmadd）
+        acc = _mm256_add_epi32(acc, sq_lo);
+        acc = _mm256_add_epi32(acc, sq_hi);
+    }
+
+    let mut result = horizontal_sum_i32_256(acc) as f32;
+
+    // 尾部标量处理
+    let remainder_start = chunks * 32;
+    for i in remainder_start..n {
+        let diff = qa[i] as i32 - qb[i] as i32;
+        result += (diff * diff) as f32;
+    }
+
+    result
+}
+
 /// 统一分发：AVX2 → 标量
 ///
 /// 当 `target-cpu=native` 编译且 CPU 支持 AVX2+FMA 时，
@@ -247,6 +330,39 @@ fn l2_sq8_scalar(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
         sum += (diff * diff) as f32 * scale_sq[i];
     }
     sum
+}
+
+/// 无加权标量 fallback
+#[allow(dead_code)]
+#[inline(always)]
+fn l2_sq8_raw_scalar(qa: &[u8], qb: &[u8]) -> f32 {
+    let n = qa.len();
+    let mut sum = 0i32;
+    for i in 0..n {
+        let diff = qa[i] as i32 - qb[i] as i32;
+        sum += diff * diff;
+    }
+    sum as f32
+}
+
+/// 统一分发：AVX2 → 标量（无加权版本）
+///
+/// 与 `l2_sq8` 相同的编译期分发策略，但跳过 scale_sq 加权。
+/// 图导航专用：最终 f32 rerank 保证结果精度。
+#[inline(always)]
+pub fn l2_sq8_raw(qa: &[u8], qb: &[u8]) -> f32 {
+    #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+    {
+        unsafe { l2_sq8_raw_avx2(qa, qb) }
+    }
+    #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+    {
+        if is_sq8_avx2_supported() {
+            unsafe { l2_sq8_raw_avx2(qa, qb) }
+        } else {
+            l2_sq8_raw_scalar(qa, qb)
+        }
+    }
 }
 
 /// 检测 AVX2 支持
@@ -304,6 +420,23 @@ impl SQ8Dataset {
     #[inline(always)]
     pub unsafe fn distance_unchecked(&self, query_code: &[u8], idx: usize) -> f32 {
         l2_sq8(query_code, self.code_unchecked(idx), &self.params.scale_sq)
+    }
+
+    /// 计算无加权 SQ8 L2 距离（OPT-15：图导航专用）
+    ///
+    /// 跳过 scale_sq 加权，返回 Σ (qa[i] - qb[i])²。
+    /// 图导航只需相对排序，最终 f32 rerank 保证精度。
+    #[inline(always)]
+    pub fn distance_raw(&self, query_code: &[u8], idx: usize) -> f32 {
+        l2_sq8_raw(query_code, self.code(idx))
+    }
+
+    /// 计算无加权 SQ8 L2 距离（无边界检查，热路径专用）
+    ///
+    /// SAFETY: idx 必须 < self.n
+    #[inline(always)]
+    pub unsafe fn distance_raw_unchecked(&self, query_code: &[u8], idx: usize) -> f32 {
+        l2_sq8_raw(query_code, self.code_unchecked(idx))
     }
 }
 
