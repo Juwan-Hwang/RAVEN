@@ -59,21 +59,41 @@ pub use f16::{
 
 /// 统一 SIMD 分发：AVX-512 > AVX2 > 动态兜底
 ///
-/// 运行时检测 CPU 特性，优先使用最宽的 SIMD 核：
+/// 当 `target-cpu=native` 编译时，`#[cfg(target_feature)]` 在编译期确定 CPU 特性，
+/// 消除每次调用的 `is_x86_feature_detected!` 运行时开销（atomic load + branch）。
+/// 与 SQ8 距离核 (`l2_sq8`) 使用相同的编译期分发手法。
+///
 /// - AVX-512（16-wide）：理论峰值 16x 标量
 /// - AVX2（8-wide）：理论峰值 8x 标量
 /// - 动态兜底：chunks_exact(8)，依赖编译器自动向量化
 ///
 /// 设计文档 F.10：AVX-512 在部分 Intel 平台可能因降频不如 AVX2，
-/// 三阶段筛选（kernel.rs）负责在运行时决定是否降级。
-/// 此函数为热路径默认入口，若需精细控制可用 RAVEN_KERNEL 环境变量。
+/// 三阶段筛选（kernel.rs）负责在运行时决定是否降级（仅 DistanceKernel trait 路径）。
+/// 此函数为热路径默认入口，编译期已选定最优内核。
 #[inline(always)]
 pub fn l2_simd(a: &[f32], b: &[f32]) -> Distance {
-    if is_avx512_supported() {
+    // 编译期已知 AVX-512F：零运行时开销
+    #[cfg(target_feature = "avx512f")]
+    {
         unsafe { avx512::l2_avx512(a, b) }
-    } else if is_avx2_supported() {
+    }
+    // 编译期已知 AVX2+FMA（非 AVX-512 CPU）
+    #[cfg(all(target_feature = "avx2", target_feature = "fma", not(target_feature = "avx512f")))]
+    {
         unsafe { avx2::l2_avx2(a, b) }
-    } else {
-        dynamic::l2_dynamic(a, b)
+    }
+    // 运行时检测（非 native 编译或无 SIMD 的 CPU）
+    #[cfg(not(any(
+        target_feature = "avx512f",
+        all(target_feature = "avx2", target_feature = "fma")
+    )))]
+    {
+        if is_avx512_supported() {
+            unsafe { avx512::l2_avx512(a, b) }
+        } else if is_avx2_supported() {
+            unsafe { avx2::l2_avx2(a, b) }
+        } else {
+            dynamic::l2_dynamic(a, b)
+        }
     }
 }

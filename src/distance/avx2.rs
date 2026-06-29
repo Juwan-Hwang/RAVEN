@@ -146,13 +146,21 @@ pub fn is_avx2_supported() -> bool {
 
 /// 运行时分发的 L2 距离
 ///
-/// 若 CPU 支持 AVX2+FMA 则走 AVX2 路径，否则回退到动态兜底
+/// 当 `target-cpu=native` 编译时，编译期直接走 AVX2 路径，零运行时开销。
+/// 否则运行时检测 AVX2+FMA，回退到动态兜底。
 #[inline(always)]
 pub fn l2_dispatch(a: &[f32], b: &[f32]) -> Distance {
-    if is_avx2_supported() {
+    #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+    {
         unsafe { l2_avx2(a, b) }
-    } else {
-        super::dynamic::l2_dynamic(a, b)
+    }
+    #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+    {
+        if is_avx2_supported() {
+            unsafe { l2_avx2(a, b) }
+        } else {
+            super::dynamic::l2_dynamic(a, b)
+        }
     }
 }
 
