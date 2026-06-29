@@ -67,15 +67,25 @@ impl SQ8Params {
         Self { min, max, scale, offset, scale_sq, dim }
     }
 
-    /// 编码单个向量 → u8 codes
+    /// 编码单个向量 → u8 codes（堆分配版本，非热路径用）
     pub fn encode(&self, v: &[f32]) -> Vec<u8> {
         assert_eq!(v.len(), self.dim);
-        (0..self.dim)
-            .map(|d| {
-                let q = ((v[d] - self.offset[d]) / self.scale[d]).round();
-                q.clamp(0.0, 255.0) as u8
-            })
-            .collect()
+        let mut buf = vec![0u8; self.dim];
+        self.encode_into(v, &mut buf);
+        buf
+    }
+
+    /// 编码单个向量到预分配 buffer（零分配，热路径专用）
+    ///
+    /// `buf` 长度必须等于 `self.dim`
+    #[inline(always)]
+    pub fn encode_into(&self, v: &[f32], buf: &mut [u8]) {
+        assert_eq!(v.len(), self.dim);
+        assert_eq!(buf.len(), self.dim);
+        for d in 0..self.dim {
+            let q = ((v[d] - self.offset[d]) / self.scale[d]).round();
+            buf[d] = q.clamp(0.0, 255.0) as u8;
+        }
     }
 
     /// 编码整个数据集 → 扁平 u8 数组 (n × dim)

@@ -1311,6 +1311,8 @@ pub struct GraphSearcher<'a> {
     adaptive_ef: Option<AdaptiveEfConfig>,
     /// 预分配的 LinearPool，避免每次搜索堆分配
     pool: LinearPool,
+    /// 预分配的 SQ8 query code buffer，避免每次搜索堆分配
+    query_code_buf: Vec<u8>,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1335,6 +1337,7 @@ impl<'a> GraphSearcher<'a> {
             pq8: None,
             adaptive_ef: None,
             pool: LinearPool::new(ef_search),
+            query_code_buf: vec![0u8; dim],
         }
     }
 
@@ -1365,6 +1368,7 @@ impl<'a> GraphSearcher<'a> {
             pq8: None,
             adaptive_ef: None,
             pool: LinearPool::new(ef_search),
+            query_code_buf: vec![0u8; dim],
         }
     }
 
@@ -1490,8 +1494,8 @@ impl<'a> GraphSearcher<'a> {
         let sq8 = self.sq8.expect("search_sq8 requires with_sq8() first");
         let dim = self.dim;
 
-        // 1. 编码查询向量为 SQ8
-        let query_code = sq8.params.encode(query);
+        // 1. 编码查询向量为 SQ8（零分配，复用预分配 buffer）
+        sq8.params.encode_into(query, &mut self.query_code_buf);
 
         // 2. 选择 entry_point + 捕获 nav.initialize 的 f32 距离
         let (entry_point, nav_entry_dist) = if let Some(nav) = self.graph.layered_nav() {
@@ -1524,7 +1528,7 @@ impl<'a> GraphSearcher<'a> {
             sq8,
             self.graph.storage(),
             entry_point,
-            &query_code,
+            &self.query_code_buf,
             ef,
             &mut self.visited,
             &mut self.pool,
@@ -1729,8 +1733,8 @@ impl<'a> GraphSearcher<'a> {
                 // 设计文档 F.2：热路径零分配
                 thread_local! {
                     static TLS_SEARCH: std::cell::RefCell<
-                        (Option<VisitedTracker>, Option<LinearPool>)
-                    > = std::cell::RefCell::new((None, None));
+                        (Option<VisitedTracker>, Option<LinearPool>, Option<Vec<u8>>)
+                    > = std::cell::RefCell::new((None, None, None));
                 }
 
                 TLS_SEARCH.with(|cell| {
@@ -1741,14 +1745,16 @@ impl<'a> GraphSearcher<'a> {
                             .unwrap_or(default_ef);
                         borrow.0 = Some(VisitedTracker::new(n, cap));
                         borrow.1 = Some(LinearPool::new(cap));
+                        borrow.2 = Some(vec![0u8; dim]);
                     }
-                    let (visited_opt, pool_opt) = &mut *borrow;
+                    let (visited_opt, pool_opt, code_buf_opt) = &mut *borrow;
                     let visited = visited_opt.as_mut().unwrap();
                     let pool = pool_opt.as_mut().unwrap();
+                    let query_code_buf = code_buf_opt.as_mut().unwrap();
 
                     // 选择搜索路径：SQ8 > f32
                     if let Some(sq8) = sq8 {
-                        let query_code = sq8.params.encode(query);
+                        sq8.params.encode_into(query, query_code_buf);
 
                         let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
                             let (ep, dist) = nav.initialize(vectors, dim, query);
@@ -1775,7 +1781,7 @@ impl<'a> GraphSearcher<'a> {
                             sq8,
                             storage,
                             entry_point,
-                            &query_code,
+                            query_code_buf,
                             ef,
                             visited,
                             pool,
