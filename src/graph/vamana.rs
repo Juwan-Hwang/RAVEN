@@ -1533,9 +1533,12 @@ impl<'a> GraphSearcher<'a> {
 
         self.last_visited_count = self.visited.visited_count();
 
-        // 4. f32 rerank：用精确距离重排序全部候选
+        // 5. f32 部分 rerank：candidates 已按 SQ8 距离升序，
+        //    SQ8 排序与 f32 高度一致，只需对 top-N rerank 即可覆盖 top-k
+        let rerank_n = (k * 3).max(30).min(candidates.len());
         let mut results: Vec<(u32, f32)> = candidates
             .into_iter()
+            .take(rerank_n)
             .map(|(id, _sq8_dist)| {
                 let f32_dist = l2_simd(
                     query,
@@ -1779,9 +1782,11 @@ impl<'a> GraphSearcher<'a> {
                             po,
                         );
 
-                        // f32 rerank
+                        // f32 部分 rerank：candidates 已按 SQ8 距离升序，只需 top-N
+                        let rerank_n = (k * 3).max(30).min(cands.len());
                         let mut results: Vec<(u32, f32)> = cands
                             .into_iter()
+                            .take(rerank_n)
                             .map(|(id, _)| {
                                 let d = l2_simd(
                                     query,
