@@ -1,7 +1,7 @@
 # RAVEN 冲击 ann-benchmarks 世界第一：战略路线图
 
 > 创建时间：2026-06-25
-> 最后修订：2026-06-29（v8.5：PQ4 pshufb SIMD + M=64 实验完成，PQ4 方案彻底终止；转向 PQ8 u8 LUT 优化）
+> 最后修订：2026-06-29（v8.6：PQ8 u8 LUT + AVX2 gather 双双失败，PQ 方案全线封存；资源集中到 SQ8 极限优化）
 > 目标：在 ann-benchmarks SIFT1M (sift-128-euclidean) 上达到 recall-QPS Pareto 前沿第一梯队（详见 §〇.2 目标重定义）
 >
 > **v8 重大变更**：H20 实测证明 "Glass avg_visited < 150" 是虚假基线（三个 bug 叠加：read_fvecs 用 astype 而非 view、search() 不更新计数器、硬编码文献值）。
@@ -1028,7 +1028,27 @@ PGO 预期收益：QPS +5-10%。
    - **M=64 双重打击**：带宽翻倍到 32B/neighbor（与 SQ8 128B 差距缩小到 4x），recall 仍不够，QPS 反而比 SQ8 还慢。
    - **pshufb SIMD 失败**：批量 16 邻居方案的 transpose（256 次 stack 读写 + column gather）开销吃掉 pshufb 查表加速。只有 ef=200（计算密度高）才勉强持平标量。
 3. **代码处理**：PQ4 SIMD 代码已全部回退，保留 PQ4 标量版（M=32, f32 LUT）作为实验存档。`adaptive_ef` 模块导出修复保留。
-4. **转向 PQ8 u8 LUT 优化**：PQ8（K=256）是当前最优路线——recall 0.9571@ef=50 已过线，瓶颈是 f32 LUT 32KB 超出 L1。u8 LUT 8KB 可完全放入 L1d cache，预期 ef=50 QPS 从 11,632 提升到 ≥13,000（超过 SQ8 12,786）。
+4. **转向 PQ8 u8 LUT 优化**：~~PQ8（K=256）是当前最优路线~~ → 见 v8.6 更新，PQ8 优化也失败。
+
+**v8.6 更新**：
+1. **PQ8 u8 LUT + AVX2 gather 两条优化路径全部失败，PQ 方案全线封存**：
+
+| 优化尝试 | ef=50 QPS | vs PQ8 标量 | vs SQ8 | 失败原因 |
+|:--|--:|--:|--:|:--|
+| PQ8 f32 LUT 标量（基线） | 11,632 | 1.00x | 0.91x | 32 次随机 LUT 查表，硬件预取失效 |
+| PQ8 u8 LUT（8KB 入 L1） | 10,946 | 0.94x ↓6% | 0.86x | cache line 利用率更低（1.56% vs 6.25%），每次取 1 byte 带 64B cache line |
+| PQ8 AVX2 gather batch8 | 9,766 | 0.84x ↓16% | 0.73x | `_mm256_i32gather_ps` 是串行微码，延迟高于标量逐一加载 |
+
+2. **PQ 方案全线封存根因**：
+   - **随机查表 vs 顺序 SIMD 是本质差距**：SQ8 是 128 bytes 连续顺序 SIMD 读（`_mm256_subs_epu8` + `_mm256_maddubs_epi16`），PQ8 是 32 次随机 LUT 查表（地址由 code 决定，不可预测）。两种访问模式的内存友好程度不在同一层级。
+   - **LUT 大小不是瓶颈**：u8 LUT（8KB）进 L1 反而更慢，因为 cache line 利用率下降。
+   - **gather 不是银弹**：x86 gather 指令在当前微架构上是逐元素串行执行，32 次 gather × 5 cycles = 160 cycles，比 32 次标量 load（~128 cycles）还慢。
+   - **PQ8 ef=200 曾超过 SQ8 6%**（4599 vs 4346），但这是唯一优势点，低 ef 全面落后，不具备实战价值。
+3. **代码处理**：所有 PQ8 优化代码已回退，保留 PQ8 标量版（f32 LUT）作为实验存档。
+4. **资源集中到 SQ8 极限优化**：SQ8 是当前 recall-QPS Pareto 曲线最优方案（ef=50: recall 0.9653, QPS 12,786），下一步优化方向：
+   - SQ8 距离核 AVX2 SIMD 审计（当前实现是否已最优）
+   - `target-cpu=native` 效果验证
+   - `greedy_search` 热路径局部性（VisitedTracker / LinearPool）
 
 ---
 
