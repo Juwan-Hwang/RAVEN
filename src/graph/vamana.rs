@@ -670,15 +670,18 @@ impl VamanaGraph {
         let mut edge_buf: [u32; 128] = [0; 128];
 
         while let Some((node, _dist)) = pool.pop() {
-            // Multi-line graph prefetch（与 f32 路径相同，邻居列表大小不变）
+            // Multi-line graph prefetch：按 r_max 计算实际 cache line 数
+            // R_max=32 → 32×4B=128B=2 lines；R_max=64 → 256B=4 lines
             if let Some((next_node, _)) = pool.peek_unchecked() {
                 let start = next_node as usize * storage.r_max();
                 let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
+                let neighbor_bytes = storage.r_max() * 4; // u32 per neighbor
+                let graph_lines = (neighbor_bytes + 63) / 64; // ceil to cache lines
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<0>(ptr);
-                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
-                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(128));
-                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(192));
+                    for l in 1..graph_lines {
+                        std::arch::x86_64::_mm_prefetch::<0>(ptr.add(l * 64));
+                    }
                 }
             }
 
