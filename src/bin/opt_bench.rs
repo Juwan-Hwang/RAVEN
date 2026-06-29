@@ -1,13 +1,9 @@
-//! OPT 系列实验快速 benchmark
+//! OPT 系列实验 benchmark（v2 — 长测量窗口）
 //!
-//! 只测 SQ8 ef=50 (warmup + 3 rounds, 取中位数)
+//! 设计目标：每轮 ~7s（100K queries），5 轮取中位数，方差 < ±3%
+//! recall 分离计时：首轮算 recall，后续轮只测 QPS（用 sink 防优化消除）
+//!
 //! 用法：cargo run --release --bin opt_bench
-//!
-//! 输出格式：
-//!   round 1: QPS=xxxxx recall=0.xxxx
-//!   round 2: QPS=xxxxx recall=0.xxxx
-//!   round 3: QPS=xxxxx recall=0.xxxx
-//!   median: QPS=xxxxx recall=0.xxxx
 
 use std::fs::File;
 use std::io::Read;
@@ -56,11 +52,14 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
     (gt, dim, n)
 }
 
+/// 单轮 benchmark 结果
 struct RoundResult {
     qps: f64,
     recall: f64,
+    elapsed_secs: f64,
 }
 
+/// 跑一轮：先算 recall（不计入时间），再纯测 QPS
 fn run_round(
     train: &[f32],
     graph: &VamanaGraph,
@@ -72,30 +71,49 @@ fn run_round(
     k: usize,
     ef: usize,
     sq8: &SQ8Dataset,
+    repeats: usize,
 ) -> RoundResult {
     let mut searcher = GraphSearcher::new(train, graph, ef);
     searcher.with_sq8(sq8);
 
+    // ── Pass 0: recall（不计入 timing） ──
     let mut hits = 0usize;
     let mut total = 0usize;
-    let t0 = Instant::now();
     for q in 0..nq {
         let query = &test[q * dim..(q + 1) * dim];
         let result = searcher.search_sq8(query, k);
-        let found: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
         let gt_slice = &gt[q * gt_k..q * gt_k + k];
         for &g in gt_slice {
-            if found.contains(&(g as u32)) {
+            if result.iter().any(|(id, _)| *id == g as u32) {
                 hits += 1;
             }
         }
         total += k;
     }
+    let recall = hits as f64 / total as f64;
+
+    // ── Pass 1..N: 纯 QPS（sink 防优化消除） ──
+    let mut sink: u64 = 0;
+    let t0 = Instant::now();
+    for _ in 0..repeats {
+        for q in 0..nq {
+            let query = &test[q * dim..(q + 1) * dim];
+            let result = searcher.search_sq8(query, k);
+            sink = sink.wrapping_add(result[0].0 as u64);
+        }
+    }
     let dt = t0.elapsed();
 
+    // 防编译器消除
+    if sink == u64::MAX {
+        eprintln!("impossible");
+    }
+
+    let total_queries = nq * repeats;
     RoundResult {
-        qps: nq as f64 / dt.as_secs_f64(),
-        recall: hits as f64 / total as f64,
+        qps: total_queries as f64 / dt.as_secs_f64(),
+        recall,
+        elapsed_secs: dt.as_secs_f64(),
     }
 }
 
@@ -113,9 +131,11 @@ fn main() {
 
     let k = 10usize;
     let ef = 50usize;
+    const REPEATS: usize = 10; // 10K × 10 = 100K queries/轮 ≈ 7s
+    const ROUNDS: usize = 5;
 
-    eprintln!("=== OPT Benchmark (SQ8, ef={}, k={}) ===", ef, k);
-    eprintln!("data: n={}, dim={}, nq={}", n, dim, nq);
+    eprintln!("=== OPT Benchmark v2 (SQ8, ef={}, k={}) ===", ef, k);
+    eprintln!("data: n={}, dim={}, nq={}, repeats={}, rounds={}", n, dim, nq, REPEATS, ROUNDS);
 
     // 建图（带缓存：首次建图后存盘，后续直接加载，消除 ~400s 建图热源）
     let graph_path = std::path::Path::new("data/sift/graph_cache.bin");
@@ -152,21 +172,37 @@ fn main() {
 
     // warmup
     eprintln!("warmup...");
-    let _ = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8);
+    let _ = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8, REPEATS);
 
-    // 3 rounds
-    let mut rounds = Vec::with_capacity(3);
-    for i in 0..3 {
-        let r = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8);
-        eprintln!("round {}: QPS={:.0} recall={:.4}", i + 1, r.qps, r.recall);
+    // 5 rounds
+    let mut rounds = Vec::with_capacity(ROUNDS);
+    for i in 0..ROUNDS {
+        let r = run_round(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8, REPEATS);
+        eprintln!(
+            "round {}: QPS={:.0} recall={:.4} ({:.1}s)",
+            i + 1, r.qps, r.recall, r.elapsed_secs
+        );
         rounds.push(r);
     }
 
-    // median
-    let mut qps_sorted: Vec<f64> = rounds.iter().map(|r| r.qps).collect();
-    qps_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_qps = qps_sorted[1];
-    let median_recall = rounds[1].recall;
+    // 统计：median, mean, min, max, CV
+    let mut qps_vals: Vec<f64> = rounds.iter().map(|r| r.qps).collect();
+    qps_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = qps_vals[ROUNDS / 2];
+    let mean = qps_vals.iter().sum::<f64>() / ROUNDS as f64;
+    let min = qps_vals[0];
+    let max = qps_vals[ROUNDS - 1];
+    let variance = qps_vals.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / ROUNDS as f64;
+    let cv = variance.sqrt() / mean * 100.0; // 变异系数 %
+    let recall = rounds[0].recall;
 
-    println!("median: QPS={:.0} recall={:.4}", median_qps, median_recall);
+    eprintln!(
+        "stats: median={:.0} mean={:.0} min={:.0} max={:.0} CV={:.1}% recall={:.4}",
+        median, mean, min, max, cv, recall
+    );
+
+    println!(
+        "median: QPS={:.0} recall={:.4} CV={:.1}%",
+        median, recall, cv
+    );
 }
