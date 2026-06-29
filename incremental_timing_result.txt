@@ -1,0 +1,86 @@
+﻿=== Incremental Insertion Timing (siftsmall 10K) ===
+
+Data loaded: 0.1322086s (n=10000, dim=128)
+
+--- Incremental build (serial, single pass) ---
+.\target\release\incremental_timing.exe :   inserted 100/10000: avg_recent=0.01
+6ms avg_all=0.016ms
+所在位置 行:1 字符: 34
++ ... n\Desktop\RAVEN; .\target\release\incremental_timing.exe 2>&1 | Out-F ...
++                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  inserted 100/...avg_all=0.016ms 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  inserted 500/10000: avg_recent=0.039ms avg_all=0.033ms
+  inserted 1000/10000: avg_recent=0.047ms avg_all=0.040ms
+  inserted 2000/10000: avg_recent=0.058ms avg_all=0.046ms
+  inserted 5000/10000: avg_recent=0.075ms avg_all=0.059ms
+  inserted 10000/10000: avg_recent=0.085ms avg_all=0.070ms
+Build time: 0.77s
+Avg per insertion: 0.077ms
+
+=== Extrapolation to 1M ===
+Power law fit: t(N) = 0.0035 * N^0.33
+  Per-insertion at 1M nodes: 0.333ms (vs 0.073ms at 10K)
+
+Linear (constant per-insert):         77s
+Log scaling (O(log N) growth):       116s
+Power law (N^0.33 per-insert):         353s
+Glass HNSW reference (1M, 1-pass):     98s
+RAVEN batch (1M, 2-pass, 16 thr):    ~260s
+
+=== Search (ef=50, k=10, 10K subset, GT=1M 鈫?recall 鏃犳剰涔? ===
+QPS=43335, avg_visited=768.2
+
+--- Vamana batch build (for comparison) ---
+[build] rayon threads: 16
+[build] init_random_graph done, entry=medoid[3732]
+[build] iter 1/2 alpha=1
+[build] 500/10000 (5%)
+[build] 1000/10000 (10%)
+[build] 1500/10000 (15%)
+[build] 2000/10000 (20%)
+[build] 2500/10000 (25%)
+[build] 3000/10000 (30%)
+[build] 3500/10000 (35%)
+[build] 4000/10000 (40%)
+[build] 4500/10000 (45%)
+[build] 5000/10000 (50%)
+[build] 5500/10000 (55%)
+[build] 6000/10000 (60%)
+[build] 6500/10000 (65%)
+[build] 7000/10000 (70%)
+[build] 7500/10000 (75%)
+[build] 8000/10000 (80%)
+[build] 8500/10000 (85%)
+[build] 9000/10000 (90%)
+[build] 9500/10000 (95%)
+[build] iter 2/2 alpha=1.2
+[build] 500/10000 (5%)
+[build] 1000/10000 (10%)
+[build] 1500/10000 (15%)
+[build] 2000/10000 (20%)
+[build] 2500/10000 (25%)
+[build] 3000/10000 (30%)
+[build] 3500/10000 (35%)
+[build] 4000/10000 (40%)
+[build] 4500/10000 (45%)
+[build] 5000/10000 (50%)
+[build] 5500/10000 (55%)
+[build] 6000/10000 (60%)
+[build] 6500/10000 (65%)
+[build] 7000/10000 (70%)
+[build] 7500/10000 (75%)
+[build] 8000/10000 (80%)
+[build] 8500/10000 (85%)
+[build] 9000/10000 (90%)
+[build] 9500/10000 (95%)
+Batch build time: 0.75s (16 threads, 2-pass)
+Batch: QPS=37937, avg_visited=812.9
+
+=== Summary ===
+Method                              QPS  avg_visited    build_s
+----------------------------------------------------------------
+incremental (serial, 1-pass)      43335        768.2       0.77
+batch (16 thr, 2-pass)            37937        812.9       0.75

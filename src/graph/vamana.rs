@@ -24,6 +24,8 @@ use rayon::prelude::*;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tracing::info;
+
 /// Vamana 图构建配置
 #[derive(Debug, Clone)]
 pub struct VamanaBuildConfig {
@@ -108,13 +110,13 @@ impl VamanaGraph {
         assert_eq!(vectors.len(), n * dim);
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
 
-        eprintln!("[build] rayon threads: {}", rayon::current_num_threads());
+        info!("[build] rayon threads: {}", rayon::current_num_threads());
 
         // 1. 初始化图：随机连接（设计文档上层导航：保留随机层级）
         let _random_entry = Self::init_random_graph(&mut storage, n, config, rng);
         // Vamana/DiskANN 论文：entry_point 用 medoid（离质心最近的点），不是随机点
         let entry_point = Self::compute_medoid(vectors, dim, n);
-        eprintln!("[build] init_random_graph done, entry=medoid[{}]", entry_point);
+        info!("[build] init_random_graph done, entry=medoid[{}]", entry_point);
 
         // 2. 迭代优化：小批量并行 greedy_search + RobustPrune，批间顺序写入
         // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
@@ -131,7 +133,7 @@ impl VamanaGraph {
             let progress = AtomicUsize::new(0);
             let progress_interval = (n / 20).max(1);
             let alpha = if iter == 0 { 1.0 } else { config.alpha };
-            eprintln!("[build] iter {}/{} alpha={}", iter + 1, config.max_iterations, alpha);
+            info!("[build] iter {}/{} alpha={}", iter + 1, config.max_iterations, alpha);
 
             for chunk in order.chunks(BUILD_BATCH_SIZE) {
                 // 批内并行：在当前图状态上搜索 + 剪枝
@@ -145,7 +147,7 @@ impl VamanaGraph {
                         |visited, &node_id| {
                             let idx = progress.fetch_add(1, Ordering::Relaxed);
                             if idx > 0 && idx % progress_interval == 0 {
-                                eprintln!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
+                                info!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
                             }
                             let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
                             let _candidates = Self::greedy_search_vec_build(
@@ -180,12 +182,12 @@ impl VamanaGraph {
 
         // 构建分层导航（设计文档：保留随机层级，可与 HNSW 直接对比）
         let layered_nav = if config.enable_layered_nav && n > 0 {
-            eprintln!("[build] constructing layered navigation (M={})...", config.nav_m);
+            info!("[build] constructing layered navigation (M={})...", config.nav_m);
             let t0 = std::time::Instant::now();
             let nav = LayeredNavigation::build(
                 vectors, dim, &storage, entry_point, config.nav_m, config.r_max / 2,
             );
-            eprintln!("[build] layered nav done in {:.1}s (max_level={})",
+            info!("[build] layered nav done in {:.1}s (max_level={})",
                       t0.elapsed().as_secs_f64(), nav.max_level());
             Some(nav)
         } else {
@@ -223,12 +225,12 @@ impl VamanaGraph {
         assert_eq!(vectors.len(), n * dim);
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
 
-        eprintln!("[build_qa] rayon threads: {}", rayon::current_num_threads());
+        info!("[build_qa] rayon threads: {}", rayon::current_num_threads());
 
         let _random_entry = Self::init_random_graph(&mut storage, n, config, rng);
         // Vamana/DiskANN 论文：entry_point 用 medoid
         let entry_point = Self::compute_medoid(vectors, dim, n);
-        eprintln!("[build_qa] init_random_graph done, entry=medoid[{}]", entry_point);
+        info!("[build_qa] init_random_graph done, entry=medoid[{}]", entry_point);
 
         // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
         // v6.6: 小批量顺序处理（同 build 方法）
@@ -238,7 +240,7 @@ impl VamanaGraph {
             let alpha = if iter == 0 { 1.0 } else { config.alpha };
             let progress = AtomicUsize::new(0);
             let progress_interval = (n / 20).max(1);
-            eprintln!("[build_qa] iter {}/{} alpha={} beta={}", iter + 1, config.max_iterations, alpha, qa_config.beta);
+            info!("[build_qa] iter {}/{} alpha={} beta={}", iter + 1, config.max_iterations, alpha, qa_config.beta);
 
             for chunk in order.chunks(BUILD_BATCH_SIZE) {
                 let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
@@ -248,7 +250,7 @@ impl VamanaGraph {
                         |visited, &node_id| {
                             let idx = progress.fetch_add(1, Ordering::Relaxed);
                             if idx > 0 && idx % progress_interval == 0 {
-                                eprintln!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
+                                info!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
                             }
                             let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
                             let _candidates = Self::greedy_search_vec_build(
@@ -1760,6 +1762,49 @@ impl<'a> GraphSearcher<'a> {
         let navigation = self.navigation;
         let adaptive_ef = self.adaptive_ef.as_ref();
 
+        // 公共逻辑：选择 entry_point + 计算 ef（SQ8/f32 路径共享，OPT-6 去重）
+        let resolve_entry_and_ef = |query: &[f32]| -> (u32, usize) {
+            let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
+                let (ep, dist) = nav.initialize(vectors, dim, query);
+                (ep, Some(dist))
+            } else if let Some(nav) = navigation {
+                (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
+            } else {
+                (graph.entry_point(), None)
+            };
+
+            let ef = if let Some(ref adaptive) = adaptive_ef {
+                let entry_dist = nav_entry_dist.unwrap_or_else(|| {
+                    l2_simd(query,
+                        &vectors[entry_point as usize * dim
+                            ..(entry_point as usize + 1) * dim])
+                });
+                adaptive.estimate_ef(entry_dist).max(k)
+            } else {
+                default_ef
+            };
+            (entry_point, ef)
+        };
+
+        // 公共逻辑：f32 rerank + sort + truncate
+        let rerank_and_sort = |cands: Vec<(u32, f32)>, query: &[f32]| -> Vec<(u32, f32)> {
+            let rerank_n = (k * 3).max(30).min(cands.len());
+            let mut results: Vec<(u32, f32)> = cands
+                .into_iter()
+                .take(rerank_n)
+                .map(|(id, _)| {
+                    let d = l2_simd(
+                        query,
+                        &vectors[id as usize * dim..(id as usize + 1) * dim],
+                    );
+                    (id, d)
+                })
+                .collect();
+            results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+            results.truncate(k);
+            results
+        };
+
         queries
             .par_iter()
             .map(|query| {
@@ -1789,87 +1834,19 @@ impl<'a> GraphSearcher<'a> {
                     // 选择搜索路径：SQ8 > f32
                     if let Some(sq8) = sq8 {
                         sq8.params.encode_into(query, query_code_buf);
-
-                        let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
-                            let (ep, dist) = nav.initialize(vectors, dim, query);
-                            (ep, Some(dist))
-                        } else if let Some(nav) = navigation {
-                            (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
-                        } else {
-                            (graph.entry_point(), None)
-                        };
-
-                        // 自适应 ef（Phase 4.5）：用 nav.initialize 的 f32 距离
-                        let ef = if let Some(ref adaptive) = adaptive_ef {
-                            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
-                                l2_simd(query,
-                                    &vectors[entry_point as usize * dim
-                                        ..(entry_point as usize + 1) * dim])
-                            });
-                            adaptive.estimate_ef(entry_dist).max(k)
-                        } else {
-                            default_ef
-                        };
+                        let (entry_point, ef) = resolve_entry_and_ef(query);
 
                         let cands = VamanaGraph::greedy_search_sq8::<true>(
-                            sq8,
-                            storage,
-                            entry_point,
-                            query_code_buf,
-                            ef,
-                            visited,
-                            pool,
-                            po,
+                            sq8, storage, entry_point, query_code_buf,
+                            ef, visited, pool, po,
                         );
-
-                        // f32 部分 rerank：candidates 已按 SQ8 距离升序，只需 top-N
-                        let rerank_n = (k * 3).max(30).min(cands.len());
-                        let mut results: Vec<(u32, f32)> = cands
-                            .into_iter()
-                            .take(rerank_n)
-                            .map(|(id, _)| {
-                                let d = l2_simd(
-                                    query,
-                                    &vectors[id as usize * dim..(id as usize + 1) * dim],
-                                );
-                                (id, d)
-                            })
-                            .collect();
-                        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-                        results.truncate(k);
-                        results
+                        rerank_and_sort(cands, query)
                     } else {
-                        let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
-                            let (ep, dist) = nav.initialize(vectors, dim, query);
-                            (ep, Some(dist))
-                        } else if let Some(nav) = navigation {
-                            (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
-                        } else {
-                            (graph.entry_point(), None)
-                        };
-
-                        // 自适应 ef（Phase 4.5）：用 nav.initialize 的 f32 距离
-                        let ef = if let Some(ref adaptive) = adaptive_ef {
-                            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
-                                l2_simd(query,
-                                    &vectors[entry_point as usize * dim
-                                        ..(entry_point as usize + 1) * dim])
-                            });
-                            adaptive.estimate_ef(entry_dist).max(k)
-                        } else {
-                            default_ef
-                        };
+                        let (entry_point, ef) = resolve_entry_and_ef(query);
 
                         let mut cands = VamanaGraph::greedy_search_vec_reuse(
-                            vectors,
-                            dim,
-                            storage,
-                            entry_point,
-                            query,
-                            ef,
-                            visited,
-                            pool,
-                            po,
+                            vectors, dim, storage, entry_point, query,
+                            ef, visited, pool, po,
                         );
                         cands.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
                         cands.truncate(k);

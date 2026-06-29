@@ -1,0 +1,44 @@
+=== Adaptive ef Benchmark (Phase 4.5, Direction B + Power-law) ===
+
+数据: n=1000000, dim=128, nq=10000
+
+--- 建图 ---
+建图: 478.9s
+
+--- SQ8 编码 ---
+SQ8 编码: 0.7s
+
+--- 自适应 ef 配置 ---
+分层导航: max_level=4
+  [       gamma-2] min_ef= 35 max_ef= 75 gamma=2.0 | dist: min=0.0000 p25=0.7358 med=0.9699 p75=1.1804 max=2.1598
+  [       gamma-3] min_ef= 30 max_ef= 80 gamma=3.0 | dist: min=0.0000 p25=0.7358 med=0.9699 p75=1.1804 max=2.1598
+  [       gamma-4] min_ef= 25 max_ef= 80 gamma=4.0 | dist: min=0.0000 p25=0.7358 med=0.9699 p75=1.1804 max=2.1598
+  [gamma-3-narrow] min_ef= 38 max_ef= 65 gamma=3.0 | dist: min=0.0000 p25=0.7358 med=0.9699 p75=1.1804 max=2.1598
+
+--- 基线：固定 ef (SQ8) ---
+
+        ef    recall           QPS   avg_visited    avg_ef
+  ------------------------------------------------------------
+        50    0.9653         10853        1233.4      50.0
+       100    0.9905          5906        2199.9     100.0
+
+--- 实验：自适应 ef (SQ8 + Power-law) ---
+
+          config  min_ef  max_ef  gamma    recall           QPS    avg_ef        QPSΔ    visitedΔ
+  ----------------------------------------------------------------------------------------------------
+         gamma-2      35      75    2.0    0.9651         13586      48.1      +25.2%       -24.7
+         gamma-3      30      80    3.0    0.9548         13902      42.7      +28.1%      -138.2
+         gamma-4      25      80    4.0    0.9384         15290      36.6      +40.9%      -267.8
+  gamma-3-narrow      38      65    3.0    0.9603         13796      44.9      +27.1%       -97.8
+
+--- 终态门判定 (§〇.1) ---
+
+  基线: ef=50, recall=0.9653, QPS=10853
+  最佳配置: gamma-2 (QPS=13586, recall≥0.9603)
+
+  QPS 提升 ≥ 5%: PASS
+  Recall ≥ 基线 - 0.5pp: PASS
+  终态门: ✅ PASS (QPS 提升: +25.2%)
+
+  历史基线:
+    SQ8 ef=50 (固定):  recall=0.9653  QPS=11,997  avg_visited=1,233

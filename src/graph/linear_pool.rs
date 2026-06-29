@@ -238,24 +238,28 @@ impl LinearPool {
         result
     }
 
-    /// 二分查找插入位置
+    /// 线性查找插入位置（OPT-10：小数组优于二分查找）
     ///
-    /// 返回第一个 distance > dist 的位置（保持升序）
+    /// 从尾部向前扫描，返回第一个 distance > dist 的位置（保持升序）。
+    ///
+    /// 为什么线性扫描优于二分查找（ef ≤ 128）：
+    /// - 数组 ≤ 128 元素 = ≤ 1024B = ≤ 16 cache lines，全部在 L1
+    /// - 顺序访问 → CPU prefetcher 完美预测，每个元素 ~1 cycle
+    /// - 二分查找的 mid 跳转 → 不可预测分支，每次 ~5 cycles（mispredict penalty）
+    /// - 二分查找 6 次迭代 × 5 cycles = 30 cycles vs 线性平均 25 × 1 cycle = 25 cycles
+    /// - 从尾部扫描的优势：满池时大多数插入距离接近 worst（尾部），1-2 次比较即可定位
     #[inline]
     fn find_insert_pos(&self, dist: f32) -> usize {
-        let mut lo = 0usize;
-        let mut hi = self.size;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            // SAFETY: mid < size
-            let mid_dist = unsafe { self.data.get_unchecked(mid).1 };
-            if mid_dist > dist {
-                hi = mid;
-            } else {
-                lo = mid + 1;
+        let mut i = self.size as isize - 1;
+        while i >= 0 {
+            // SAFETY: i < size
+            let d = unsafe { self.data.get_unchecked(i as usize).1 };
+            if d <= dist {
+                return (i + 1) as usize;
             }
+            i -= 1;
         }
-        lo
+        0
     }
 }
 

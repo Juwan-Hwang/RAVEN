@@ -1,0 +1,32 @@
+=== RAVEN Flagship Benchmark (全优化叠加) ===
+
+数据: n=1000000, dim=128, nq=10000, k=10
+ef_search=50, threads=16
+
+--- 建图 ---
+建图: 423.3s
+
+--- SQ8 编码 ---
+SQ8 编码: 0.5s (128 MB)
+
+--- 自适应 ef 配置 ---
+自适应 ef: 0.0s (min_ef=35, max_ef=75, gamma=2.0)
+
+--- Layer 0: f32 baseline (layered nav + po=8) ---
+  recall=0.9705  QPS=9249  avg_visited=1227.4
+  → 基线 QPS = 9249
+
+--- Layer 1: + SQ8 量化 ---
+  recall=0.9653  QPS=13865  avg_visited=1233.4
+  → SQ8 QPS = 13865
+
+--- Layer 2: + SQ8 + 自适应 ef (gamma=2.0) ---
+  recall=0.9651  QPS=12334  avg_visited=1208.8  avg_ef=48.1
+  → SQ8+adaptive_ef QPS = 12334
+
+--- Layer 3: + SQ8 + 自适应 ef + 多线程 (16 threads) ---
+  recall=0.9651  QPS=102417
+  → 全栈 QPS = 102417 (16 threads)
+
+--- 累积提升汇总 ---
+  (见上方各层 QPS，最终全栈 QPS 即为上榜 QPS)
