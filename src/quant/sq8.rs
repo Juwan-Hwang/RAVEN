@@ -28,6 +28,10 @@ pub struct SQ8Params {
     pub offset: Vec<f32>,
     /// 每维度 scale² （L2 距离用）
     pub scale_sq: Vec<f32>,
+    /// 每维度逆尺度 inv_scale = 1/scale（编码用，FMA 友好）
+    pub inv_scale: Vec<f32>,
+    /// 每维度 -offset/scale（编码用，配合 inv_scale 实现 FMA）
+    pub neg_offset_div: Vec<f32>,
     /// 维度
     pub dim: usize,
 }
@@ -63,8 +67,11 @@ impl SQ8Params {
         let scale: Vec<f32> = (0..dim).map(|d| (max[d] - min[d]) / 255.0).collect();
         let offset = min.clone();
         let scale_sq: Vec<f32> = scale.iter().map(|s| s * s).collect();
+        // 预计算逆尺度：编码时用 FMA (v * inv_scale + neg_offset_div) 替代除法
+        let inv_scale: Vec<f32> = scale.iter().map(|s| 1.0 / s).collect();
+        let neg_offset_div: Vec<f32> = (0..dim).map(|d| -offset[d] * inv_scale[d]).collect();
 
-        Self { min, max, scale, offset, scale_sq, dim }
+        Self { min, max, scale, offset, scale_sq, inv_scale, neg_offset_div, dim }
     }
 
     /// 编码单个向量 → u8 codes（堆分配版本，非热路径用）
@@ -83,7 +90,8 @@ impl SQ8Params {
         assert_eq!(v.len(), self.dim);
         assert_eq!(buf.len(), self.dim);
         for d in 0..self.dim {
-            let q = ((v[d] - self.offset[d]) / self.scale[d]).round();
+            // FMA: v * inv_scale + neg_offset_div ≡ (v - offset) / scale
+            let q = (v[d] * self.inv_scale[d] + self.neg_offset_div[d]).round();
             buf[d] = q.clamp(0.0, 255.0) as u8;
         }
     }
@@ -95,7 +103,7 @@ impl SQ8Params {
         for i in 0..n {
             let row = &data[i * self.dim..(i + 1) * self.dim];
             for d in 0..self.dim {
-                let q = ((row[d] - self.offset[d]) / self.scale[d]).round();
+                let q = (row[d] * self.inv_scale[d] + self.neg_offset_div[d]).round();
                 codes[i * self.dim + d] = q.clamp(0.0, 255.0) as u8;
             }
         }
