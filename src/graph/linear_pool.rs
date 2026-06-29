@@ -77,6 +77,21 @@ impl LinearPool {
         self.cursor = 0;
     }
 
+    /// 为新的 ef 重置池（复用分配的内存，按需扩容）
+    ///
+    /// 适用于自适应 ef：每次查询的 ef 可能不同。
+    /// 若新 ef > 当前容量，自动扩容 data 数组。
+    #[inline]
+    pub fn reset_for(&mut self, ef: usize) {
+        if ef + 1 > self.data.len() {
+            self.data.resize(ef + 1, (0, 0.0));
+        }
+        self.capacity = ef;
+        self.ef = ef;
+        self.size = 0;
+        self.cursor = 0;
+    }
+
     /// 尝试插入候选
     ///
     /// 返回 true 表示成功插入，false 表示被拒绝（池满且距离 >= 最差）

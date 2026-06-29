@@ -50,6 +50,22 @@ impl VisitedTracker {
         true
     }
 
+    /// 标记节点为已访问（无边界检查，热路径专用）
+    ///
+    /// 返回 true 表示首次访问，false 表示已访问过
+    ///
+    /// SAFETY: idx 必须 < visited.len()
+    #[inline(always)]
+    pub unsafe fn visit_unchecked(&mut self, idx: u32) -> bool {
+        let i = idx as usize;
+        if *self.visited.get_unchecked(i) != 0 {
+            return false;
+        }
+        *self.visited.get_unchecked_mut(i) = 1;
+        self.history.push(idx);
+        true
+    }
+
     /// 检查节点是否已访问（不标记）
     #[inline(always)]
     pub fn is_visited(&self, idx: u32) -> bool {

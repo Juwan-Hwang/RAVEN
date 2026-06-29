@@ -562,11 +562,11 @@ impl VamanaGraph {
         query: &[f32],
         l: usize,
         visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
         po: usize,
     ) -> Vec<(u32, f32)> {
         visited.reset();
-
-        let mut pool = LinearPool::new(l);
+        pool.reset_for(l);
 
         // 插入入口节点
         let entry_dist = l2_simd(
@@ -605,7 +605,8 @@ impl VamanaGraph {
                 if edge_size >= 128 {
                     break;
                 }
-                if visited.visit(v) {
+                // SAFETY: v 来自图边，保证 < n
+                if unsafe { visited.visit_unchecked(v) } {
                     edge_buf[edge_size] = v;
                     edge_size += 1;
                 }
@@ -655,11 +656,11 @@ impl VamanaGraph {
         query_code: &[u8],
         l: usize,
         visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
         po: usize,
     ) -> Vec<(u32, f32)> {
         visited.reset();
-
-        let mut pool = LinearPool::new(l);
+        pool.reset_for(l);
 
         // 入口节点距离（SQ8）
         let entry_dist = sq8.distance(query_code, entry_point as usize);
@@ -667,11 +668,6 @@ impl VamanaGraph {
         pool.insert(entry_point, entry_dist);
 
         let mut edge_buf: [u32; 128] = [0; 128];
-
-        // SQ8 码大小 = dim bytes。SIFT-128 → 128B = 2 cache lines
-        // 预取必须覆盖完整码，否则距离计算时第二个 cache line miss
-        let dim = sq8.dim;
-        let code_lines = (dim + 63) / 64; // cache lines per code
 
         while let Some((node, _dist)) = pool.pop() {
             // Multi-line graph prefetch（与 f32 路径相同，邻居列表大小不变）
@@ -694,23 +690,22 @@ impl VamanaGraph {
                 if edge_size >= 128 {
                     break;
                 }
-                if visited.visit(v) {
+                // SAFETY: v 来自图边，保证 < n
+                if unsafe { visited.visit_unchecked(v) } {
                     edge_buf[edge_size] = v;
                     edge_size += 1;
                 }
             }
 
-            // 预取前 po 个邻居的 SQ8 码（完整覆盖所有 cache lines）
+            // 预取前 po 个邻居的 SQ8 码
+            // SIFT-128: 128B = 2 cache lines，始终预取两行（分支消除）
             let prefetch_count = po.min(edge_size);
             for i in 0..prefetch_count {
                 let v = edge_buf[i] as usize;
                 let ptr = sq8.code(v).as_ptr() as *const i8;
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<0>(ptr);
-                    // SIFT-128: 128B = 2 cache lines，必须预取第二行
-                    if code_lines > 1 {
-                        std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
-                    }
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
                 }
             }
 
@@ -721,9 +716,7 @@ impl VamanaGraph {
                     let ptr = sq8.code(v).as_ptr() as *const i8;
                     unsafe {
                         std::arch::x86_64::_mm_prefetch::<0>(ptr);
-                        if code_lines > 1 {
-                            std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
-                        }
+                        std::arch::x86_64::_mm_prefetch::<0>(ptr.add(64));
                     }
                 }
                 let neighbor = edge_buf[i];
@@ -749,6 +742,7 @@ impl VamanaGraph {
         lut: &[f32],
         ef_search: usize,
         visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
         po: usize,
     ) -> Vec<(u32, f32)> {
         if ef_search == 0 {
@@ -756,9 +750,7 @@ impl VamanaGraph {
         }
 
         visited.reset();
-
-        let l = ef_search;
-        let mut pool = LinearPool::new(l);
+        pool.reset_for(ef_search);
         let m = pq4.codebook.m;
 
         // entry_point 距离
@@ -833,6 +825,7 @@ impl VamanaGraph {
         lut: &[f32],
         ef_search: usize,
         visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
         po: usize,
     ) -> Vec<(u32, f32)> {
         if ef_search == 0 {
@@ -840,9 +833,7 @@ impl VamanaGraph {
         }
 
         visited.reset();
-
-        let l = ef_search;
-        let mut pool = LinearPool::new(l);
+        pool.reset_for(ef_search);
         let m = pq8.codebook.m;
         let k = pq8.codebook.k;
 
@@ -1318,6 +1309,8 @@ pub struct GraphSearcher<'a> {
     /// 可选的自适应 ef 配置（Phase 4.5）
     /// 启用后 search()/search_sq8()/batch_search() 根据查询难度动态分配 ef
     adaptive_ef: Option<AdaptiveEfConfig>,
+    /// 预分配的 LinearPool，避免每次搜索堆分配
+    pool: LinearPool,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1341,6 +1334,7 @@ impl<'a> GraphSearcher<'a> {
             pq4: None,
             pq8: None,
             adaptive_ef: None,
+            pool: LinearPool::new(ef_search),
         }
     }
 
@@ -1370,6 +1364,7 @@ impl<'a> GraphSearcher<'a> {
             pq4: None,
             pq8: None,
             adaptive_ef: None,
+            pool: LinearPool::new(ef_search),
         }
     }
 
@@ -1470,6 +1465,7 @@ impl<'a> GraphSearcher<'a> {
             query,
             ef,
             &mut self.visited,
+            &mut self.pool,
             self.prefetch_offset,
         );
 
@@ -1531,6 +1527,7 @@ impl<'a> GraphSearcher<'a> {
             &query_code,
             ef,
             &mut self.visited,
+            &mut self.pool,
             self.prefetch_offset,
         );
 
@@ -1583,6 +1580,7 @@ impl<'a> GraphSearcher<'a> {
             &lut,
             self.ef_search,
             &mut self.visited,
+            &mut self.pool,
             self.prefetch_offset,
         );
 
@@ -1635,6 +1633,7 @@ impl<'a> GraphSearcher<'a> {
             &lut,
             self.ef_search,
             &mut self.visited,
+            &mut self.pool,
             self.prefetch_offset,
         );
 
@@ -1726,19 +1725,23 @@ impl<'a> GraphSearcher<'a> {
                 // 线程本地 VisitedTracker：每 worker 分配一次后复用
                 // 设计文档 F.2：热路径零分配
                 thread_local! {
-                    static TLS_VISITED: std::cell::RefCell<Option<VisitedTracker>> =
-                        std::cell::RefCell::new(None);
+                    static TLS_SEARCH: std::cell::RefCell<
+                        (Option<VisitedTracker>, Option<LinearPool>)
+                    > = std::cell::RefCell::new((None, None));
                 }
 
-                TLS_VISITED.with(|cell| {
+                TLS_SEARCH.with(|cell| {
                     let mut borrow = cell.borrow_mut();
-                    if borrow.is_none() {
+                    if borrow.0.is_none() {
                         let cap = adaptive_ef
                             .map(|c| c.max_ef())
                             .unwrap_or(default_ef);
-                        *borrow = Some(VisitedTracker::new(n, cap));
+                        borrow.0 = Some(VisitedTracker::new(n, cap));
+                        borrow.1 = Some(LinearPool::new(cap));
                     }
-                    let visited = borrow.as_mut().unwrap();
+                    let (visited_opt, pool_opt) = &mut *borrow;
+                    let visited = visited_opt.as_mut().unwrap();
+                    let pool = pool_opt.as_mut().unwrap();
 
                     // 选择搜索路径：SQ8 > f32
                     if let Some(sq8) = sq8 {
@@ -1772,6 +1775,7 @@ impl<'a> GraphSearcher<'a> {
                             &query_code,
                             ef,
                             visited,
+                            pool,
                             po,
                         );
 
@@ -1821,6 +1825,7 @@ impl<'a> GraphSearcher<'a> {
                             query,
                             ef,
                             visited,
+                            pool,
                             po,
                         );
                         cands.sort_by(|a, b| {
