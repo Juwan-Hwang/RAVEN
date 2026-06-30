@@ -39,7 +39,12 @@ fn main() {
 
     // ── 构建时间戳 ──
     let build_ts = Command::new("git")
-        .args(["log", "-1", "--format=%cd", "--date=format:%Y-%m-%d_%H:%M:%S"])
+        .args([
+            "log",
+            "-1",
+            "--format=%cd",
+            "--date=format:%Y-%m-%d_%H:%M:%S",
+        ])
         .output()
         .ok()
         .and_then(|o| {

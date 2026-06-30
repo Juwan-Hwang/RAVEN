@@ -9,10 +9,14 @@ class Raven(BaseANN):
 
     Vamana/DiskANN-style graph index with DirectionalPrune + quantization.
 
-    两种量化模式：
-      - sq8 (default): 8-bit/dim, 128B/vector (SIFT-128), rerank_factor=3
-      - sq4:           4-bit/dim,  64B/vector (SIFT-128), rerank_factor=8
-                       内存减半 + 带宽减半 → +11% QPS, recall 损失随 ef 收敛
+    模式：
+      - sq4 (默认):  4-bit/dim,  64B/vector (SIFT-128), rerank_factor=8
+      - sq8:          8-bit/dim, 128B/vector (SIFT-128), rerank_factor=3
+
+    AdaptiveEf:
+      启用后，搜索时根据 query→entry-point 距离分布动态预测 ef，
+      在固定 ef 曲线的 recall 间隙生成 Pareto 最优点。
+      query_args 格式变为 [gamma, min_ef, max_ef]。
     """
 
     def __init__(self, metric, dim, method_param):
@@ -26,10 +30,18 @@ class Raven(BaseANN):
         self.quantization = method_param.get("quantization", "sq8")
         self.rerank_factor = method_param.get("rerank_factor", 3)
         self.threads = method_param.get("threads", 0)  # 0 = single-thread
-        self.name = "raven_(R=%d, L=%d, alpha=%.1f, nav_m=%d, %s, rr=%d)" % (
-            self.R, self.L, self.alpha, self.nav_m,
-            self.quantization, self.rerank_factor,
-        )
+        self.adaptive_ef = method_param.get("adaptive_ef", False)
+
+        if self.adaptive_ef:
+            self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, adaptive)" % (
+                self.R, self.L, self.nav_m,
+                self.quantization, self.rerank_factor,
+            )
+        else:
+            self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d)" % (
+                self.R, self.L, self.nav_m,
+                self.quantization, self.rerank_factor,
+            )
 
     def fit(self, X):
         # ann-benchmarks passes float32 numpy arrays
@@ -46,16 +58,27 @@ class Raven(BaseANN):
             quantization=self.quantization,
             rerank_factor=self.rerank_factor,
             threads=self.threads,
+            adaptive_ef=self.adaptive_ef,
         )
         self.index.build(X)
         self.searcher = self.index.searcher()
 
-    def set_query_arguments(self, ef):
-        self.searcher.set_ef(ef)
-        self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, ef=%d)" % (
-            self.R, self.L, self.nav_m,
-            self.quantization, self.rerank_factor, ef,
-        )
+    def set_query_arguments(self, *args):
+        if self.adaptive_ef:
+            gamma, min_ef, max_ef = args
+            self.searcher.set_adaptive_ef(gamma, min_ef, max_ef)
+            self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, γ=%.1f(%d,%d))" % (
+                self.R, self.L, self.nav_m,
+                self.quantization, self.rerank_factor,
+                gamma, min_ef, max_ef,
+            )
+        else:
+            ef = args[0]
+            self.searcher.set_ef(ef)
+            self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, ef=%d)" % (
+                self.R, self.L, self.nav_m,
+                self.quantization, self.rerank_factor, ef,
+            )
 
     def query(self, v, n):
         if self.metric == "angular":

@@ -20,6 +20,8 @@ avx512 = []
 big_ann = []
 # Python 绑定（PyO3，ann-benchmarks 集成用）
 python = ["dep:pyo3", "dep:numpy"]
+# Fast approx powf：用快速多项式近似替代 powf（AdaptiveEf 热路径优化）
+fast_powf = []
 
 [dependencies]
 # 构建可复现性：ChaCha8 速度快、质量足够、跨平台结果一致（设计文档第四层 F.7）

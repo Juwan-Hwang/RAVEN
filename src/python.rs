@@ -4,13 +4,15 @@
 //! 编译：maturin develop --release --features python
 //!       cargo build --release --features python
 
-use pyo3::prelude::*;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
+use pyo3::prelude::*;
 
 use crate::build::ChaCha8Rng;
-use crate::graph::{VamanaBuildConfig, VamanaGraph, GraphSearcher, PruneStrategy};
-use crate::quant::{SQ8Dataset, SQ4Dataset};
+use crate::graph::{
+    AdaptiveEfConfig, GraphSearcher, PruneStrategy, VamanaBuildConfig, VamanaGraph,
+};
 use crate::memory::serialize::Serializable;
+use crate::quant::{SQ4Dataset, SQ8Dataset};
 
 /// 量化方式
 #[derive(Clone, Copy, PartialEq)]
@@ -37,6 +39,7 @@ struct PyIndex {
     quant: Quant,
     rerank: usize,
     threads: usize,
+    adaptive_ef: bool,
 }
 
 #[pymethods]
@@ -48,7 +51,7 @@ impl PyIndex {
     ///   quantization="sq8" (default) 或 "sq4"
     ///   rerank_factor=3 (SQ8) 或 8 (SQ4)
     #[new]
-    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=3, threads=0))]
+    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=3, threads=0, adaptive_ef=false))]
     fn new(
         metric: &str,
         dim: usize,
@@ -60,14 +63,18 @@ impl PyIndex {
         quantization: &str,
         rerank_factor: usize,
         threads: usize,
+        adaptive_ef: bool,
     ) -> PyResult<Self> {
         let _ = metric; // L2 only
         let quant = match quantization.to_lowercase().as_str() {
             "sq8" => Quant::Sq8,
             "sq4" => Quant::Sq4,
-            other => return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("unknown quantization '{}', expected 'sq8' or 'sq4'", other)
-            )),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown quantization '{}', expected 'sq8' or 'sq4'",
+                    other
+                )))
+            }
         };
         Ok(PyIndex {
             graph: None,
@@ -81,6 +88,7 @@ impl PyIndex {
             quant,
             rerank: rerank_factor,
             threads,
+            adaptive_ef,
         })
     }
 
@@ -90,9 +98,10 @@ impl PyIndex {
         let array = x.as_array();
         let (n, d) = (array.shape()[0], array.shape()[1]);
         if d != self.dim {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("dim mismatch: expected {}, got {}", self.dim, d)
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dim mismatch: expected {}, got {}",
+                self.dim, d
+            )));
         }
 
         self.vectors = array.as_standard_layout().to_owned().into_raw_vec();
@@ -139,6 +148,20 @@ impl PyIndex {
             }
         };
 
+        // 若启用 AdaptiveEf，从 layered nav 采样距离分布构建配置
+        let adaptive_config = if self.adaptive_ef {
+            let nav = graph.layered_nav().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "AdaptiveEf requires layered nav (enable_layered_nav=true)",
+                )
+            })?;
+            Some(AdaptiveEfConfig::build_with_layered_nav(
+                &vectors, self.dim, nav, 30, 100, 2.0,
+            ))
+        } else {
+            None
+        };
+
         Ok(PySearcher {
             vectors,
             dim: self.dim,
@@ -149,15 +172,21 @@ impl PyIndex {
             po: 8,
             rerank: self.rerank,
             threads: self.threads,
+            adaptive_config,
+            cur_gamma: 2.0,
+            cur_min_ef: 30,
+            cur_max_ef: 100,
         })
     }
 
     /// 保存索引到文件
     fn save(&self, path: &str) -> PyResult<()> {
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Index not built yet")
-        })?;
-        graph.save(std::path::Path::new(path))
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Index not built yet"))?;
+        graph
+            .save(std::path::Path::new(path))
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         Ok(())
     }
@@ -179,6 +208,7 @@ impl PyIndex {
             quant: Quant::Sq8,
             rerank: 3,
             threads: 0,
+            adaptive_ef: false,
         })
     }
 }
@@ -187,6 +217,7 @@ impl PyIndex {
 ///
 /// 拥有 graph + vectors + 量化数据集的完整所有权。
 /// 根据 quantization 类型选择 search_sq8 或 search_sq4 路径。
+/// 若 adaptive_config 非空，搜索时动态预测 ef（覆盖 set_ef 的值）。
 #[pyclass(name = "Searcher")]
 struct PySearcher {
     vectors: Vec<f32>,
@@ -198,13 +229,28 @@ struct PySearcher {
     po: usize,
     rerank: usize,
     threads: usize,
+    adaptive_config: Option<AdaptiveEfConfig>,
+    cur_gamma: f32,
+    cur_min_ef: usize,
+    cur_max_ef: usize,
 }
 
 #[pymethods]
 impl PySearcher {
-    /// 设置 ef_search
+    /// 设置 ef_search（固定 ef 模式）
     fn set_ef(&mut self, ef: usize) {
         self.ef = ef;
+    }
+
+    /// 设置 AdaptiveEf 参数（gamma, min_ef, max_ef）
+    ///
+    /// ef_search 会被设为 max_ef 以确保 VisitedTracker 容量充足，
+    /// 实际 ef 由 estimate_ef 根据 query→entry-point 距离动态决定。
+    fn set_adaptive_ef(&mut self, gamma: f32, min_ef: usize, max_ef: usize) {
+        self.cur_gamma = gamma;
+        self.cur_min_ef = min_ef;
+        self.cur_max_ef = max_ef;
+        self.ef = max_ef; // VisitedTracker 容量上限
     }
 
     /// 设置 prefetch offset
@@ -222,6 +268,12 @@ impl PySearcher {
         let mut searcher = GraphSearcher::new(&self.vectors, &self.graph, self.ef);
         searcher.with_prefetch_offset(self.po);
         searcher.with_rerank_factor(self.rerank);
+
+        // 若启用 AdaptiveEf，注入动态配置
+        if let Some(ref base) = self.adaptive_config {
+            let cfg = base.with_params(self.cur_min_ef, self.cur_max_ef, self.cur_gamma);
+            searcher.with_adaptive_ef(cfg);
+        }
 
         let results = if let Some(ref sq8) = self.sq8 {
             searcher.with_sq8(sq8);
@@ -241,13 +293,19 @@ impl PySearcher {
     /// queries: numpy array (nq, dim) float32
     /// k: 返回的近邻数
     /// 返回: numpy array (nq, k) int
-    fn batch_search(&self, queries: PyReadonlyArray2<f32>, k: usize, py: Python) -> PyResult<PyObject> {
+    fn batch_search(
+        &self,
+        queries: PyReadonlyArray2<f32>,
+        k: usize,
+        py: Python,
+    ) -> PyResult<PyObject> {
         let array = queries.as_array();
         let (nq, d) = (array.shape()[0], array.shape()[1]);
         if d != self.dim {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("dim mismatch: expected {}, got {}", self.dim, d)
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dim mismatch: expected {}, got {}",
+                self.dim, d
+            )));
         }
 
         let flat: Vec<f32> = array.as_standard_layout().to_owned().into_raw_vec();
@@ -260,6 +318,11 @@ impl PySearcher {
             searcher.with_sq8(sq8);
         } else if let Some(ref sq4) = self.sq4 {
             searcher.with_sq4(sq4);
+        }
+        // AdaptiveEf 在 batch_search 中同样生效
+        if let Some(ref base) = self.adaptive_config {
+            let cfg = base.with_params(self.cur_min_ef, self.cur_max_ef, self.cur_gamma);
+            searcher.with_adaptive_ef(cfg);
         }
         let results = if self.threads > 0 {
             let pool = rayon::ThreadPoolBuilder::new()

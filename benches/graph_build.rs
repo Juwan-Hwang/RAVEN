@@ -3,8 +3,8 @@
 //! 设计文档第六层：
 //! 建图速度与吞吐基准
 
-use raven::graph::{VamanaGraph, VamanaBuildConfig};
 use raven::build::ChaCha8Rng;
+use raven::graph::{VamanaBuildConfig, VamanaGraph};
 
 fn main() {
     divan::main();

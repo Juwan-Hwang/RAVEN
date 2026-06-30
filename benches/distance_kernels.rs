@@ -11,7 +11,7 @@
 //! - GEMM 阈值
 //! - AVX-512 的端到端 QPS（含持续稳定性）
 
-use raven::distance::{l2_dynamic, l2_scalar, l2_avx2, is_avx2_supported};
+use raven::distance::{is_avx2_supported, l2_avx2, l2_dynamic, l2_scalar};
 
 fn main() {
     // 设计文档：divan 日常迭代基准
@@ -30,18 +30,14 @@ mod l2_benches {
     fn l2_dynamic_bench(bencher: divan::Bencher, dim: usize) {
         let a = make_vectors(1, dim);
         let b = make_vectors(1, dim);
-        bencher.bench_local(move || {
-            divan::black_box(l2_dynamic(&a, &b))
-        });
+        bencher.bench_local(move || divan::black_box(l2_dynamic(&a, &b)));
     }
 
     #[divan::bench(args = [64, 128, 256, 768, 960, 1536])]
     fn l2_scalar_bench(bencher: divan::Bencher, dim: usize) {
         let a = make_vectors(1, dim);
         let b = make_vectors(1, dim);
-        bencher.bench_local(move || {
-            divan::black_box(l2_scalar(&a, &b))
-        });
+        bencher.bench_local(move || divan::black_box(l2_scalar(&a, &b)));
     }
 
     #[divan::bench(args = [64, 128, 256, 768, 960, 1536])]

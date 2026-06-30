@@ -37,7 +37,9 @@ fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
         let offset = i * record_bytes + 4;
         for d in 0..dim {
             vectors.push(f32::from_le_bytes(
-                bytes[offset + d * 4..offset + d * 4 + 4].try_into().unwrap(),
+                bytes[offset + d * 4..offset + d * 4 + 4]
+                    .try_into()
+                    .unwrap(),
             ));
         }
     }
@@ -56,7 +58,9 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
         let offset = i * record_bytes + 4;
         for d in 0..dim {
             gt.push(i32::from_le_bytes(
-                bytes[offset + d * 4..offset + d * 4 + 4].try_into().unwrap(),
+                bytes[offset + d * 4..offset + d * 4 + 4]
+                    .try_into()
+                    .unwrap(),
             ));
         }
     }
@@ -267,13 +271,16 @@ fn main() {
 
     // 构建基础自适应配置（获取距离分布）
     let layered_nav = graph.layered_nav().expect("layered nav required");
-    let base_config = AdaptiveEfConfig::build_with_layered_nav(
-        &train, dim, layered_nav, 35, 75, 2.0,
-    );
+    let base_config =
+        AdaptiveEfConfig::build_with_layered_nav(&train, dim, layered_nav, 35, 75, 2.0);
     let (pmin, p25, median, p75, pmax) = base_config.distribution_stats();
     println_both!(
         "距离分布: min={:.4} p25={:.4} med={:.4} p75={:.4} max={:.4}",
-        pmin, p25, median, p75, pmax
+        pmin,
+        p25,
+        median,
+        p75,
+        pmax
     );
 
     // ════════════════════════════════════════
@@ -282,7 +289,11 @@ fn main() {
     println_both!("\n--- 固定 ef 基线 ---\n");
     println_both!(
         "  {:>6}  {:>8}  {:>10}  {:>10}  {:>8}",
-        "ef", "recall", "QPS", "avg_visit", "avg_ef"
+        "ef",
+        "recall",
+        "QPS",
+        "avg_visit",
+        "avg_ef"
     );
     println_both!("  {}", "-".repeat(52));
 
@@ -290,12 +301,15 @@ fn main() {
     let mut fixed_entries: Vec<SweepEntry> = Vec::new();
 
     for &ef in &ef_list {
-        let r = bench_stable(|| {
-            run_once_fixed(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8)
-        });
+        let r =
+            bench_stable(|| run_once_fixed(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, &sq8));
         println_both!(
             "  {:>6}  {:>8.4}  {:>10.0}  {:>10.1}  {:>8.1}",
-            ef, r.recall, r.qps, r.avg_visited, r.avg_ef
+            ef,
+            r.recall,
+            r.qps,
+            r.avg_visited,
+            r.avg_ef
         );
         fixed_entries.push(SweepEntry {
             label: format!("ef={}", ef),
@@ -320,7 +334,8 @@ fn main() {
         .unwrap_or(0.0);
     println_both!(
         "\n  基线: ef=50, recall={:.4}, QPS={:.0}",
-        baseline_recall, baseline_qps
+        baseline_recall,
+        baseline_qps
     );
 
     // ════════════════════════════════════════
@@ -331,10 +346,7 @@ fn main() {
     let max_efs: [usize; 4] = [65, 70, 75, 80];
 
     let total = gammas.len() * min_efs.len() * max_efs.len();
-    println_both!(
-        "\n--- 自适应 ef 网格扫描 ({} 组) ---\n",
-        total
-    );
+    println_both!("\n--- 自适应 ef 网格扫描 ({} 组) ---\n", total);
 
     let mut adaptive_entries: Vec<SweepEntry> = Vec::with_capacity(total);
     let mut idx = 0usize;
@@ -408,12 +420,22 @@ fn main() {
     mark_pareto(&mut all_entries);
 
     // 按 QPS 降序输出全部结果
-    all_entries.sort_by(|a, b| b.qps.partial_cmp(&a.qps).unwrap_or(std::cmp::Ordering::Equal));
+    all_entries.sort_by(|a, b| {
+        b.qps
+            .partial_cmp(&a.qps)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     println_both!("\n--- 全部结果（按 QPS 降序）---\n");
     println_both!(
         "  {:>4}  {:>28}  {:>8}  {:>10}  {:>+8}  {:>8}  {:>10}",
-        "#", "config", "recall", "QPS", "ΔQPS%", "avg_ef", "avg_visit"
+        "#",
+        "config",
+        "recall",
+        "QPS",
+        "ΔQPS%",
+        "avg_ef",
+        "avg_visit"
     );
     println_both!("  {}", "-".repeat(90));
 
@@ -422,7 +444,14 @@ fn main() {
         let marker = if e.is_pareto { "★" } else { " " };
         println_both!(
             "  {:>3}{} {:>28}  {:>8.4}  {:>10.0}  {:>+7.1}%  {:>8.1}  {:>10.1}",
-            i + 1, marker, e.label, e.recall, e.qps, qps_delta, e.avg_ef, e.avg_visited
+            i + 1,
+            marker,
+            e.label,
+            e.recall,
+            e.qps,
+            qps_delta,
+            e.avg_ef,
+            e.avg_visited
         );
     }
 
@@ -431,7 +460,12 @@ fn main() {
     println_both!("\n--- Pareto 前沿（{} 个点）---\n", pareto.len());
     println_both!(
         "  {:>28}  {:>8}  {:>10}  {:>+8}  {:>8}  {:>10}",
-        "config", "recall", "QPS", "ΔQPS%", "avg_ef", "avg_visit"
+        "config",
+        "recall",
+        "QPS",
+        "ΔQPS%",
+        "avg_ef",
+        "avg_visit"
     );
     println_both!("  {}", "-".repeat(82));
 
@@ -439,7 +473,12 @@ fn main() {
         let qps_delta = (e.qps - baseline_qps) / baseline_qps * 100.0;
         println_both!(
             "  {:>28}  {:>8.4}  {:>10.0}  {:>+7.1}%  {:>8.1}  {:>10.1}",
-            e.label, e.recall, e.qps, qps_delta, e.avg_ef, e.avg_visited
+            e.label,
+            e.recall,
+            e.qps,
+            qps_delta,
+            e.avg_ef,
+            e.avg_visited
         );
     }
 
@@ -456,13 +495,22 @@ fn main() {
         let best = adaptive_entries
             .iter()
             .filter(|e| e.recall >= threshold)
-            .max_by(|a, b| a.qps.partial_cmp(&b.qps).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| {
+                a.qps
+                    .partial_cmp(&b.qps)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
         if let Some(b) = best {
             let qps_delta = (b.qps - baseline_qps) / baseline_qps * 100.0;
             println_both!(
                 "  {:>30}  {:>20}  recall={:.4}  QPS={:.0}  Δ={:+.1}%  avg_ef={:.1}",
-                tier_name, b.label, b.recall, b.qps, qps_delta, b.avg_ef
+                tier_name,
+                b.label,
+                b.recall,
+                b.qps,
+                qps_delta,
+                b.avg_ef
             );
         } else {
             println_both!("  {:>30}  (无满足条件的配置)", tier_name);
