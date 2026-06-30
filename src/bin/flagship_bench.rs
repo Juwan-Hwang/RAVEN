@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::time::Instant;
 
 use raven::build::ChaCha8Rng;
-use raven::graph::{AdaptiveEfConfig, GraphSearcher, VamanaBuildConfig, VamanaGraph};
+use raven::graph::{AdaptiveEfConfig, GraphSearcher, VamanaBuildConfig, VamanaGraph, PruneStrategy};
 use raven::quant::SQ8Dataset;
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
@@ -110,17 +110,18 @@ fn main() {
     println_both!("\n--- 建图 ---");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
-    let config = VamanaBuildConfig {
-        alpha: 1.2,
-        l_build: 200,
-        r_max: 32,
-        r_soft: 48,
-        max_iterations: 2,
-        saturate: true,
-        enable_layered_nav: true,
-        nav_m: 16,
-        ..Default::default()
-    };
+let config = VamanaBuildConfig {
+alpha: 1.2,
+l_build: 200,
+r_max: 32,
+r_soft: 48,
+max_iterations: 2,
+saturate: false,
+enable_layered_nav: true,
+nav_m: 16,
+prune_strategy: PruneStrategy::DirectionalPrune,
+..Default::default()
+};
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
     println_both!("建图: {:.1}s", t0.elapsed().as_secs_f64());
 

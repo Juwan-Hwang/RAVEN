@@ -1,4 +1,4 @@
-﻿//! ann-benchmarks 接入二进制
+//! ann-benchmarks 接入二进制
 //!
 //! ann-benchmarks 评测口径（源码审计确认）：
 //!   - runner.py:38  batch = False（硬编码，即使传 --batch 也无效）
@@ -41,7 +41,7 @@
 //!   {"build_time_s": ..., "query_time_s": ..., "qps": ..., "recall@10": ...}
 
 use std::time::Instant;
-use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher, AdaptiveEfConfig};
+use raven::graph::{VamanaGraph, VamanaBuildConfig, GraphSearcher, AdaptiveEfConfig, PruneStrategy};
 use raven::quant::SQ8Dataset;
 use raven::build::ChaCha8Rng;
 use raven::memory::serialize::Serializable;
@@ -73,6 +73,7 @@ fn main() {
     // 优化控制标志（默认符合 ann-benchmarks 单线程口径）
     let mut use_sq8 = true;
     let mut use_adaptive_ef = true;   // Pareto 最优 γ3(40,75): +11.3% QPS, recall 无损
+    let mut use_directional_prune = true;  // DirectionalPrune: +8.5% QPS, CV 0.6%, recall -0.54pp
     let mut use_multithread = false;   // ann-benchmarks 逐条顺序查询
     let mut num_threads: Option<usize> = None;
 
@@ -96,6 +97,8 @@ fn main() {
             "--ef-search" => { i += 1; ef_search = args[i].parse().expect("invalid ef_search"); }
             "--no-sq8" => { use_sq8 = false; }
             "--no-adaptive-ef" => { use_adaptive_ef = false; }
+            "--no-directional-prune" => { use_directional_prune = false; }
+            "--directional-prune" => { use_directional_prune = true; }
             "--multithread" => { use_multithread = true; }
             "--threads" => { i += 1; num_threads = Some(args[i].parse().expect("invalid threads")); }
             "--help" | "-h" => { print_help(); return; }
@@ -134,7 +137,7 @@ fn main() {
     eprintln!("RAVEN ann-benchmarks runner (全优化叠加版)");
     eprintln!("  dim={}, n={}, nq={}, k={}", dim, n, nq, k);
     eprintln!("  alpha={}, l_build={}, r_max={}, max_iterations={}, ef_search={}", alpha, l_build, r_max, max_iterations, ef_search);
-    eprintln!("  optimizations: sq8={}, adaptive_ef={}, multithread={}", use_sq8, use_adaptive_ef, use_multithread);
+    eprintln!("  optimizations: sq8={}, adaptive_ef={}, directional_prune={}, multithread={}", use_sq8, use_adaptive_ef, use_directional_prune, use_multithread);
 
     // 构建或加载索引
     let (graph, build_time) = if !load_path.is_empty() {
@@ -154,9 +157,14 @@ fn main() {
             r_max,
             r_soft: (r_max as f32 * 1.5) as usize,
             max_iterations,
-            saturate: true,
+            saturate: !use_directional_prune,
             enable_layered_nav: true,
             nav_m: 16,
+            prune_strategy: if use_directional_prune {
+                PruneStrategy::DirectionalPrune
+            } else {
+                PruneStrategy::RobustPrune
+            },
             ..Default::default()
         };
         let build_start = Instant::now();
@@ -312,8 +320,9 @@ fn main() {
         "max_iterations": max_iterations,
         "ef_search": ef_search,
         "sq8": use_sq8,
-        "adaptive_ef": use_adaptive_ef,
-        "multithread": use_multithread,
+"adaptive_ef": use_adaptive_ef,
+"directional_prune": use_directional_prune,
+"multithread": use_multithread,
     });
     println!("{}", result);
 }

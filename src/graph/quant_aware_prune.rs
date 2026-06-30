@@ -114,80 +114,62 @@ impl QuantAwareRobustPrune {
 
         let query = &vectors[query_node as usize * dim..(query_node as usize + 1) * dim];
 
-        // 计算每个候选的距离和量化误差
-        let mut scored: Vec<(f32, f32, u32)> = candidates
-            .iter()
-            .filter(|&&c| c != query_node)
-            .map(|&c| {
-                let v = &vectors[c as usize * dim..(c as usize + 1) * dim];
-                let dist = l2_simd(query, v);
-                let error = error_fn(query_node, c);
-                (dist, error, c)
-            })
-            .collect();
+        // 单次遍历：计算距离 + 误差，直接存入扁平数组
+        // (dist, error, node_id) — 仅此一次堆分配
+        let mut entries: Vec<(f32, f32, u32)> = Vec::with_capacity(candidates.len());
+        for &c in candidates {
+            if c == query_node { continue; }
+            let v = &vectors[c as usize * dim..(c as usize + 1) * dim];
+            let dist = l2_simd(query, v);
+            let error = error_fn(query_node, c);
+            entries.push((dist, error, c));
+        }
 
-        if scored.is_empty() {
+        let n = entries.len();
+        if n == 0 {
             return Vec::new();
         }
 
-        // 计算归一化基准
-        let (mu_dist, mu_error) = Self::compute_normalization(&scored, config.normalization);
+        // 归一化基准：单次遍历，零额外分配
+        let (mu_dist, mu_error) = Self::compute_normalization_inline(
+            &entries, config.normalization,
+        );
 
-        // 计算归一化打分并排序（打分越低越优先保留）
-        // 设计文档：Score = dist / (μ_dist + ε) + β × error / (μ_error + ε)
-        let mut scored_normalized: Vec<(f32, u32)> = scored
-            .iter()
-            .map(|&(dist, error, c)| {
-                let score = dist / (mu_dist + config.epsilon)
-                    + config.beta * error / (mu_error + config.epsilon);
-                (score, c)
-            })
-            .collect();
+        // 计算归一化打分：Score = dist/(μ_dist+ε) + β×error/(μ_error+ε)
+        // 复用 entries 内存：(score, original_dist, node_id)
+        // 保留原始距离用于 α 遮挡判定，避免重算 l2_simd
+        let inv_dist = 1.0 / (mu_dist + config.epsilon);
+        let beta_inv_err = config.beta / (mu_error + config.epsilon);
+        for e in &mut entries {
+            let dist = e.0;
+            let error = e.1;
+            e.0 = dist * inv_dist + error * beta_inv_err; // score
+            e.1 = dist; // 保存原始距离
+        }
 
-        // 按打分升序排序（低分优先保留）
-        scored_normalized.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // 按量化感知打分升序排序
+        entries.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
-        // 原始距离排序用于 α 遮挡判定
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // RobustPrune 风格的 α 遮遮挡判定 + 量化感知打分
+        // α 遮挡判定（RobustPrune 风格，但按量化打分顺序选择）
+        // 用布尔数组代替 HashMap，O(1) 索引访问
         let mut result: Vec<u32> = Vec::with_capacity(config.r_max);
-        let mut pruned = vec![false; scored_normalized.len()];
+        let mut pruned = vec![false; n];
 
-        // 建立节点到 scored_normalized 索引的映射
-        let mut idx_map = std::collections::HashMap::new();
-        for (i, &(_, c)) in scored_normalized.iter().enumerate() {
-            idx_map.insert(c, i);
-        }
+        // α 遮挡判定：原始距离从 entries[j].1 读取（O(1) 索引，零重算）
+        for i in 0..n {
+            if pruned[i] { continue; }
+            if result.len() >= config.r_max { break; }
 
-        // 建立节点到原始距离的映射（用于 α 遮挡判定）
-        let mut dist_map = std::collections::HashMap::new();
-        for &(dist, _, c) in scored.iter() {
-            dist_map.insert(c, dist);
-        }
-
-        // 按量化感知打分顺序选择（β > 0 时影响选择顺序）
-        for i in 0..scored_normalized.len() {
-            let (_, node) = scored_normalized[i];
-            if pruned[i] {
-                continue;
-            }
-            if result.len() >= config.r_max {
-                break;
-            }
+            let node = entries[i].2;
             result.push(node);
 
-            // α 遮遮挡判定（用原始距离，与标准 RobustPrune 一致）
             let p_vec = &vectors[node as usize * dim..(node as usize + 1) * dim];
-            for j in (i + 1)..scored_normalized.len() {
-                let (_, other) = scored_normalized[j];
-                if pruned[j] {
-                    continue;
-                }
+            for j in (i + 1)..n {
+                if pruned[j] { continue; }
+                let other = entries[j].2;
                 let q_vec = &vectors[other as usize * dim..(other as usize + 1) * dim];
                 let dist_p_q = l2_simd(p_vec, q_vec);
-                let q_dist = dist_map[&other];
-                // α × dist(p, p') ≤ dist(p', q) → p' 被 p 遮挡（方向修正）
+                let q_dist = entries[j].1; // 原始距离，O(1) 索引
                 if config.alpha * dist_p_q <= q_dist {
                     pruned[j] = true;
                 }
@@ -197,7 +179,44 @@ impl QuantAwareRobustPrune {
         result
     }
 
-    /// 计算归一化基准
+    /// 归一化基准计算（零分配版本）
+    ///
+    /// 遍历 entries 数组直接计算统计量，不分配临时 Vec
+    fn compute_normalization_inline(
+        entries: &[(f32, f32, u32)],
+        scheme: NormalizationScheme,
+    ) -> (f32, f32) {
+        if entries.is_empty() {
+            return (EPSILON, EPSILON);
+        }
+
+        let n = entries.len() as f32;
+
+        match scheme {
+            NormalizationScheme::Mean => {
+                let (sum_d, sum_e) = entries.iter()
+                    .fold((0.0f32, 0.0f32), |(sd, se), &(d, e, _)| (sd + d, se + e));
+                (sum_d / n, sum_e / n)
+            }
+            NormalizationScheme::StdDev => {
+                let (sum_d, sum_e) = entries.iter()
+                    .fold((0.0f32, 0.0f32), |(sd, se), &(d, e, _)| (sd + d, se + e));
+                let mu_d = sum_d / n;
+                let mu_e = sum_e / n;
+                let (var_d, var_e) = entries.iter()
+                    .fold((0.0f32, 0.0f32), |(vd, ve), &(d, e, _)| {
+                        (vd + (d - mu_d).powi(2), ve + (e - mu_e).powi(2))
+                    });
+                (var_d.sqrt().max(EPSILON), var_e.sqrt().max(EPSILON))
+            }
+            NormalizationScheme::Mad | NormalizationScheme::LogSumExp => {
+                // MAD/LSE 需要排序，回退到原实现（仅这两种方案，非默认）
+                Self::compute_normalization(entries, scheme)
+            }
+        }
+    }
+
+    /// 计算归一化基准（非默认方案回退路径，会分配临时 Vec）
     ///
     /// 设计文档：归一化消融变量
     fn compute_normalization(

@@ -218,10 +218,20 @@ pub struct DirectionalPruneConfig {
 
 impl DirectionalPruneConfig {
     /// 从 r_max 和 alpha 自动推导配置
+    ///
+    /// r_min = r_max / divisor，divisor 由 `RAVEN_RMIN_DIVISOR` 环境变量控制（默认 4）。
+    /// - divisor=4: r_min=R/4，Pass 2 仅补到 25% 底数（QPS 最优）
+    /// - divisor=3: r_min=R/3，中间态
+    /// - divisor=2: r_min=R/2，实测 QPS -6.8% 且 recall 无改善
     pub fn from_params(r_max: usize, alpha: f32) -> Self {
+        let divisor = std::env::var("RAVEN_RMIN_DIVISOR")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&d| d > 0)
+            .unwrap_or(4);
         Self {
             r_max,
-            r_min: (r_max / 4).max(1),
+            r_min: (r_max / divisor).max(1),
             backfill_alpha: alpha.max(1.0),
         }
     }

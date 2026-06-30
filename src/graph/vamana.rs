@@ -224,23 +224,25 @@ impl VamanaGraph {
         let n = vectors.len() / dim;
         assert_eq!(vectors.len(), n * dim);
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
+        let build_t0 = std::time::Instant::now();
 
-        info!("[build_qa] rayon threads: {}", rayon::current_num_threads());
+        eprintln!("[build_qa] n={} dim={} threads={} beta={}",
+            n, dim, rayon::current_num_threads(), qa_config.beta);
 
         let _random_entry = Self::init_random_graph(&mut storage, n, config, rng);
-        // Vamana/DiskANN 论文：entry_point 用 medoid
         let entry_point = Self::compute_medoid(vectors, dim, n);
-        info!("[build_qa] init_random_graph done, entry=medoid[{}]", entry_point);
+        eprintln!("[build_qa] init_random_graph done ({:.1}s), entry=medoid[{}]",
+            build_t0.elapsed().as_secs_f64(), entry_point);
 
-        // Vamana 论文 two passes：第一轮 α=1.0（连通性），第二轮 α=config.alpha（长程边）
-        // v6.6: 小批量顺序处理（同 build 方法）
         const BUILD_BATCH_SIZE: usize = 10_000;
         for iter in 0..config.max_iterations {
             let order = Self::permutation(n, rng);
             let alpha = if iter == 0 { 1.0 } else { config.alpha };
             let progress = AtomicUsize::new(0);
             let progress_interval = (n / 20).max(1);
-            info!("[build_qa] iter {}/{} alpha={} beta={}", iter + 1, config.max_iterations, alpha, qa_config.beta);
+            let iter_t0 = std::time::Instant::now();
+            eprintln!("[build_qa] iter {}/{} alpha={} beta={} ...",
+                iter + 1, config.max_iterations, alpha, qa_config.beta);
 
             for chunk in order.chunks(BUILD_BATCH_SIZE) {
                 let new_neighbors: Vec<(u32, Vec<u32>)> = chunk
@@ -250,7 +252,9 @@ impl VamanaGraph {
                         |visited, &node_id| {
                             let idx = progress.fetch_add(1, Ordering::Relaxed);
                             if idx > 0 && idx % progress_interval == 0 {
-                                info!("[build_qa] {}/{} ({}%)", idx, n, idx * 100 / n);
+                                eprintln!("[build_qa] iter {}  {}/{} ({}%)  {:.1}s",
+                                    iter + 1, idx, n, idx * 100 / n,
+                                    iter_t0.elapsed().as_secs_f64());
                             }
                             let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
                             let _candidates = Self::greedy_search_vec_build(
@@ -280,13 +284,35 @@ impl VamanaGraph {
                     );
                 }
             }
+
+            eprintln!("[build_qa] iter {} done in {:.1}s",
+                iter + 1, iter_t0.elapsed().as_secs_f64());
         }
 
-        Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate, config.prune_strategy);
+        eprintln!("[build_qa] final_prune (QA-aware) ...");
+        let prune_t0 = std::time::Instant::now();
+        Self::final_prune_qa(&mut storage, vectors, dim, qa_config, &error_fn);
+        eprintln!("[build_qa] final_prune done in {:.1}s", prune_t0.elapsed().as_secs_f64());
 
         let build_config = BuildConfig::default();
         let metadata = BuildMetadata::from_config(&build_config, n, dim);
-        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav: None }
+
+        let layered_nav = if config.enable_layered_nav && n > 0 {
+            eprintln!("[build_qa] constructing layered navigation (M={})...", config.nav_m);
+            let t0 = std::time::Instant::now();
+            let nav = LayeredNavigation::build(
+                vectors, dim, &storage, entry_point, config.nav_m, config.r_max / 2,
+            );
+            eprintln!("[build_qa] layered nav done in {:.1}s (max_level={})",
+                t0.elapsed().as_secs_f64(), nav.max_level());
+            Some(nav)
+        } else {
+            None
+        };
+
+        eprintln!("[build_qa] total build: {:.1}s", build_t0.elapsed().as_secs_f64());
+
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav }
     }
 
     /// 初始化随机图
@@ -1052,6 +1078,30 @@ impl VamanaGraph {
         }
     }
 
+    /// QA-aware final prune
+    fn final_prune_qa<F>(
+        storage: &mut HybridBlockedCsr,
+        vectors: &[f32],
+        dim: usize,
+        qa_config: &QuantAwarePruneConfig,
+        error_fn: &F,
+    ) where
+        F: Fn(u32, u32) -> f32 + Sync,
+    {
+        for node in 0..storage.len() as u32 {
+            let (main, overflow) = storage.neighbors_full(node);
+            if main.len() + overflow.len() <= qa_config.r_max {
+                continue;
+            }
+            let mut all: Vec<u32> = main.to_vec();
+            all.extend_from_slice(overflow);
+            let pruned = QuantAwareRobustPrune::prune(
+                &all, node, vectors, dim, error_fn, qa_config,
+            );
+            storage.set_neighbors(node, &pruned);
+        }
+    }
+
     /// 节点数
     pub fn len(&self) -> usize {
         self.n
@@ -1326,6 +1376,8 @@ pub struct GraphSearcher<'a> {
     pool: LinearPool,
     /// 预分配的 SQ8 query code buffer，避免每次搜索堆分配
     query_code_buf: Vec<u8>,
+    /// Rerank 倍数（放在 struct 末尾避免干扰热路径 cache 对齐）
+    rerank_factor: usize,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1351,6 +1403,7 @@ impl<'a> GraphSearcher<'a> {
             adaptive_ef: None,
             pool: LinearPool::new(ef_search),
             query_code_buf: vec![0u8; dim],
+            rerank_factor: 3,
         }
     }
 
@@ -1382,6 +1435,7 @@ impl<'a> GraphSearcher<'a> {
             adaptive_ef: None,
             pool: LinearPool::new(ef_search),
             query_code_buf: vec![0u8; dim],
+            rerank_factor: 3,
         }
     }
 
@@ -1391,6 +1445,12 @@ impl<'a> GraphSearcher<'a> {
     /// 返回 &mut Self 以支持链式调用
     pub fn with_prefetch_offset(&mut self, po: usize) -> &mut Self {
         self.prefetch_offset = po;
+        self
+    }
+
+    /// 设置 rerank 倍数（SQ8 搜索后 f32 重排序的候选数 = k × factor）
+    pub fn with_rerank_factor(&mut self, factor: usize) -> &mut Self {
+        self.rerank_factor = factor.max(1);
         self
     }
 
@@ -1552,7 +1612,7 @@ impl<'a> GraphSearcher<'a> {
 
         // 5. f32 部分 rerank：candidates 已按 SQ8 距离升序，
         //    SQ8 排序与 f32 高度一致，只需对 top-N rerank 即可覆盖 top-k
-        let rerank_n = (k * 3).max(30).min(candidates.len());
+        let rerank_n = (k * self.rerank_factor).max(k).min(candidates.len());
         let mut results: Vec<(u32, f32)> = candidates
             .into_iter()
             .take(rerank_n)
@@ -1754,6 +1814,7 @@ impl<'a> GraphSearcher<'a> {
         let n = self.vectors.len() / self.dim;
         let default_ef = self.ef_search;
         let po = self.prefetch_offset;
+        let rerank_factor = self.rerank_factor;
         let vectors = self.vectors;
         let dim = self.dim;
         let storage = self.graph.storage();
@@ -1787,8 +1848,8 @@ impl<'a> GraphSearcher<'a> {
         };
 
         // 公共逻辑：f32 rerank + sort + truncate
-        let rerank_and_sort = |cands: Vec<(u32, f32)>, query: &[f32]| -> Vec<(u32, f32)> {
-            let rerank_n = (k * 3).max(30).min(cands.len());
+        let rerank_and_sort = move |cands: Vec<(u32, f32)>, query: &[f32]| -> Vec<(u32, f32)> {
+            let rerank_n = (k * rerank_factor).max(k).min(cands.len());
             let mut results: Vec<(u32, f32)> = cands
                 .into_iter()
                 .take(rerank_n)
