@@ -8,7 +8,7 @@
 //!   cargo run --release --bin opt_bench --directional               # DirectionalPrune r_min=R/4 ef=50
 //!   cargo run --release --bin opt_bench --directional --rmin-divisor=3  # r_min=R/3
 //!   cargo run --release --bin opt_bench --directional --ef-sweep=50,52,55,58,60  # ef 扫描
-//!   cargo run --release --bin opt_bench --directional --adaptive-ef             # + 自适应 ef
+//!   cargo run --release --bin opt_bench --directional --adaptive-ef             # + 自适应 ef (消融实验用，DirectionalPrune 图上无收益)
 //!   cargo run --release --bin opt_bench --directional --rerank=5                 # rerank_factor=5
 //!   cargo run --release --bin opt_bench --directional --po=4                     # prefetch offset=4
 
@@ -163,6 +163,9 @@ fn parse_ef_list() -> Vec<usize> {
 fn main() {
     let weighted = std::env::args().any(|a| a == "--weighted");
     let directional = std::env::args().any(|a| a == "--directional");
+    // AdaptiveEf 在 DirectionalPrune 图上无 measurable 收益（avg_ef=48.9 ≈ 固定 50）
+    // 原因：分层导航 + DirectionalPrune 把入口距离压缩到极窄范围，幂律变换后几乎不改变 ef 分配
+    // 仍可通过 --adaptive-ef 手动启用进行消融实验
     let use_adaptive_ef = std::env::args().any(|a| a == "--adaptive-ef");
     let rmin_divisor = std::env::args()
         .find_map(|a| a.strip_prefix("--rmin-divisor=").and_then(|v| v.parse::<usize>().ok()))

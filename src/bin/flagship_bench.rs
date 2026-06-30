@@ -3,8 +3,9 @@
 //! 逐层叠加优化，每层对比前一层基线：
 //!   Layer 0: f32 baseline (layered nav + po=8 prefetch)
 //!   Layer 1: + SQ8 量化
-//!   Layer 2: + 自适应 ef (gamma=2.0)
-//!   Layer 3: + 多线程 (rayon, 全核心)
+//!   Layer 2: + 多线程 (rayon, 全核心)
+//!
+//! AdaptiveEf 已移除：在 DirectionalPrune 图上 avg_ef=48.9 ≈ 固定 50，无 measurable 收益
 //!
 //! 结果自动写入 flagship_bench_result.txt
 //!
@@ -15,7 +16,7 @@ use std::io::{Read, Write};
 use std::time::Instant;
 
 use raven::build::ChaCha8Rng;
-use raven::graph::{AdaptiveEfConfig, GraphSearcher, VamanaBuildConfig, VamanaGraph, PruneStrategy};
+use raven::graph::{GraphSearcher, VamanaBuildConfig, VamanaGraph, PruneStrategy};
 use raven::quant::SQ8Dataset;
 
 fn read_fvecs(path: &str) -> (Vec<f32>, usize, usize) {
@@ -54,12 +55,6 @@ fn read_ivecs(path: &str) -> (Vec<i32>, usize, usize) {
         }
     }
     (gt, dim, n)
-}
-
-struct BenchResult {
-    recall: f64,
-    qps: f64,
-    avg_visited: f64,
 }
 
 fn compute_recall(results: &[Vec<u32>], gt: &[i32], gt_k: usize, k: usize, nq: usize) -> f64 {
@@ -110,18 +105,18 @@ fn main() {
     println_both!("\n--- 建图 ---");
     let t0 = Instant::now();
     let mut rng = ChaCha8Rng::seed_from(42);
-let config = VamanaBuildConfig {
-alpha: 1.2,
-l_build: 200,
-r_max: 32,
-r_soft: 48,
-max_iterations: 2,
-saturate: false,
-enable_layered_nav: true,
-nav_m: 16,
-prune_strategy: PruneStrategy::DirectionalPrune,
-..Default::default()
-};
+    let config = VamanaBuildConfig {
+        alpha: 1.2,
+        l_build: 200,
+        r_max: 32,
+        r_soft: 48,
+        max_iterations: 2,
+        saturate: false,
+        enable_layered_nav: true,
+        nav_m: 16,
+        prune_strategy: PruneStrategy::DirectionalPrune,
+        ..Default::default()
+    };
     let graph = VamanaGraph::build(&train, dim, &config, &mut rng);
     println_both!("建图: {:.1}s", t0.elapsed().as_secs_f64());
 
@@ -130,14 +125,6 @@ prune_strategy: PruneStrategy::DirectionalPrune,
     let t0 = Instant::now();
     let sq8 = SQ8Dataset::build(&train, dim);
     println_both!("SQ8 编码: {:.1}s ({} MB)", t0.elapsed().as_secs_f64(), sq8.codes.len() / 1_000_000);
-
-    // 自适应 ef 配置
-    println_both!("\n--- 自适应 ef 配置 ---");
-    let layered_nav = graph.layered_nav().expect("layered nav required");
-    let t0 = Instant::now();
-    let adaptive_config = AdaptiveEfConfig::build_with_layered_nav(
-        &train, dim, layered_nav, 35, 75, 2.0);
-    println_both!("自适应 ef: {:.1}s (min_ef=35, max_ef=75, gamma=2.0)", t0.elapsed().as_secs_f64());
 
     // 准备查询引用
     let queries: Vec<&[f32]> = (0..nq).map(|q| &test[q * dim..(q + 1) * dim]).collect();
@@ -185,38 +172,11 @@ prune_strategy: PruneStrategy::DirectionalPrune,
         println_both!("  → SQ8 QPS = {:.0}", qps);
     }
 
-    // ── Layer 2: + 自适应 ef ──
-    println_both!("\n--- Layer 2: + SQ8 + 自适应 ef (gamma=2.0) ---");
+    // ── Layer 2: + 多线程 ──
+    println_both!("\n--- Layer 2: + SQ8 + 多线程 ({} threads) ---", num_threads);
     {
         let mut searcher = GraphSearcher::new(&train, &graph, ef);
         searcher.with_sq8(&sq8);
-        searcher.with_adaptive_ef(adaptive_config.clone());
-        // warmup
-        for q in 0..nq.min(100) { let _ = searcher.search_sq8(&queries[q], k); }
-        let t0 = Instant::now();
-        let mut results = Vec::with_capacity(nq);
-        let mut total_visited = 0;
-        let mut total_ef = 0usize;
-        for q in 0..nq {
-            let r = searcher.search_sq8(&queries[q], k);
-            total_visited += searcher.last_visited_count();
-            total_ef += searcher.last_ef_used();
-            results.push(r.iter().map(|(id, _)| *id).collect());
-        }
-        let dt = t0.elapsed();
-        let recall = compute_recall(&results, &gt, gt_k, k, nq);
-        let qps = nq as f64 / dt.as_secs_f64();
-        println_both!("  recall={:.4}  QPS={:.0}  avg_visited={:.1}  avg_ef={:.1}",
-            recall, qps, total_visited as f64 / nq as f64, total_ef as f64 / nq as f64);
-        println_both!("  → SQ8+adaptive_ef QPS = {:.0}", qps);
-    }
-
-    // ── Layer 3: + 多线程 ──
-    println_both!("\n--- Layer 3: + SQ8 + 自适应 ef + 多线程 ({} threads) ---", num_threads);
-    {
-        let mut searcher = GraphSearcher::new(&train, &graph, ef);
-        searcher.with_sq8(&sq8);
-        searcher.with_adaptive_ef(adaptive_config.clone());
         // warmup
         let warmup_n = nq.min(100);
         let _ = searcher.batch_search(&queries[..warmup_n], k);

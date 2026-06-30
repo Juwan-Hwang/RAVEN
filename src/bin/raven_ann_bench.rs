@@ -7,19 +7,20 @@
 //!   - hnswlib 显式 set_num_threads(1)，Glass 用 prepare_query 逐条
 //!   - Docker --parallelism 仅控制算法间并行，非查询内并行
 //!
-//! 默认配置：单线程 + SQ8 + 自适应 ef（ann-benchmarks 逐条顺序查询口径）
+//! 默认配置：单线程 + SQ8 + DirectionalPrune（ann-benchmarks 逐条顺序查询口径）
 //!
 //! 默认启用：
 //!   1. 分层导航 (LayeredNavigation) — 建图时构建
 //!   2. Two-Pass Prefetch (po=8) — GraphSearcher 默认
 //!   3. SQ8 标量量化 — 1.47x QPS，recall 几乎无损
-//!   4. 自适应 ef (gamma=3.0, min=40, max=75) — Pareto 最优 +11.3%
-//!   5. degrees 数组 O(1) neighbors() — 建图路径加速，查询路径 +0.2%（噪声）
+//!   4. DirectionalPrune — +8.5% QPS, recall -0.54pp
+//!   5. degrees 数组 O(1) neighbors() — 建图路径加速
 //!   6. target-cpu=native — .cargo/config.toml 全局生效
 //!
 //! 可选标志：
 //!   --no-sq8           禁用 SQ8，回退 f32 全精度
-//!   --no-adaptive-ef   禁用自适应 ef，用固定 ef
+//!   --adaptive-ef      启用自适应 ef（DirectionalPrune 图上无收益，消融实验用）
+//!   --no-directional-prune  回退 RobustPrune
 //!   --multithread      启用多线程 batch_search（ann-benchmarks 不使用）
 //!   --threads N        指定线程数（默认全部核心）
 //!
@@ -72,7 +73,10 @@ fn main() {
 
     // 优化控制标志（默认符合 ann-benchmarks 单线程口径）
     let mut use_sq8 = true;
-    let mut use_adaptive_ef = true;   // Pareto 最优 γ3(40,75): +11.3% QPS, recall 无损
+    // AdaptiveEf 在 DirectionalPrune 图上无 measurable 收益（avg_ef≈48.9 ≈ 固定 50）
+    // 原因：分层导航 + DirectionalPrune 把入口距离压缩到极窄范围
+    // 仍可通过 --adaptive-ef 手动启用
+    let mut use_adaptive_ef = false;
     let mut use_directional_prune = true;  // DirectionalPrune: +8.5% QPS, CV 0.6%, recall -0.54pp
     let mut use_multithread = false;   // ann-benchmarks 逐条顺序查询
     let mut num_threads: Option<usize> = None;
@@ -96,7 +100,7 @@ fn main() {
             "--max-iterations" => { i += 1; max_iterations = args[i].parse().expect("invalid max_iterations"); }
             "--ef-search" => { i += 1; ef_search = args[i].parse().expect("invalid ef_search"); }
             "--no-sq8" => { use_sq8 = false; }
-            "--no-adaptive-ef" => { use_adaptive_ef = false; }
+            "--adaptive-ef" => { use_adaptive_ef = true; }
             "--no-directional-prune" => { use_directional_prune = false; }
             "--directional-prune" => { use_directional_prune = true; }
             "--multithread" => { use_multithread = true; }
@@ -376,7 +380,7 @@ fn print_help() {
     println!();
     println!("优化控制（默认: SQ8 开 / 自适应 ef 开 / 多线程关）:");
     println!("  --no-sq8             禁用 SQ8 量化");
-    println!("  --no-adaptive-ef     禁用自适应 ef");
+    println!("  --adaptive-ef        启用自适应 ef（DirectionalPrune 图上无收益）");
     println!("  --multithread        启用多线程（ann-benchmarks 不使用）");
     println!("  --threads N          指定线程数");
     println!();
