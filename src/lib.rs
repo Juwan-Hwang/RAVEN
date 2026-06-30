@@ -26,6 +26,9 @@ pub mod quant;
 pub mod config;
 pub mod bench;
 
+#[cfg(feature = "python")]
+pub mod python;
+
 /// 库版本号，写入索引元数据随索引文件落盘（设计文档 F.7）
 pub const BUILD_VERSION: &str = "0.1.0";
 

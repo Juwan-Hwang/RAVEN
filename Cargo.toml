@@ -8,6 +8,7 @@ license = "Apache-2.0"
 [lib]
 name = "raven"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [features]
 # 批量查询模式：feature-gate 隔离，不污染单查询主路径（设计文档第二层）
@@ -17,6 +18,8 @@ batch_mode = []
 avx512 = []
 # big-ann SSD 扩展路径（Week 9+，当前仅预留接口）
 big_ann = []
+# Python 绑定（PyO3，ann-benchmarks 集成用）
+python = ["dep:pyo3", "dep:numpy"]
 
 [dependencies]
 # 构建可复现性：ChaCha8 速度快、质量足够、跨平台结果一致（设计文档第四层 F.7）
@@ -40,6 +43,9 @@ bytemuck = "1"
 serde_json = "1"
 # 并行建图（Vamana build 并行化，greedy_search 只读可并行）
 rayon = "1.10"
+# Python 绑定（ann-benchmarks 集成）
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+numpy = { version = "0.22", optional = true }
 
 [dev-dependencies]
 # 微基准：日常迭代用 divan，正式回归用 criterion（设计文档第六层）
