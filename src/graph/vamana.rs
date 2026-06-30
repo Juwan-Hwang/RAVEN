@@ -13,7 +13,7 @@
 use crate::distance::l2_simd;
 use crate::distance::F16Dataset;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
-use crate::quant::{SQ8Dataset, PQ4Dataset, PQ8Dataset};
+use crate::quant::{SQ8Dataset, SQ4Dataset, PQ4Dataset, PQ8Dataset};
 use super::adaptive_ef::AdaptiveEfConfig;
 use super::refiner::{rerank_f32, rerank_f16};
 use crate::build::ChaCha8Rng;
@@ -772,6 +772,94 @@ edge_size += is_new as usize;
         pool.to_sorted_vec()
     }
 
+    /// SQ4 标量量化图遍历
+    ///
+    /// 与 `greedy_search_sq8` 相同的 Two-Pass Prefetch 架构，
+    /// 但距离计算用 SQ4 packed 4-bit 码代替 SQ8 u8 码。
+    ///
+    /// 优势：
+    /// - 内存带宽降 2x（64B/vector vs SQ8 的 128B for SIFT-128）
+    /// - AVX2 每次处理 64 维（32 bytes packed），SIFT-128 仅 2 次迭代（vs SQ8 的 4 次）
+    /// - 1M 向量仅 64MB，部分进入 L3 cache（vs SQ8 的 128MB 完全不进 L3）
+    ///
+    /// 返回 (节点ID, SQ4距离) 列表，需外部 f32 rerank。
+    pub fn greedy_search_sq4(
+        sq4: &SQ4Dataset,
+        storage: &HybridBlockedCsr,
+        entry_point: u32,
+        query_code: &[u8],
+        l: usize,
+        visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
+        po: usize,
+    ) -> Vec<(u32, f32)> {
+        visited.reset();
+        pool.reset_for(l);
+
+        // 入口节点距离（SQ4）
+        let entry_dist = sq4.distance_raw(query_code, entry_point as usize);
+        visited.visit(entry_point);
+        pool.insert(entry_point, entry_dist);
+
+        let mut edge_buf: [u32; 128] = [0; 128];
+
+        while let Some((node, _dist)) = pool.pop() {
+            // Multi-line graph prefetch
+            if let Some((next_node, _)) = pool.peek_unchecked() {
+                let start = next_node as usize * storage.r_max();
+                let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
+                let neighbor_bytes = storage.r_max() * 4;
+                let graph_lines = (neighbor_bytes + 63) / 64;
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    for l in 1..graph_lines {
+                        std::arch::x86_64::_mm_prefetch::<0>(ptr.add(l * 64));
+                    }
+                }
+            }
+
+            let neighbors = storage.neighbors(node);
+
+            // 第一遍：收集未访问邻居（branchless — A8）
+            let mut edge_size = 0usize;
+            for &v in neighbors {
+                if edge_size >= 128 {
+                    break;
+                }
+                let is_new = unsafe { visited.visit_unchecked_branchless(v) };
+                unsafe { *edge_buf.get_unchecked_mut(edge_size) = v; }
+                edge_size += is_new as usize;
+            }
+
+            // 预取前 po 个邻居的 SQ4 码
+            // SIFT-128: 64B = 1 cache line，只需 1 条预取指令
+            let prefetch_count = po.min(edge_size);
+            for i in 0..prefetch_count {
+                let v = edge_buf[i] as usize;
+                let ptr = sq4.code(v).as_ptr() as *const i8;
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                }
+            }
+
+            // 第二遍：SQ4 距离计算 + 前瞻预取
+            for i in 0..edge_size {
+                if i + po < edge_size {
+                    let v = edge_buf[i + po] as usize;
+                    let ptr = sq4.code(v).as_ptr() as *const i8;
+                    unsafe {
+                        std::arch::x86_64::_mm_prefetch::<0>(ptr);
+                    }
+                }
+                let neighbor = edge_buf[i];
+                let d = unsafe { sq4.distance_raw_unchecked(query_code, neighbor as usize) };
+                pool.insert(neighbor, d);
+            }
+        }
+
+        pool.to_sorted_vec()
+    }
+
     /// PQ4 图遍历（Phase 1 Step 1）
     ///
     /// 使用 4-bit PQ LUT-ADC 距离进行图遍历，码大小仅 M/2 bytes/vector（SIFT: 16B）。
@@ -1365,6 +1453,9 @@ pub struct GraphSearcher<'a> {
     /// 可选的 SQ8 量化数据集（Phase 1 Step 0）
     /// 启用后 search_sq8() 使用 SQ8 距离进行图遍历 + f32 rerank
     sq8: Option<&'a SQ8Dataset>,
+    /// 可选的 SQ4 标量量化数据集（4-bit per dimension）
+    /// 启用后 search_sq4() 使用 SQ4 距离进行图遍历 + f32 rerank
+    sq4: Option<&'a SQ4Dataset>,
     /// 可选的 4-bit PQ 量化数据集（Phase 1 Step 1）
     /// 启用后 search_pq4() 使用 LUT-ADC 距离进行图遍历 + f32 rerank
     pq4: Option<&'a PQ4Dataset>,
@@ -1402,6 +1493,7 @@ impl<'a> GraphSearcher<'a> {
             last_ef_used: ef_search,
             prefetch_offset: 8,
             sq8: None,
+            sq4: None,
             pq4: None,
             pq8: None,
             adaptive_ef: None,
@@ -1435,6 +1527,7 @@ impl<'a> GraphSearcher<'a> {
             last_ef_used: ef_search,
             prefetch_offset: 8,
             sq8: None,
+            sq4: None,
             pq4: None,
             pq8: None,
             adaptive_ef: None,
@@ -1478,6 +1571,16 @@ impl<'a> GraphSearcher<'a> {
     /// 需要预先构建 SQ8Dataset（SQ8Dataset::build）。
     pub fn with_sq8(&mut self, sq8: &'a SQ8Dataset) -> &mut Self {
         self.sq8 = Some(sq8);
+        self
+    }
+
+    /// 启用 SQ4 标量量化搜索（4-bit per dimension）
+    ///
+    /// 设置后可调用 search_sq4() 使用 SQ4 距离进行图遍历。
+    /// SQ4 每维度 4-bit，码大小 dim/2 bytes（SIFT-128: 64B vs SQ8 的 128B）。
+    /// 需要预先构建 SQ4Dataset（SQ4Dataset::build）。
+    pub fn with_sq4(&mut self, sq4: &'a SQ4Dataset) -> &mut Self {
+        self.sq4 = Some(sq4);
         self
     }
 
@@ -1660,6 +1763,73 @@ impl<'a> GraphSearcher<'a> {
     #[inline(always)]
     pub fn search_sq8_weighted(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
         self.search_sq8_impl::<false>(query, k)
+    }
+
+    /// SQ4 标量量化搜索（4-bit per dimension）
+    ///
+    /// 图遍历使用 SQ4 无加权距离（Σ (qa[i] - qb[i])²），
+    /// 码大小 dim/2 bytes（SIFT-128: 64B vs SQ8 的 128B）。
+    /// 终态对 top-N 候选用 f32 精确距离重排序（rerank）。
+    ///
+    /// 返回 (节点ID, f32精确距离) 列表，按距离升序。
+    /// 需先调用 with_sq4() 设置 SQ4Dataset。
+    pub fn search_sq4(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let sq4 = self.sq4.expect("search_sq4 requires with_sq4() first");
+        let dim = self.dim;
+
+        // 1. 编码查询向量为 SQ4 packed 4-bit（零分配，复用预分配 buffer）
+        //    SQ4 码大小 = ceil(dim/2)，可能与 SQ8 的 dim 不同
+        let code_bytes = (dim + 1) / 2;
+        if self.query_code_buf.len() != code_bytes {
+            self.query_code_buf = vec![0u8; code_bytes];
+        }
+        sq4.params.encode_into(query, &mut self.query_code_buf);
+
+        // 2. 选择 entry_point + 捕获 nav.initialize 的 f32 距离
+        let (entry_point, nav_entry_dist) = if let Some(nav) = self.graph.layered_nav() {
+            let (ep, dist) = nav.initialize(self.vectors, dim, query);
+            (ep, Some(dist))
+        } else if let Some(nav) = self.navigation {
+            (Self::nearest_centroid(nav.centroids(), self.vectors, dim, query), None)
+        } else {
+            (self.graph.entry_point(), None)
+        };
+
+        // 3. 自适应 ef
+        let ef = if let Some(ref adaptive) = self.adaptive_ef {
+            let entry_dist = nav_entry_dist.unwrap_or_else(|| {
+                l2_simd(
+                    query,
+                    &self.vectors[entry_point as usize * dim
+                        ..(entry_point as usize + 1) * dim],
+                )
+            });
+            adaptive.estimate_ef(entry_dist).max(k)
+        } else {
+            self.ef_search
+        };
+        self.last_ef_used = ef;
+
+        // 4. SQ4 图遍历
+        let candidates = VamanaGraph::greedy_search_sq4(
+            sq4,
+            self.graph.storage(),
+            entry_point,
+            &self.query_code_buf,
+            ef,
+            &mut self.visited,
+            &mut self.pool,
+            self.prefetch_offset,
+        );
+
+        self.last_visited_count = self.visited.visited_count();
+
+        // 5. f32 rerank（与 SQ8 路径完全相同）
+        if let Some(f16_ds) = self.f16 {
+            rerank_f16(f16_ds.codes(), dim, query, candidates, k, self.rerank_factor)
+        } else {
+            rerank_f32(self.vectors, dim, query, candidates, k, self.rerank_factor)
+        }
     }
 
     /// 4-bit PQ 量化搜索（Phase 1 Step 1）
