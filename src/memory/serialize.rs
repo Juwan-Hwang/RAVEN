@@ -46,6 +46,8 @@ pub enum SerializeError {
     CrcMismatch { expected: u32, actual: u32 },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("slice conversion error: {0}")]
+    TryFromSlice(#[from] std::array::TryFromSliceError),
 }
 
 /// 索引文件头（固定 16 字节）

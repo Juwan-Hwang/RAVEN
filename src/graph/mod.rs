@@ -13,6 +13,7 @@ pub mod rp_tuning;
 pub mod quant_aware_prune;
 pub mod ablation;
 pub mod navigation;
+pub mod refiner;
 pub mod linear_pool;
 pub mod adaptive_ef;
 

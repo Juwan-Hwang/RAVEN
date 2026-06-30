@@ -88,6 +88,15 @@ pub struct Config {
     /// 设计文档：α * recon_loss + (1-α) * ret_loss，α ∈ [0.0, 1.0]
     #[serde(default = "default_avq_alpha")]
     pub avq_alpha: f32,
+    /// 图最大出度 R_max（设计文档第四层：硬上限）
+    #[serde(default = "default_r_max")]
+    pub r_max: usize,
+    /// rerank 倍数（搜索时 f32 重排序的候选数 = k × factor）
+    #[serde(default = "default_rerank_factor")]
+    pub rerank_factor: usize,
+    /// 预取偏移（Two-Pass Prefetch 前瞻距离）
+    #[serde(default = "default_prefetch_offset")]
+    pub prefetch_offset: usize,
 }
 
 fn default_dim() -> usize { 128 }
@@ -96,6 +105,9 @@ fn default_top_n() -> usize { 100 }
 fn default_codebook_k() -> usize { 256 }
 fn default_sub_dim() -> usize { 8 }
 fn default_avq_alpha() -> f32 { 0.30 }
+fn default_r_max() -> usize { 64 }
+fn default_rerank_factor() -> usize { 3 }
+fn default_prefetch_offset() -> usize { 8 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -121,6 +133,9 @@ impl Default for Config {
             codebook_k: default_codebook_k(),
             sub_dim: default_sub_dim(),
             avq_alpha: default_avq_alpha(),
+            r_max: default_r_max(),
+            rerank_factor: default_rerank_factor(),
+            prefetch_offset: default_prefetch_offset(),
         }
     }
 }
@@ -228,6 +243,22 @@ impl Config {
                 self.avq_alpha = a;
             }
         }
+        // M6 修复：新增参数的环境变量入口
+        if let Ok(v) = std::env::var("RAVEN_R_MAX") {
+            if let Ok(r) = v.parse() {
+                self.r_max = r;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_RERANK_FACTOR") {
+            if let Ok(r) = v.parse() {
+                self.rerank_factor = r;
+            }
+        }
+        if let Ok(v) = std::env::var("RAVEN_PREFETCH_OFFSET") {
+            if let Ok(p) = v.parse() {
+                self.prefetch_offset = p;
+            }
+        }
     }
 
     /// 应用 feature flag（编译期，优先级最高）
@@ -287,6 +318,9 @@ pub fn merge_config(
         cfg.codebook_k = cli_cfg.codebook_k;
         cfg.sub_dim = cli_cfg.sub_dim;
         cfg.avq_alpha = cli_cfg.avq_alpha;
+        cfg.r_max = cli_cfg.r_max;
+        cfg.rerank_factor = cli_cfg.rerank_factor;
+        cfg.prefetch_offset = cli_cfg.prefetch_offset;
         // 注：avx512 和 batch_mode 不走 CLI，由 feature flag 控制（优先级最高）
     }
 

@@ -25,7 +25,7 @@ pub mod f16;
 pub enum DistanceMetric {
     /// L2 欧氏距离（主线）
     L2,
-    /// 内积距离（扩展，当前不实现，设计文档 F.8）
+    /// 内积距离（⚠️ 未实现，设计文档 F.8 预留适配边界）
     #[allow(dead_code)]
     InnerProduct,
 }
@@ -55,6 +55,7 @@ pub use f16::{
     l2_f16_mixed_avx512, l2_f16_mixed_avx2,
     f32_to_f16_slice, f16_to_f32_slice,
     is_f16c_supported, is_avx512_and_f16c_supported, is_avx2_and_f16c_supported,
+    F16Dataset,
 };
 
 /// 统一 SIMD 分发：AVX-512 > AVX2 > 动态兜底

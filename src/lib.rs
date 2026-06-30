@@ -6,7 +6,7 @@
 //! - 量化误差反向影响图剪枝决策的图网络结构
 //!
 //! 主战场：ann-benchmarks 单查询 recall-QPS Pareto frontier（fit-in-RAM，单 CPU）
-//! 扩展场景：big-ann-benchmarks 100M/1B 级 SSD
+//! 扩展场景：big-ann-benchmarks 100M/1B 级 SSD（⚠️ 未实现，仅预留接口）
 //!
 //! 设计文档冻结版（修订 2），实现依照文档分层组织：
 //! - 第一层：距离计算核

@@ -18,6 +18,19 @@ use crate::distance::l2_simd;
 use rand_chacha::ChaCha8Rng;
 use rand::{SeedableRng, Rng};
 
+// ─── 具名常量（0B.8：魔法数字提取） ─────────────────────────────────
+
+/// 微调学习率
+const FINETUNE_LR: f32 = 1e-4;
+/// 批次内高分对采样的批次大小
+const HIGH_SCORE_BATCH_SIZE: usize = 64;
+/// 训练信号最大采样对数
+const MAX_TRAINING_PAIRS: usize = 1000;
+/// 预采样近邻对中的近邻数 K
+const NEIGHBOR_SAMPLE_K: usize = 10;
+/// 预采样近邻对的候选采样数上限
+const NEIGHBOR_SAMPLE_SIZE: usize = 1000;
+
 /// 量化模式
 ///
 /// 设计文档：PQ / OPQ / AVQ 三种模式
@@ -208,7 +221,7 @@ impl AVQCodebook {
             return;
         }
         let n = vectors.len() / self.dim;
-        let lr = 1e-4;
+        let lr = FINETUNE_LR;
 
         // 诊断：初始 loss
         let initial_recon = Self::reconstruction_loss(&self.centers, vectors, self.dim, self.m,
@@ -350,8 +363,8 @@ impl AVQCodebook {
     /// 设计文档附录 B：对训练集做批次内点积，选 high-score 对
     fn sample_high_score_pairs(vectors: &[f32], dim: usize, n: usize) -> Vec<(u32, u32, f32)> {
         let mut pairs = Vec::new();
-        let batch_size = 64.min(n);
-        let max_pairs = 1000;
+        let batch_size = HIGH_SCORE_BATCH_SIZE.min(n);
+        let max_pairs = MAX_TRAINING_PAIRS;
 
         // 批次内采样高分对
         for batch_start in (0..n).step_by(batch_size) {
@@ -394,11 +407,11 @@ impl AVQCodebook {
         use rand::seq::index::sample;
 
         let mut pairs = Vec::new();
-        let max_pairs = 1000;
-        let k_neighbors = 10;
+        let max_pairs = MAX_TRAINING_PAIRS;
+        let k_neighbors = NEIGHBOR_SAMPLE_K;
         // 评估报告 M3：随机采样候选，避免 O(n²) 暴力扫描
         // sample_size = min(n, 1000)，时间复杂度 O(n * 1000 * dim)
-        let sample_size = n.min(1000).saturating_sub(1);
+        let sample_size = n.min(NEIGHBOR_SAMPLE_SIZE).saturating_sub(1);
         let mut rng = crate::build::ChaCha8Rng::seed_from(42);
 
         for i in 0..n {

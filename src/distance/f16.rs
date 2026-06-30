@@ -332,6 +332,58 @@ pub fn is_avx2_and_f16c_supported() -> bool {
     std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c")
 }
 
+// ─── F16Dataset：预量化数据集 ─────────────────────────────────────
+
+/// f16 预量化数据集
+///
+/// 将 f32 向量预量化为 f16 紧凑存储，用于 rerank 阶段带宽优化。
+/// 内存占用 = f32 的 50%（2B/元素 vs 4B/元素）
+///
+/// 适用场景：高维数据集（≥512 维）的 rerank 阶段
+/// 低维数据集（SIFT-128）：rerank 数据已在 L1 cache，带宽不是瓶颈
+pub struct F16Dataset {
+    /// f16 编码的向量（紧凑存储，连续布局）
+    codes: Vec<F16>,
+    /// 维度
+    dim: usize,
+}
+
+impl F16Dataset {
+    /// 从 f32 向量构建 f16 预量化数据集
+    pub fn build(vectors: &[f32], dim: usize) -> Self {
+        let codes = f32_to_f16_slice(vectors);
+        Self { codes, dim }
+    }
+
+    /// 获取原始 f16 码区（用于 rerank 等需要全量访问的场景）
+    #[inline(always)]
+    pub fn codes(&self) -> &[F16] {
+        &self.codes
+    }
+
+    /// 获取指定节点的 f16 向量
+    #[inline(always)]
+    pub fn vector(&self, id: usize) -> &[F16] {
+        &self.codes[id * self.dim..(id + 1) * self.dim]
+    }
+
+    /// 维度
+    #[inline(always)]
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// 节点总数
+    pub fn len(&self) -> usize {
+        self.codes.len() / self.dim
+    }
+
+    /// 是否为空
+    pub fn is_empty(&self) -> bool {
+        self.codes.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

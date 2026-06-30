@@ -354,9 +354,9 @@ impl super::serialize::Serializable for HybridBlockedCsr {
                 "HybridBlockedCsr body too short",
             )));
         }
-        let n = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-        let r_max = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-        let mb_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+        let n = u64::from_le_bytes(bytes[0..8].try_into()?) as usize;
+        let r_max = u64::from_le_bytes(bytes[8..16].try_into()?) as usize;
+        let mb_len = u64::from_le_bytes(bytes[16..24].try_into()?) as usize;
         let mb_bytes_needed = mb_len * 4;
         if bytes.len() < 24 + mb_bytes_needed + 8 {
             return Err(super::serialize::SerializeError::Io(std::io::Error::new(
@@ -369,7 +369,7 @@ impl super::serialize::Serializable for HybridBlockedCsr {
         ).to_vec();
 
         let mut off = 24 + mb_bytes_needed;
-        let ov_count = u64::from_le_bytes(bytes[off..off+8].try_into().unwrap()) as usize;
+        let ov_count = u64::from_le_bytes(bytes[off..off+8].try_into()?) as usize;
         off += 8;
 
         let mut overflow: Vec<Vec<u32>> = vec![Vec::new(); n];
@@ -380,9 +380,9 @@ impl super::serialize::Serializable for HybridBlockedCsr {
                     "overflow entry header truncated",
                 )));
             }
-            let node_id = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize;
+            let node_id = u32::from_le_bytes(bytes[off..off+4].try_into()?) as usize;
             off += 4;
-            let v_len = u64::from_le_bytes(bytes[off..off+8].try_into().unwrap()) as usize;
+            let v_len = u64::from_le_bytes(bytes[off..off+8].try_into()?) as usize;
             off += 8;
             if off + v_len * 4 > bytes.len() {
                 return Err(super::serialize::SerializeError::Io(std::io::Error::new(

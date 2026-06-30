@@ -111,6 +111,8 @@ impl SQ8Params {
     }
 
     /// 解码单个 u8 code → f32 近似向量
+    ///
+    /// 保留供 qa_prune_bench.rs 和消融实验使用（非搜索热路径）
     #[allow(dead_code)]
     pub fn decode(&self, code: &[u8]) -> Vec<f32> {
         assert_eq!(code.len(), self.dim);
@@ -327,7 +329,7 @@ pub fn l2_sq8(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
     }
 }
 
-/// 标量 fallback（target-cpu=native + AVX2 时编译期排除，保留供非 AVX2 路径）
+/// 标量 fallback（target-cpu=native + AVX2 时编译期排除，保留供非 AVX2 平台回退）
 #[allow(dead_code)]
 #[inline(always)]
 fn l2_sq8_scalar(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
@@ -340,7 +342,7 @@ fn l2_sq8_scalar(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
     sum
 }
 
-/// 无加权标量 fallback
+/// 无加权标量 fallback（target-cpu=native + AVX2 时编译期排除）
 #[allow(dead_code)]
 #[inline(always)]
 fn l2_sq8_raw_scalar(qa: &[u8], qb: &[u8]) -> f32 {

@@ -133,7 +133,7 @@ impl VisitedTracker {
         self.visited.is_empty()
     }
 
-    /// history 容量
+    /// history 容量（诊断接口，用于验证预分配是否充足）
     #[allow(dead_code)]
     pub fn history_capacity(&self) -> usize {
         self.history.capacity()

@@ -11,9 +11,11 @@
 //! 4. 双向连接 + 度数控制
 
 use crate::distance::l2_simd;
+use crate::distance::F16Dataset;
 use crate::memory::{HybridBlockedCsr, VisitedTracker};
 use crate::quant::{SQ8Dataset, PQ4Dataset, PQ8Dataset};
 use super::adaptive_ef::AdaptiveEfConfig;
+use super::refiner::{rerank_f32, rerank_f16};
 use crate::build::ChaCha8Rng;
 use crate::build::{BuildConfig, BuildMetadata};
 use crate::graph::navigation::NavigationLayer;
@@ -627,18 +629,18 @@ impl VamanaGraph {
 
             let neighbors = storage.neighbors(node);
 
-            // 第一遍：收集未访问邻居到 edge_buf
-            let mut edge_size = 0usize;
-            for &v in neighbors {
-                if edge_size >= 128 {
-                    break;
-                }
-                // SAFETY: v 来自图边，保证 < n
-                if unsafe { visited.visit_unchecked(v) } {
-                    edge_buf[edge_size] = v;
-                    edge_size += 1;
-                }
-            }
+// 第一遍：收集未访问邻居到 edge_buf（branchless — A8 优化）
+// 与 SQ8/PQ4/PQ8 路径保持一致，用 cmov 代替不可预测分支
+let mut edge_size = 0usize;
+for &v in neighbors {
+if edge_size >= 128 {
+break;
+}
+// SAFETY: v 来自图边，保证 < n
+let is_new = unsafe { visited.visit_unchecked_branchless(v) };
+unsafe { *edge_buf.get_unchecked_mut(edge_size) = v; }
+edge_size += is_new as usize;
+}
 
             // 预取前 po 个邻居的向量数据
             let prefetch_count = po.min(edge_size);
@@ -1263,9 +1265,9 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
         }
 
         // 解析文件体
-        let n = u64::from_le_bytes(body[0..8].try_into().unwrap()) as usize;
-        let dim = u64::from_le_bytes(body[8..16].try_into().unwrap()) as usize;
-        let entry_point = u32::from_le_bytes(body[16..20].try_into().unwrap());
+        let n = u64::from_le_bytes(body[0..8].try_into()?) as usize;
+        let dim = u64::from_le_bytes(body[8..16].try_into()?) as usize;
+        let entry_point = u32::from_le_bytes(body[16..20].try_into()?);
 
         let mut offset = 20usize;
 
@@ -1277,7 +1279,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
                     "body too short for metadata trailer header",
                 )));
             }
-            let meta_len = u32::from_le_bytes(body[offset..offset+4].try_into().unwrap()) as usize;
+            let meta_len = u32::from_le_bytes(body[offset..offset+4].try_into()?) as usize;
             offset += 4;
             if body.len() < offset + meta_len {
                 return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
@@ -1305,7 +1307,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
                     "body too short for layered nav trailer header",
                 )));
             }
-            let nav_len = u32::from_le_bytes(body[offset..offset+4].try_into().unwrap()) as usize;
+            let nav_len = u32::from_le_bytes(body[offset..offset+4].try_into()?) as usize;
             offset += 4;
             if body.len() < offset + nav_len {
                 return Err(crate::memory::serialize::SerializeError::Io(std::io::Error::new(
@@ -1377,6 +1379,8 @@ pub struct GraphSearcher<'a> {
     query_code_buf: Vec<u8>,
     /// Rerank 倍数（放在 struct 末尾避免干扰热路径 cache 对齐）
     rerank_factor: usize,
+    /// 可选的 f16 预量化数据集（用于 f16 rerank，高维场景带宽减半）
+    f16: Option<&'a F16Dataset>,
 }
 
 impl<'a> GraphSearcher<'a> {
@@ -1403,6 +1407,7 @@ impl<'a> GraphSearcher<'a> {
             pool: LinearPool::new(ef_search),
             query_code_buf: vec![0u8; dim],
             rerank_factor: 3,
+            f16: None,
         }
     }
 
@@ -1435,6 +1440,7 @@ impl<'a> GraphSearcher<'a> {
             pool: LinearPool::new(ef_search),
             query_code_buf: vec![0u8; dim],
             rerank_factor: 3,
+            f16: None,
         }
     }
 
@@ -1450,6 +1456,18 @@ impl<'a> GraphSearcher<'a> {
     /// 设置 rerank 倍数（SQ8 搜索后 f32 重排序的候选数 = k × factor）
     pub fn with_rerank_factor(&mut self, factor: usize) -> &mut Self {
         self.rerank_factor = factor.max(1);
+        self
+    }
+
+    /// 启用 f16 预量化 rerank（高维场景带宽减半）
+    ///
+    /// 启用后 search_sq8 的 rerank 阶段使用 f16 半精度距离代替 f32。
+    /// 内存带宽减半（2B/元素 vs 4B/元素），F16C 指令在寄存器中转回 f32 计算。
+    ///
+    /// 适用场景：维度 ≥ 512 的高维数据集
+    /// 低维数据集（SIFT-128）：rerank 数据已在 L1 cache，收益极小
+    pub fn with_f16(&mut self, f16: &'a F16Dataset) -> &mut Self {
+        self.f16 = Some(f16);
         self
     }
 
@@ -1609,23 +1627,15 @@ impl<'a> GraphSearcher<'a> {
 
         self.last_visited_count = self.visited.visited_count();
 
-        // 5. f32 部分 rerank：candidates 已按 SQ8 距离升序，
-        //    SQ8 排序与 f32 高度一致，只需对 top-N rerank 即可覆盖 top-k
-        let rerank_n = (k * self.rerank_factor).max(k).min(candidates.len());
-        let mut results: Vec<(u32, f32)> = candidates
-            .into_iter()
-            .take(rerank_n)
-            .map(|(id, _sq8_dist)| {
-                let f32_dist = l2_simd(
-                    query,
-                    &self.vectors[id as usize * dim..(id as usize + 1) * dim],
-                );
-                (id, f32_dist)
-            })
-            .collect();
-        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-        results.truncate(k);
-        results
+        // 5. 精量化 rerank（Refiner 框架）：candidates 已按 SQ8 距离升序，
+        //    SQ8 排序与精确距离高度一致，只需对 top-N rerank 即可覆盖 top-k
+        //    f16 模式：带宽减半（高维场景收益显著）
+        //    f32 模式：全精度（低维默认）
+        if let Some(f16_ds) = self.f16 {
+            rerank_f16(f16_ds.codes(), dim, query, candidates, k, self.rerank_factor)
+        } else {
+            rerank_f32(self.vectors, dim, query, candidates, k, self.rerank_factor)
+        }
     }
 
     /// SQ8 量化搜索（Phase 1 Step 0）
@@ -1821,6 +1831,7 @@ impl<'a> GraphSearcher<'a> {
         let graph = self.graph;
         let navigation = self.navigation;
         let adaptive_ef = self.adaptive_ef.as_ref();
+        let f16_codes = self.f16.map(|ds| ds.codes());
 
         // 公共逻辑：选择 entry_point + 计算 ef（SQ8/f32 路径共享，OPT-6 去重）
         let resolve_entry_and_ef = |query: &[f32]| -> (u32, usize) {
@@ -1846,23 +1857,13 @@ impl<'a> GraphSearcher<'a> {
             (entry_point, ef)
         };
 
-        // 公共逻辑：f32 rerank + sort + truncate
+        // 公共逻辑：精量化 rerank（Refiner 框架，支持 f32/f16）
         let rerank_and_sort = move |cands: Vec<(u32, f32)>, query: &[f32]| -> Vec<(u32, f32)> {
-            let rerank_n = (k * rerank_factor).max(k).min(cands.len());
-            let mut results: Vec<(u32, f32)> = cands
-                .into_iter()
-                .take(rerank_n)
-                .map(|(id, _)| {
-                    let d = l2_simd(
-                        query,
-                        &vectors[id as usize * dim..(id as usize + 1) * dim],
-                    );
-                    (id, d)
-                })
-                .collect();
-            results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-            results.truncate(k);
-            results
+            if let Some(f16_vecs) = f16_codes {
+                rerank_f16(f16_vecs, dim, query, cands, k, rerank_factor)
+            } else {
+                rerank_f32(vectors, dim, query, cands, k, rerank_factor)
+            }
         };
 
         queries

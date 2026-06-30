@@ -21,7 +21,7 @@ pub fn l2_scalar(a: &[f32], b: &[f32]) -> Distance {
     sum
 }
 
-/// f32 标量内积距离（1 - inner product，用于 MIPS 场景，当前预留）
+/// 标量内积距离（⚠️ 未实现 IP 距离时保留，设计文档 F.8）
 #[allow(dead_code)]
 #[inline(always)]
 pub fn ip_scalar(a: &[f32], b: &[f32]) -> Distance {

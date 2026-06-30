@@ -56,6 +56,8 @@ impl QueryContext {
     }
 
     /// 设置 NUMA 亲和性（预留接口，当前不强制绑定）
+    ///
+    /// ⚠️ 未实现：仅存储偏好，不实际绑定 CPU 亲和性
     #[allow(dead_code)]
     pub fn set_numa_node(&mut self, node: usize) {
         self.numa_node = Some(node);
@@ -72,7 +74,7 @@ pub const GEMM_THRESHOLD: usize = 8;
 /// - 候选数 <= 8 走标量 SIMD 路径
 /// - 候选数 > 8 走 GEMM 路径（pack_vectors_aligned + gemm_path）
 ///
-/// 当前实现为标量回退，GEMM 路径在 Week 3-4 接入
+/// ⚠️ GEMM 路径未实现：当前 gemm_path 为标量回退（评估报告 M1）
 #[cfg(feature = "batch_mode")]
 pub fn batch_distance(
     ctx: &mut QueryContext,
@@ -132,7 +134,8 @@ fn pack_vectors_aligned(
 
 /// GEMM 路径（候选数多时）
 ///
-/// 当前为标量回退实现，Week 3-4 接入真正 GEMM
+/// ⚠️ 未实现：当前为标量回退，尚未接入真正矩阵乘法（评估报告 M1）
+/// 真正 GEMM 需要 BLIS/mkl-blis 或 hand-written AVX-512 GEMM kernel
 #[cfg(feature = "batch_mode")]
 fn gemm_path(queries: &[&[f32]], packed: &[f32], dim: usize) -> Vec<Vec<f32>> {
     use crate::distance::l2_simd;
