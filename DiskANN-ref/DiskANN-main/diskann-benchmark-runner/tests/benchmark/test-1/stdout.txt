@@ -1,3 +1,0 @@
-Available input kinds are listed below:
-    test-input-dim
-    test-input-types

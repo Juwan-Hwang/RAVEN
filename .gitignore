@@ -1,11 +1,40 @@
-/target
-/data
+# Build artifacts
+/target/
+**/target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyd
+*.egg-info/
+*.whl
+
+# Dataset files (too large for git)
+/data/
 *.fvecs
 *.ivecs
 *.bvecs
+*.h5
 *.tgz
 *.tar.gz
-*.h5
+
+# Reference repos (not part of RAVEN)
+/DiskANN-ref/
+/glass-ref/
+/NGT-ref/
+/patann-main/
+
+# Zip archives
+*.zip
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Misc
 *.log
-Cargo.lock
-pending_publish.md
+*.tmp

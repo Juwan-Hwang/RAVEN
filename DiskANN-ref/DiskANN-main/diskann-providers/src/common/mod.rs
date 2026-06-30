@@ -1,9 +1,0 @@
-/*
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT license.
- */
-mod minmax_repr;
-pub use minmax_repr::{BufferedFnPtr, FnPtr, MinMax4, MinMax8, MinMaxElement};
-
-mod ignore_lock_poison;
-pub use ignore_lock_poison::IgnoreLockPoison;
