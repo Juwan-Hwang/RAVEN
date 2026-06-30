@@ -1,41 +1,24 @@
-# RAVEN ann-benchmarks Dockerfile
-# 设计文档第六层模式一：ann_benchmarks/algorithms/yourlib/
-#
-# 构建步骤：
-#   1. 基于 Rust 官方镜像编译 RAVEN 库 + benchmark 二进制
-#   2. 基于 Python 镜像运行 ann-benchmarks 框架
-#
-# 用法（在 ann-benchmarks 仓库根目录）：
-#   python3 run.py --algorithm raven --dataset fashion-mnist
+FROM ann-benchmarks
 
-FROM docker.m.daocloud.io/library/rust:1.85-slim AS builder
+# 安装 Rust 工具链
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
 
+# 安装 maturin（PyO3 构建工具）
+RUN pip3 install maturin numpy
+
+# 复制 RAVEN 源码
+COPY . /raven
 WORKDIR /raven
-COPY . .
 
-# 编译 release 二进制（含 AVX2 内核）
-RUN cargo build --release --bin raven_ann_bench
+# 编译 RAVEN Python 扩展（release 优化 + AVX2 target）
+# ann-benchmarks Docker 环境通常是 x86_64，支持 AVX2
+RUN RUSTFLAGS="-C target-cpu=native" maturin build --release --features python
 
-# 提取编译产物
-RUN cp target/release/raven_ann_bench /usr/local/bin/raven_ann_bench
+# 安装编译好的 wheel
+RUN pip3 install target/wheels/*.whl
 
-
-FROM docker.m.daocloud.io/library/python:3.11-slim
-
-# 安装 ann-benchmarks 依赖（不依赖 scikit-learn，用暴力 KNN）
-# 使用国内 PyPI 镜像加速
-RUN pip install --no-cache-dir \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    h5py \
-    numpy
-
-# 从 builder 阶段复制 RAVEN 二进制
-COPY --from=builder /usr/local/bin/raven_ann_bench /usr/local/bin/raven_ann_bench
-
-# 复制 Python wrapper
-COPY ann_benchmarks/algorithms/raven/__init__.py /app/__init__.py
+# 验证导入
+RUN python3 -c 'import raven; print("RAVEN Python binding loaded")'
 
 WORKDIR /app
-
-# ann-benchmarks 框架会自动调用 RAVEN 类
-ENV RAVEN_BIN=/usr/local/bin/raven_ann_bench
