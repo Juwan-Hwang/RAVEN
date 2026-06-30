@@ -113,7 +113,7 @@ fn main() {
         max_iterations: 2,
         saturate: false,
         enable_layered_nav: true,
-        nav_m: 16,
+        nav_m: 32,
         prune_strategy: PruneStrategy::DirectionalPrune,
         ..Default::default()
     };

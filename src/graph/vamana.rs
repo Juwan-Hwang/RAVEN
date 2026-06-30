@@ -51,7 +51,8 @@ pub r_soft: usize,
     pub saturate: bool,
     /// 是否启用分层导航（设计文档：保留随机层级，可与 HNSW 直接对比）
     pub enable_layered_nav: bool,
-    /// 分层导航参数 M（层间缩减比，默认 16）
+    /// 分层导航参数 M（层间缩减比，默认 32）
+/// 全参数扫描确认 nav_m=32 比 16 QPS +3.3%、recall +0.03pp、CV 更低（3层 vs 4层导航）
     pub nav_m: usize,
     /// 剪枝策略：RobustPrune（Vamana 标准）或 DirectionalPrune（RAVEN 超越方案）
     /// DirectionalPrune 无 saturation，用 r_min 连通性补底替代 r_max 填充
@@ -71,7 +72,7 @@ impl Default for VamanaBuildConfig {
 max_iterations: 2,
 saturate: true,
 enable_layered_nav: true,
-nav_m: 16,
+nav_m: 32,
 prune_strategy: super::robust_prune::PruneStrategy::RobustPrune,
         }
     }

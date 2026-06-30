@@ -246,7 +246,7 @@ fn main() {
             max_iterations: 2,
             saturate: !directional,
             enable_layered_nav: true,
-            nav_m: 16,
+            nav_m: 32,
             prune_strategy: if directional {
                 PruneStrategy::DirectionalPrune
             } else {

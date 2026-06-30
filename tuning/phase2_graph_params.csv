@@ -1,0 +1,4 @@
+phase,param,value,qps,recall,cv_pct,build_time_s
+2f,prune_dir,1,18338,0.9626,1.6,0
+2f,prune_rob_sat,1,17826,0.9680,0.2,0
+2f,prune_rob_nosat,1,17728,0.9680,0.4,352

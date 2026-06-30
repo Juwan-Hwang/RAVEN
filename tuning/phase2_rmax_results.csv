@@ -1,0 +1,5 @@
+phase,param,value,qps,recall,cv_pct,build_time_s,note
+2a,r_max,24,21109,0.9452,0.7,281,
+2a,r_max,32,17916,0.9626,0.6,386,current default
+2a,r_max,48,14479,0.9749,0.4,539,
+2a,r_max,64,0,0,0,659,CRASH: heap corruption during benchmark

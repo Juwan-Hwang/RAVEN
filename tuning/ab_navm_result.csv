@@ -1,0 +1,3 @@
+config,median_qps,mean_qps,recall
+nav_m=16,15556,14384,0.9626
+nav_m=32,17324,14942,0.9629
