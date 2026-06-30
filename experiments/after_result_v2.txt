@@ -1,5 +1,0 @@
-=== Quick Recall Check (SIFT1M) ===
-[build] rayon threads: 16
-[build] init_random_graph done, entry=medoid[594]
-[build] iter 1/2 alpha=1
-^C

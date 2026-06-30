@@ -35,6 +35,10 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Docs & experiments (local only)
+/docs/
+/experiments/
+
 # Misc
 *.log
 *.tmp
