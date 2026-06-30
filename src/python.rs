@@ -9,8 +9,17 @@ use numpy::{PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 
 use crate::build::ChaCha8Rng;
 use crate::graph::{VamanaBuildConfig, VamanaGraph, GraphSearcher, PruneStrategy};
-use crate::quant::SQ8Dataset;
+use crate::quant::{SQ8Dataset, SQ4Dataset};
 use crate::memory::serialize::Serializable;
+
+/// 量化方式
+#[derive(Clone, Copy, PartialEq)]
+enum Quant {
+    /// 8-bit per dimension（128B/vector, SIFT-128）
+    Sq8,
+    /// 4-bit per dimension（64B/vector, SIFT-128），内存减半 + 带宽减半
+    Sq4,
+}
 
 /// RAVEN 索引（构建 + 序列化）
 #[pyclass(name = "Index")]
@@ -18,12 +27,15 @@ struct PyIndex {
     graph: Option<VamanaGraph>,
     vectors: Vec<f32>,
     dim: usize,
-    // 构建参数（由 __init__ 传入，build() 时使用）
+    // 构建参数
     r: usize,
     l: usize,
     alpha: f32,
     nav_m: usize,
     directional: bool,
+    // 搜索参数
+    quant: Quant,
+    rerank: usize,
 }
 
 #[pymethods]
@@ -32,10 +44,29 @@ impl PyIndex {
     ///
     /// 参数对应全参数扫描后的最优配置：
     ///   R=32, L=200, alpha=1.2, nav_m=32, directional=True
+    ///   quantization="sq8" (default) 或 "sq4"
+    ///   rerank_factor=3 (SQ8) 或 8 (SQ4)
     #[new]
-    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true))]
-    fn new(metric: &str, dim: usize, r: usize, l: usize, alpha: f32, nav_m: usize, directional: bool) -> PyResult<Self> {
-        let _ = metric; // L2 only for now
+    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=3))]
+    fn new(
+        metric: &str,
+        dim: usize,
+        r: usize,
+        l: usize,
+        alpha: f32,
+        nav_m: usize,
+        directional: bool,
+        quantization: &str,
+        rerank_factor: usize,
+    ) -> PyResult<Self> {
+        let _ = metric; // L2 only
+        let quant = match quantization.to_lowercase().as_str() {
+            "sq8" => Quant::Sq8,
+            "sq4" => Quant::Sq4,
+            other => return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("unknown quantization '{}', expected 'sq8' or 'sq4'", other)
+            )),
+        };
         Ok(PyIndex {
             graph: None,
             vectors: Vec::new(),
@@ -45,6 +76,8 @@ impl PyIndex {
             alpha,
             nav_m,
             directional,
+            quant,
+            rerank: rerank_factor,
         })
     }
 
@@ -59,7 +92,6 @@ impl PyIndex {
             ));
         }
 
-        // 拷贝为连续 f32（numpy 可能不是 C-contiguous）
         self.vectors = array.as_standard_layout().to_owned().into_raw_vec();
 
         let config = VamanaBuildConfig {
@@ -84,25 +116,35 @@ impl PyIndex {
         Ok(())
     }
 
-    /// 创建搜索器（移动 graph + vectors 到 Searcher，启用 SQ8 量化）
+    /// 创建搜索器（移动 graph + vectors 到 Searcher，启用量化搜索）
     ///
-    /// 调用后 Index 不再持有数据，Searcher 独占所有权。
-    /// 这是为了绕过 GraphSearcher<'a> 的生命周期限制。
+    /// 根据 quantization 参数构建 SQ8 或 SQ4 数据集。
     fn searcher(&mut self) -> PyResult<PySearcher> {
         let graph = self.graph.take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Index not built yet, call build() first")
         })?;
 
-        let sq8 = SQ8Dataset::build(&self.vectors, self.dim);
+        let vectors = std::mem::take(&mut self.vectors);
+        let (sq8, sq4) = match self.quant {
+            Quant::Sq8 => {
+                let ds = SQ8Dataset::build(&vectors, self.dim);
+                (Some(ds), None)
+            }
+            Quant::Sq4 => {
+                let ds = SQ4Dataset::build(&vectors, self.dim);
+                (None, Some(ds))
+            }
+        };
 
         Ok(PySearcher {
-            vectors: std::mem::take(&mut self.vectors),
+            vectors,
             dim: self.dim,
             graph,
             sq8,
+            sq4,
             ef: 50,
             po: 8,
-            rerank: 3,
+            rerank: self.rerank,
         })
     }
 
@@ -130,21 +172,23 @@ impl PyIndex {
             alpha: 1.2,
             nav_m: 32,
             directional: true,
+            quant: Quant::Sq8,
+            rerank: 3,
         })
     }
 }
 
-/// RAVEN 搜索器（SQ8 量化搜索 + f32 rerank）
+/// RAVEN 搜索器（量化搜索 + f32 rerank）
 ///
-/// 拥有 graph + vectors + sq8 的完整所有权。
-/// 每次 search() 创建临时 GraphSearcher（借用内部数据），搜索后丢弃。
-/// VisitedTracker 分配 ~16KB（SIFT-1M），~1µs，相对于 ~50µs 搜索可忽略。
+/// 拥有 graph + vectors + 量化数据集的完整所有权。
+/// 根据 quantization 类型选择 search_sq8 或 search_sq4 路径。
 #[pyclass(name = "Searcher")]
 struct PySearcher {
     vectors: Vec<f32>,
     dim: usize,
     graph: VamanaGraph,
-    sq8: SQ8Dataset,
+    sq8: Option<SQ8Dataset>,
+    sq4: Option<SQ4Dataset>,
     ef: usize,
     po: usize,
     rerank: usize,
@@ -170,11 +214,18 @@ impl PySearcher {
         let query = q.as_slice()?;
 
         let mut searcher = GraphSearcher::new(&self.vectors, &self.graph, self.ef);
-        searcher.with_sq8(&self.sq8);
         searcher.with_prefetch_offset(self.po);
         searcher.with_rerank_factor(self.rerank);
 
-        let results = searcher.search_sq8(query, k);
+        let results = if let Some(ref sq8) = self.sq8 {
+            searcher.with_sq8(sq8);
+            searcher.search_sq8(query, k)
+        } else if let Some(ref sq4) = self.sq4 {
+            searcher.with_sq4(sq4);
+            searcher.search_sq4(query, k)
+        } else {
+            searcher.search(query, k)
+        };
 
         let ids: Vec<usize> = results.iter().map(|(id, _)| *id as usize).collect();
         Ok(ids.to_pyarray_bound(py).into())
@@ -199,7 +250,11 @@ impl PySearcher {
             .collect();
 
         let mut searcher = GraphSearcher::new(&self.vectors, &self.graph, self.ef);
-        searcher.with_sq8(&self.sq8);
+        if let Some(ref sq8) = self.sq8 {
+            searcher.with_sq8(sq8);
+        } else if let Some(ref sq4) = self.sq4 {
+            searcher.with_sq4(sq4);
+        }
         let results = searcher.batch_search(&query_refs, k);
 
         let mut ids = vec![0usize; nq * k];

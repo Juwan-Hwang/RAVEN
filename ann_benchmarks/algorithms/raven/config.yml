@@ -7,29 +7,57 @@ float:
     module: ann_benchmarks.algorithms.raven
     name: raven
     run_groups:
-      # 最优配置（全参数扫描确认）
-      Vamana-opt:
+      # ═══ 主提交曲线：SQ8（高 recall 段优势） ═══
+      # recall 0.94-0.99，覆盖完整 Pareto 前沿
+      # 最优配置：nav_m=32, DirectionalPrune, SQ8 RAW, po=8, rr=3
+      raven-sq8:
         args:
           R: 32
           L: 200
           alpha: 1.2
           nav_m: 32
           directional: true
-        query_args: [[40, 45, 50, 55, 60, 65, 70, 80, 100]]
-      # 对比组：不同 R
-      Vamana-R24:
+          quantization: sq8
+          rerank_factor: 3
+        query_args:
+          ef_search: [40, 45, 50, 55, 60, 65, 70, 80, 100]
+
+      # ═══ 补充曲线：SQ4（中低 recall 段 QPS 优势） ═══
+      # 内存减半（64MB vs 128MB），带宽减半 → +11-14% QPS
+      # rr=8 弥补 4-bit 量化误差（rr=3→5 recall 跳变饱和）
+      raven-sq4:
+        args:
+          R: 32
+          L: 200
+          alpha: 1.2
+          nav_m: 32
+          directional: true
+          quantization: sq4
+          rerank_factor: 8        # ← 关键：不是 3，是 8
+        query_args:
+          ef_search: [40, 45, 50, 55, 65, 70, 80, 100]  # skip 60: cache aliasing at ef×rr=480
+
+      # ═══ 对比组：不同 R ═══
+      raven-sq8-R24:
         args:
           R: 24
           L: 200
           alpha: 1.2
           nav_m: 32
           directional: true
-        query_args: [[40, 50, 60, 70, 100]]
-      Vamana-R48:
+          quantization: sq8
+          rerank_factor: 3
+        query_args:
+          ef_search: [40, 50, 60, 70, 100]
+
+      raven-sq8-R48:
         args:
           R: 48
           L: 200
           alpha: 1.2
           nav_m: 32
           directional: true
-        query_args: [[40, 50, 60, 70, 100]]
+          quantization: sq8
+          rerank_factor: 3
+        query_args:
+          ef_search: [40, 50, 60, 70, 100]
