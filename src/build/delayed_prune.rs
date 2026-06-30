@@ -12,7 +12,7 @@
 //!   RobustPrune 调用次数显著降低，建图速度预期大幅提升
 
 use crate::memory::HybridBlockedCsr;
-use crate::graph::RobustPrune;
+use crate::graph::{PruneStrategy, prune_dispatch};
 
 /// 延迟剪枝控制器
 ///
@@ -72,8 +72,11 @@ impl DelayedPruneController {
             }
             let mut all: Vec<u32> = main.to_vec();
             all.extend_from_slice(overflow);
-            // 用 RobustPrune 替代 truncate（设计文档硬约束）
-            let pruned = RobustPrune::prune(&all, node, vectors, dim, alpha, self.r_max, alpha > 1.0);
+            // 用 DirectionalPrune 替代 truncate（设计文档硬约束）
+            let pruned = prune_dispatch(
+                PruneStrategy::DirectionalPrune,
+                &all, node, vectors, dim, alpha, self.r_max, false,
+            );
             storage.set_neighbors(node, &pruned);
         }
     }

@@ -719,17 +719,18 @@ impl VamanaGraph {
 
             let neighbors = storage.neighbors(node);
 
-            // 第一遍：收集未访问邻居
+            // 第一遍：收集未访问邻居（branchless — A8 优化）
+            // 图遍历中"邻居是否已访问"取决于图拓扑，本质不可预测。
+            // branchless 消除分支误预测惩罚，用 cmov 代替 if-branch。
             let mut edge_size = 0usize;
             for &v in neighbors {
                 if edge_size >= 128 {
                     break;
                 }
                 // SAFETY: v 来自图边，保证 < n
-                if unsafe { visited.visit_unchecked(v) } {
-                    edge_buf[edge_size] = v;
-                    edge_size += 1;
-                }
+                let is_new = unsafe { visited.visit_unchecked_branchless(v) };
+                unsafe { *edge_buf.get_unchecked_mut(edge_size) = v; }
+                edge_size += is_new as usize;
             }
 
             // 预取前 po 个邻居的 SQ8 码
@@ -814,16 +815,15 @@ impl VamanaGraph {
 
             let neighbors = storage.neighbors(node);
 
-            // 第一遍：收集未访问邻居
+            // 第一遍：收集未访问邻居（branchless — A8）
             let mut edge_size = 0usize;
             for &v in neighbors {
                 if edge_size >= 128 {
                     break;
                 }
-                if visited.visit(v) {
-                    edge_buf[edge_size] = v;
-                    edge_size += 1;
-                }
+                let is_new = unsafe { visited.visit_unchecked_branchless(v) };
+                unsafe { *edge_buf.get_unchecked_mut(edge_size) = v; }
+                edge_size += is_new as usize;
             }
 
             // 预取前 po 个邻居的 PQ4 码（M/2 bytes，比 f32 小 16x）
@@ -898,16 +898,15 @@ impl VamanaGraph {
 
             let neighbors = storage.neighbors(node);
 
-            // 第一遍：收集未访问邻居
+            // 第一遍：收集未访问邻居（branchless — A8）
             let mut edge_size = 0usize;
             for &v in neighbors {
                 if edge_size >= 128 {
                     break;
                 }
-                if visited.visit(v) {
-                    edge_buf[edge_size] = v;
-                    edge_size += 1;
-                }
+                let is_new = unsafe { visited.visit_unchecked_branchless(v) };
+                unsafe { *edge_buf.get_unchecked_mut(edge_size) = v; }
+                edge_size += is_new as usize;
             }
 
             // 预取前 po 个邻居的 PQ8 码（M bytes，比 f32 小 16x）

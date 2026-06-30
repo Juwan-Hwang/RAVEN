@@ -13,7 +13,8 @@
 use crate::build::BuildConfig;
 use crate::build::ChaCha8Rng;
 use crate::graph::{
-    VamanaGraph, VamanaBuildConfig, RobustPrune,
+    VamanaGraph, VamanaBuildConfig, PruneStrategy,
+    prune_dispatch,
     QuantAwareRobustPrune, QuantAwarePruneConfig, NormalizationScheme,
 };
 use crate::graph::quant_aware_prune::EPSILON;
@@ -159,9 +160,10 @@ l_build: self.config.l_build,
 r_max: self.config.r_max,
 r_soft: self.config.r_soft,
 max_iterations: 2,
-saturate: true,
+saturate: false,
 enable_layered_nav: true,
 nav_m: 16,
+prune_strategy: PruneStrategy::DirectionalPrune,
 ..Default::default()
 };
         let graph = VamanaGraph::build(&state.vectors, state.dim, &vamana_config, &mut rng);
@@ -244,12 +246,12 @@ nav_m: 16,
                 }
                 let mut all: Vec<u32> = main.to_vec();
                 all.extend_from_slice(overflow);
-                // 用 RobustPrune 替代 truncate（设计文档硬约束）
-                let pruned = RobustPrune::prune(
-                    &all, node, &state.vectors, state.dim,
-                    self.config.alpha, self.config.r_max,
-                    self.config.alpha > 1.0, // DiskANN: saturate_after_prune && alpha > 1.0
-                );
+            // 用 DirectionalPrune（设计文档：final_prune must use RobustPrune, not truncate）
+            let pruned = prune_dispatch(
+                PruneStrategy::DirectionalPrune,
+                &all, node, &state.vectors, state.dim,
+                self.config.alpha, self.config.r_max, false,
+            );
                 storage.set_neighbors(node, &pruned);
             }
         }

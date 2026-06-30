@@ -66,6 +66,32 @@ impl VisitedTracker {
         true
     }
 
+    /// 标记节点为已访问（branchless，无分支预测惩罚）
+    ///
+    /// A8 优化：消除 visited 检查中的数据依赖分支。
+    ///
+    /// 图遍历中"邻居是否已访问"取决于图拓扑，本质不可预测。
+    /// branchless 版本用 cmov 代替 branch：
+    /// - 无条件写 visited[v] = 1
+    /// - 无条件写 history[len] = v，仅当首次访问时推进 len
+    /// - 消除 history.push() 内部的 capacity 检查分支
+    ///
+    /// SAFETY: idx 必须 < visited.len()
+    ///         history 容量必须 > 本次查询的唯一节点访问数
+    #[inline(always)]
+    pub unsafe fn visit_unchecked_branchless(&mut self, idx: u32) -> bool {
+        let i = idx as usize;
+        let was = *self.visited.get_unchecked(i);
+        *self.visited.get_unchecked_mut(i) = 1;
+        let is_new = (was == 0) as usize;
+        // Branchless history push: always write, only advance if new
+        let len = self.history.len();
+        debug_assert!(len < self.history.capacity(), "history overflow");
+        *self.history.as_mut_ptr().add(len) = idx;
+        self.history.set_len(len + is_new);
+        is_new == 1
+    }
+
     /// 检查节点是否已访问（不标记）
     #[inline(always)]
     pub fn is_visited(&self, idx: u32) -> bool {
