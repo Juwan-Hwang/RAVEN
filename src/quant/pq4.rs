@@ -34,7 +34,7 @@ impl PQ4Codebook {
     /// dim: 维度（必须能被 M 整除）
     /// m: 子空间数（SIFT-128 → M=32, sub_dim=4）
     pub fn train(vectors: &[f32], dim: usize, m: usize) -> Self {
-        assert!(dim % m == 0, "dim {} must be divisible by m {}", dim, m);
+        assert!(dim.is_multiple_of(m), "dim {dim} must be divisible by m {m}");
         let sub_dim = dim / m;
         let k = 16; // 4-bit, K=16
         let n = vectors.len() / dim;
@@ -183,7 +183,7 @@ fn l2_sq_scalar(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = 0.0f32;
     for i in 0..a.len() {
         let d = a[i] - b[i];
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }
@@ -192,7 +192,7 @@ fn l2_sq_scalar(a: &[f32], b: &[f32]) -> f32 {
 fn kmeans(data: &[&[f32]], k: usize, iterations: usize) -> Vec<Vec<f32>> {
     let n = data.len();
     if n == 0 || k == 0 {
-        return vec![vec![0.0; data.get(0).map_or(0, |d| d.len())]];
+        return vec![vec![0.0; data.first().map_or(0, |d| d.len())]];
     }
     let dim = data[0].len();
     let k = k.min(n);
@@ -229,11 +229,11 @@ fn kmeans(data: &[&[f32]], k: usize, iterations: usize) -> Vec<Vec<f32>> {
         }
         for j in 0..k {
             if counts[j] > 0 {
-                for d in 0..dim {
-                    new_centers[j][d] /= counts[j] as f32;
+                for c in new_centers[j].iter_mut().take(dim) {
+                    *c /= counts[j] as f32;
                 }
             } else {
-                new_centers[j] = centers[j].clone();
+                new_centers[j].clone_from(&centers[j]);
             }
         }
         centers = new_centers;

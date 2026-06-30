@@ -9,10 +9,10 @@ class Raven(BaseANN):
 
     Vamana/DiskANN-style graph index with DirectionalPrune + quantization.
 
-    支持两种量化模式：
-      - sq8 (default): 8-bit per dimension, 128B/vector (SIFT-128), rerank_factor=3
-      - sq4:           4-bit per dimension,  64B/vector (SIFT-128), rerank_factor=8
-                       内存减半 + 带宽减半 → +11% QPS, recall -0.003pp
+    两种量化模式：
+      - sq8 (default): 8-bit/dim, 128B/vector (SIFT-128), rerank_factor=3
+      - sq4:           4-bit/dim,  64B/vector (SIFT-128), rerank_factor=8
+                       内存减半 + 带宽减半 → +11% QPS, recall 损失随 ef 收敛
     """
 
     def __init__(self, metric, dim, method_param):
@@ -25,6 +25,7 @@ class Raven(BaseANN):
         self.directional = method_param.get("directional", True)
         self.quantization = method_param.get("quantization", "sq8")
         self.rerank_factor = method_param.get("rerank_factor", 3)
+        self.threads = method_param.get("threads", 0)  # 0 = single-thread
         self.name = "raven_(R=%d, L=%d, alpha=%.1f, nav_m=%d, %s, rr=%d)" % (
             self.R, self.L, self.alpha, self.nav_m,
             self.quantization, self.rerank_factor,
@@ -44,6 +45,7 @@ class Raven(BaseANN):
             directional=self.directional,
             quantization=self.quantization,
             rerank_factor=self.rerank_factor,
+            threads=self.threads,
         )
         self.index.build(X)
         self.searcher = self.index.searcher()

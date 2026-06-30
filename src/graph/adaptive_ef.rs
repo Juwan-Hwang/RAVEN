@@ -172,7 +172,7 @@ impl AdaptiveEfConfig {
     #[inline]
     pub fn estimate_ef(&self, distance: f32) -> usize {
         if self.sorted_distances.len() <= 1 {
-            return (self.min_ef + self.max_ef) / 2;
+            return usize::midpoint(self.min_ef, self.max_ef);
         }
 
         // 二分查找：严格小于 distance 的样本数 = rank
@@ -184,7 +184,7 @@ impl AdaptiveEfConfig {
         // 幂律变换：gamma > 1 → 低百分位被强压缩，高百分位保持大 ef
         let shaped = percentile.powf(self.gamma);
 
-        let ef = self.min_ef as f32 + shaped * (self.max_ef - self.min_ef) as f32;
+        let ef = shaped.mul_add((self.max_ef - self.min_ef) as f32, self.min_ef as f32);
         ef.round() as usize
     }
 

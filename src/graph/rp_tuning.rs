@@ -20,9 +20,11 @@ use super::robust_prune::RobustPrune;
 
 /// RP-Tuning 存储方案（设计文档附录 A）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum RPTuningStorageScheme {
     /// 方案 A：直接对当前邻域重跑 prune，不保留原始候选集，零额外存储
     /// 设计文档：推荐先验证
+    #[default]
     SchemeA,
     /// 方案 B：每节点存储被剪掉的邻居 ID
     /// 候选集 = 当前邻域 ∪ 被剪边，O(N × (R_soft - R_max)) 额外存储
@@ -32,12 +34,6 @@ pub enum RPTuningStorageScheme {
     SchemeC,
 }
 
-impl Default for RPTuningStorageScheme {
-    fn default() -> Self {
-        // 设计文档：A 方案推荐先验证
-        RPTuningStorageScheme::SchemeA
-    }
-}
 
 /// RP-Tuning 配置
 #[derive(Debug, Clone)]

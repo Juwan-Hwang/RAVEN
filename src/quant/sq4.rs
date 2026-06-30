@@ -81,7 +81,7 @@ impl SQ4Params {
     /// byte[i] = code[2*i] | (code[2*i+1] << 4)
     pub fn encode(&self, v: &[f32]) -> Vec<u8> {
         assert_eq!(v.len(), self.dim);
-        let mut buf = vec![0u8; (self.dim + 1) / 2];
+        let mut buf = vec![0u8; self.dim.div_ceil(2)];
         self.encode_into(v, &mut buf);
         buf
     }
@@ -94,7 +94,7 @@ impl SQ4Params {
         assert_eq!(v.len(), self.dim);
         for d in 0..self.dim {
             // FMA: v * inv_scale + neg_min_div ≡ (v - min) / scale
-            let q = (v[d] * self.inv_scale[d] + self.neg_min_div[d]).round();
+            let q = v[d].mul_add(self.inv_scale[d], self.neg_min_div[d]).round();
             let code = q.clamp(0.0, 15.0) as u8;
             if d % 2 == 0 {
                 buf[d / 2] = code;
@@ -107,12 +107,12 @@ impl SQ4Params {
     /// 编码整个数据集 → 扁平 packed codes (n × ceil(dim/2) bytes)
     pub fn encode_all(&self, data: &[f32]) -> Vec<u8> {
         let n = data.len() / self.dim;
-        let code_bytes = (self.dim + 1) / 2;
+        let code_bytes = self.dim.div_ceil(2);
         let mut codes = vec![0u8; n * code_bytes];
         for i in 0..n {
             let row = &data[i * self.dim..(i + 1) * self.dim];
             for d in 0..self.dim {
-                let q = (row[d] * self.inv_scale[d] + self.neg_min_div[d]).round();
+                let q = row[d].mul_add(self.inv_scale[d], self.neg_min_div[d]).round();
                 let code = q.clamp(0.0, 15.0) as u8;
                 if d % 2 == 0 {
                     codes[i * code_bytes + d / 2] = code;
@@ -127,7 +127,7 @@ impl SQ4Params {
     /// 解码单个 packed code → f32 近似向量
     #[allow(dead_code)]
     pub fn decode(&self, code: &[u8]) -> Vec<f32> {
-        let code_bytes = (self.dim + 1) / 2;
+        let code_bytes = self.dim.div_ceil(2);
         assert_eq!(code.len(), code_bytes);
         (0..self.dim)
             .map(|d| {
@@ -136,7 +136,7 @@ impl SQ4Params {
                 } else {
                     (code[d / 2] >> 4) & 0x0F
                 };
-                raw as f32 * self.scale[d] + self.min[d]
+                (raw as f32).mul_add(self.scale[d], self.min[d])
             })
             .collect()
     }
@@ -304,7 +304,7 @@ impl SQ4Dataset {
         let n = data.len() / dim;
         let params = SQ4Params::fit(data, dim);
         let codes = params.encode_all(data);
-        let code_bytes = (dim + 1) / 2;
+        let code_bytes = dim.div_ceil(2);
         Self { codes, params, dim, n, code_bytes }
     }
 

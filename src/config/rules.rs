@@ -74,10 +74,10 @@ impl Rule {
         violation_reason: &str,
     ) -> Self {
         Self {
-            name: name.to_string(),
-            description: description.to_string(),
+            name: name.to_owned(),
+            description: description.to_owned(),
             check,
-            violation_reason: violation_reason.to_string(),
+            violation_reason: violation_reason.to_owned(),
             severity: RuleSeverity::Error,
             depends_on: Vec::new(),
         }
@@ -91,10 +91,10 @@ impl Rule {
         violation_reason: &str,
     ) -> Self {
         Self {
-            name: name.to_string(),
-            description: description.to_string(),
+            name: name.to_owned(),
+            description: description.to_owned(),
             check,
-            violation_reason: violation_reason.to_string(),
+            violation_reason: violation_reason.to_owned(),
             severity: RuleSeverity::Warning,
             depends_on: Vec::new(),
         }
@@ -103,7 +103,7 @@ impl Rule {
     /// 设置依赖规则（DAG 校验用）
     /// 设计文档：含 DAG 冲突校验
     pub fn with_depends_on(mut self, deps: &[&str]) -> Self {
-        self.depends_on = deps.iter().map(|s| s.to_string()).collect();
+        self.depends_on = deps.iter().map(std::string::ToString::to_string).collect();
         self
     }
 }
@@ -123,7 +123,7 @@ impl Default for RuleEngine {
 
 /// 判断 n 是否是 2 的幂次
 fn is_power_of_two(n: usize) -> bool {
-    n > 0 && (n & (n - 1)) == 0
+    n > 0 && n.is_power_of_two()
 }
 
 impl RuleEngine {
@@ -251,8 +251,8 @@ impl RuleEngine {
             }
         }
         let mut queue: VecDeque<usize> = VecDeque::new();
-        for i in 0..n {
-            if in_degree[i] == 0 {
+        for (i, &deg) in in_degree.iter().enumerate().take(n) {
+            if deg == 0 {
                 queue.push_back(i);
             }
         }
@@ -268,8 +268,8 @@ impl RuleEngine {
         }
         if visited != n {
             return Err(ConflictError::RuleViolated {
-                rule: "dag_cycle".to_string(),
-                reason: "规则依赖关系存在环（循环依赖）".to_string(),
+                rule: "dag_cycle".to_owned(),
+                reason: "规则依赖关系存在环（循环依赖）".to_owned(),
             });
         }
         Ok(())

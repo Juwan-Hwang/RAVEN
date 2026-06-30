@@ -36,6 +36,7 @@ struct PyIndex {
     // 搜索参数
     quant: Quant,
     rerank: usize,
+    threads: usize,
 }
 
 #[pymethods]
@@ -47,7 +48,7 @@ impl PyIndex {
     ///   quantization="sq8" (default) 或 "sq4"
     ///   rerank_factor=3 (SQ8) 或 8 (SQ4)
     #[new]
-    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=3))]
+    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=3, threads=0))]
     fn new(
         metric: &str,
         dim: usize,
@@ -58,6 +59,7 @@ impl PyIndex {
         directional: bool,
         quantization: &str,
         rerank_factor: usize,
+        threads: usize,
     ) -> PyResult<Self> {
         let _ = metric; // L2 only
         let quant = match quantization.to_lowercase().as_str() {
@@ -78,6 +80,7 @@ impl PyIndex {
             directional,
             quant,
             rerank: rerank_factor,
+            threads,
         })
     }
 
@@ -145,6 +148,7 @@ impl PyIndex {
             ef: 50,
             po: 8,
             rerank: self.rerank,
+            threads: self.threads,
         })
     }
 
@@ -174,6 +178,7 @@ impl PyIndex {
             directional: true,
             quant: Quant::Sq8,
             rerank: 3,
+            threads: 0,
         })
     }
 }
@@ -192,6 +197,7 @@ struct PySearcher {
     ef: usize,
     po: usize,
     rerank: usize,
+    threads: usize,
 }
 
 #[pymethods]
@@ -255,7 +261,15 @@ impl PySearcher {
         } else if let Some(ref sq4) = self.sq4 {
             searcher.with_sq4(sq4);
         }
-        let results = searcher.batch_search(&query_refs, k);
+        let results = if self.threads > 0 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(self.threads)
+                .build()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            pool.install(|| searcher.batch_search(&query_refs, k))
+        } else {
+            searcher.batch_search(&query_refs, k)
+        };
 
         let mut ids = vec![0usize; nq * k];
         for (i, result) in results.iter().enumerate() {

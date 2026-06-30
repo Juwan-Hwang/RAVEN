@@ -16,7 +16,7 @@ pub fn l2_scalar(a: &[f32], b: &[f32]) -> Distance {
     let mut sum = 0.0f32;
     for i in 0..a.len() {
         let d = a[i] - b[i];
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }
@@ -28,7 +28,7 @@ pub fn ip_scalar(a: &[f32], b: &[f32]) -> Distance {
     debug_assert_eq!(a.len(), b.len());
     let mut sum = 0.0f32;
     for i in 0..a.len() {
-        sum += a[i] * b[i];
+        sum = a[i].mul_add(b[i], sum);
     }
     -sum // 返回负内积，使"更小=更相似"语义统一
 }

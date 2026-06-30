@@ -52,8 +52,8 @@ impl OPQRotation {
                 mean[d] += v[d];
             }
         }
-        for d in 0..dim {
-            mean[d] /= n as f32;
+        for m in mean.iter_mut().take(dim) {
+            *m /= n as f32;
         }
 
         // 2. 计算协方差矩阵 C = (1/n) Σ (x_i - μ)(x_i - μ)^T
@@ -64,7 +64,7 @@ impl OPQRotation {
                 let dr = v[r] - mean[r];
                 for c in r..dim {
                     let dc = v[c] - mean[c];
-                    cov[r * dim + c] += dr * dc;
+                    cov[r * dim + c] = dr.mul_add(dc, cov[r * dim + c]);
                 }
             }
         }
@@ -122,10 +122,10 @@ impl OPQRotation {
             }
         }
 
-        eprintln!("[OPQ] train: dim={}, n={}, sub_dim={}, m={}", dim, n, sub_dim, m);
+        eprintln!("[OPQ] train: dim={dim}, n={n}, sub_dim={sub_dim}, m={m}");
         eprintln!("[OPQ] eigenvalue range: [{:.6}, {:.6}]",
-            eigenvalues.iter().cloned().fold(f32::INFINITY, f32::min),
-            eigenvalues.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+            eigenvalues.iter().copied().fold(f32::INFINITY, f32::min),
+            eigenvalues.iter().copied().fold(f32::NEG_INFINITY, f32::max));
 
         OPQRotation { rotation, dim }
     }
@@ -143,12 +143,12 @@ impl OPQRotation {
             let v = &vectors[i * dim..(i + 1) * dim];
             let r = &mut result[i * dim..(i + 1) * dim];
             // 矩阵向量乘：r = R × v
-            for row in 0..dim {
+            for (row, r_elem) in r.iter_mut().enumerate().take(dim) {
                 let mut sum = 0.0f32;
-                for col in 0..dim {
-                    sum += self.rotation[row * dim + col] * v[col];
+                for (col, &v_col) in v.iter().enumerate().take(dim) {
+                    sum = self.rotation[row * dim + col].mul_add(v_col, sum);
                 }
-                r[row] = sum;
+                *r_elem = sum;
             }
         }
 
@@ -166,12 +166,12 @@ impl OPQRotation {
             let v = &vectors[i * dim..(i + 1) * dim];
             let r = &mut result[i * dim..(i + 1) * dim];
             // 矩阵向量乘：r = R^T × v
-            for row in 0..dim {
+            for (row, r_elem) in r.iter_mut().enumerate().take(dim) {
                 let mut sum = 0.0f32;
-                for col in 0..dim {
-                    sum += self.rotation[col * dim + row] * v[col];
+                for (col, &v_col) in v.iter().enumerate().take(dim) {
+                    sum = self.rotation[col * dim + row].mul_add(v_col, sum);
                 }
-                r[row] = sum;
+                *r_elem = sum;
             }
         }
 
@@ -202,7 +202,7 @@ fn jacobi_eigen(
         let mut off_diag_sq = 0.0f32;
         for r in 0..dim {
             for c in (r + 1)..dim {
-                off_diag_sq += a[r * dim + c] * a[r * dim + c];
+                off_diag_sq = a[r * dim + c].mul_add(a[r * dim + c], off_diag_sq);
             }
         }
 
@@ -238,13 +238,13 @@ fn jacobi_eigen(
                     let aip = a[i * dim + p];
                     let aiq = a[i * dim + q];
                     a[i * dim + p] = cos_t * aip + sin_t * aiq;
-                    a[i * dim + q] = -sin_t * aip + cos_t * aiq;
+                    a[i * dim + q] = (-sin_t).mul_add(aip, cos_t * aiq);
                 }
                 for i in 0..dim {
                     let api = a[p * dim + i];
                     let aqi = a[q * dim + i];
                     a[p * dim + i] = cos_t * api + sin_t * aqi;
-                    a[q * dim + i] = -sin_t * api + cos_t * aqi;
+                    a[q * dim + i] = (-sin_t).mul_add(api, cos_t * aqi);
                 }
 
                 // 更新 V（累积特征向量）
@@ -252,7 +252,7 @@ fn jacobi_eigen(
                     let vip = v[i * dim + p];
                     let viq = v[i * dim + q];
                     v[i * dim + p] = cos_t * vip + sin_t * viq;
-                    v[i * dim + q] = -sin_t * vip + cos_t * viq;
+                    v[i * dim + q] = (-sin_t).mul_add(vip, cos_t * viq);
                 }
             }
         }

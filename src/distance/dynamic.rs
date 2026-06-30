@@ -21,12 +21,12 @@ pub fn l2_dynamic(a: &[f32], b: &[f32]) -> f32 {
     for (ca, cb) in chunks_a.zip(chunks_b) {
         for i in 0..8 {
             let d = ca[i] - cb[i];
-            sum += d * d;
+            sum = d.mul_add(d, sum);
         }
     }
     for (x, y) in rem_a.iter().zip(rem_b) {
         let d = x - y;
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }
@@ -42,7 +42,7 @@ pub fn ip_dynamic(a: &[f32], b: &[f32]) -> f32 {
     let (rem_a, rem_b) = (chunks_a.remainder(), chunks_b.remainder());
     for (ca, cb) in chunks_a.zip(chunks_b) {
         for i in 0..8 {
-            sum += ca[i] * cb[i];
+            sum = ca[i].mul_add(cb[i], sum);
         }
     }
     for (x, y) in rem_a.iter().zip(rem_b) {

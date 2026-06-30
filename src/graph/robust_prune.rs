@@ -37,7 +37,7 @@ fn prepare_candidates(
         .collect();
 
     // 去重（按节点 ID）
-    scored.sort_by(|a, b| a.1.cmp(&b.1));
+    scored.sort_by_key(|a| a.1);
     scored.dedup_by(|a, b| a.1 == b.1);
 
     // 按距离升序排序
@@ -55,18 +55,15 @@ fn prepare_candidates(
 /// - `RobustPrune`：Vamana/DiskANN 标准多轮 α 递增 + saturation 填充
 /// - `DirectionalPrune`：RAVEN 超越方案，方向性扫描 + 自适应连通性补底
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PruneStrategy {
     /// Vamana/DiskANN 标准 RobustPrune（baseline）
+    #[default]
     RobustPrune,
     /// RAVEN DirectionalPrune（方向性 + 连通性补底，无 saturation）
     DirectionalPrune,
 }
 
-impl Default for PruneStrategy {
-    fn default() -> Self {
-        PruneStrategy::RobustPrune
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  RobustPrune（Vamana/DiskANN 标准）
@@ -347,17 +344,15 @@ impl DirectionalPrune {
         if result.len() < r_min {
             let accepted_set: std::collections::HashSet<u32> = result.iter().copied().collect();
 
-            for i in 0..n {
+            for &(dist_iq_sq, id) in scored.iter().take(n) {
                 if result.len() >= r_min {
                     break;
                 }
 
-                let id = scored[i].1;
                 if accepted_set.contains(&id) {
                     continue;
                 }
 
-                let dist_iq_sq = scored[i].0;
                 let candidate_vec =
                     &vectors[id as usize * dim..(id as usize + 1) * dim];
 

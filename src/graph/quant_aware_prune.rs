@@ -29,9 +29,11 @@ pub const BETA_MIN: f32 = 0.05;
 pub const BETA_MAX: f32 = 2.0;
 
 /// 归一化方案（设计文档：消融对比）
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum NormalizationScheme {
     /// 均值归一化（主方案）：密度均匀数据集适用
+    #[default]
     Mean,
     /// 标准差归一化：方差差异大时更稳
     StdDev,
@@ -41,12 +43,6 @@ pub enum NormalizationScheme {
     LogSumExp,
 }
 
-impl Default for NormalizationScheme {
-    fn default() -> Self {
-        // 设计文档：均值归一化为主方案
-        NormalizationScheme::Mean
-    }
-}
 
 /// 量化感知 RobustPrune 配置
 #[derive(Debug, Clone)]
@@ -143,7 +139,7 @@ impl QuantAwareRobustPrune {
         for e in &mut entries {
             let dist = e.0;
             let error = e.1;
-            e.0 = dist * inv_dist + error * beta_inv_err; // score
+            e.0 = error.mul_add(beta_inv_err, dist * inv_dist); // score
             e.1 = dist; // 保存原始距离
         }
 
@@ -205,7 +201,7 @@ impl QuantAwareRobustPrune {
                 let mu_e = sum_e / n;
                 let (var_d, var_e) = entries.iter()
                     .fold((0.0f32, 0.0f32), |(vd, ve), &(d, e, _)| {
-                        (vd + (d - mu_d).powi(2), ve + (e - mu_e).powi(2))
+                        ((d - mu_d).mul_add(d - mu_d, vd), (e - mu_e).mul_add(e - mu_e, ve))
                     });
                 (var_d.sqrt().max(EPSILON), var_e.sqrt().max(EPSILON))
             }
@@ -257,8 +253,8 @@ impl QuantAwareRobustPrune {
             }
             NormalizationScheme::LogSumExp => {
                 // log-sum-exp / sigmoid：备选非线性压缩
-                let max_dist = dists.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let max_error = errors.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let max_dist = dists.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let max_error = errors.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 let lse_dist = max_dist
                     + (dists.iter().map(|d| (d - max_dist).exp()).sum::<f32>()
                         / dists.len() as f32).ln();
@@ -278,8 +274,8 @@ impl QuantAwareRobustPrune {
         let mut s = sorted.to_vec();
         s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = s.len() / 2;
-        if s.len() % 2 == 0 {
-            (s[mid - 1] + s[mid]) / 2.0
+        if s.len().is_multiple_of(2) {
+            f32::midpoint(s[mid - 1], s[mid])
         } else {
             s[mid]
         }

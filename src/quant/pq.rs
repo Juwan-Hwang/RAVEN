@@ -32,7 +32,7 @@ impl PQCodebook {
     /// m: 子空间数
     /// k: 每个子空间聚类中心数
     pub fn train(vectors: &[f32], dim: usize, m: usize, k: usize) -> Self {
-        assert!(dim % m == 0, "dim {} must be divisible by m {}", dim, m);
+        assert!(dim.is_multiple_of(m), "dim {dim} must be divisible by m {m}");
         let sub_dim = dim / m;
         let n = vectors.len() / dim;
 
@@ -258,11 +258,11 @@ fn kmeans(data: &[Vec<f32>], k: usize, iterations: usize) -> Vec<Vec<f32>> {
         }
         for j in 0..k {
             if counts[j] > 0 {
-                for d in 0..dim {
-                    new_centers[j][d] /= counts[j] as f32;
+                for c in new_centers[j].iter_mut().take(dim) {
+                    *c /= counts[j] as f32;
                 }
             } else {
-                new_centers[j] = centers[j].clone();
+                new_centers[j].clone_from(&centers[j]);
             }
         }
         centers = new_centers;
@@ -276,7 +276,7 @@ fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = 0.0f32;
     for i in 0..a.len() {
         let d = a[i] - b[i];
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }

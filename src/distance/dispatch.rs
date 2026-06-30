@@ -61,6 +61,7 @@ pub fn select_l2(dim: usize) -> fn(&[f32], &[f32]) -> f32 {
         // 高频维度走 SIMD 实现（AVX-512 > AVX2 > dynamic）
         // 注：当前不使用 const generics 特化以避免 binary bloat，
         // l2_simd 运行时自动选择最优 SIMD 核
+        #[allow(clippy::match_same_arms)]
         64 | 128 | 256 | 384 | 768 | 960 | 1536 => l2_simd,
         _ => l2_simd,
     }

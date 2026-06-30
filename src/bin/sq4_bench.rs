@@ -174,7 +174,8 @@ fn main() {
     println_both!("数据: n={}, dim={}, nq={}", n, dim, nq);
     let k = 10usize;
     let po = 8usize;
-    let rr = 3usize;
+    let rr_sq8 = 3usize;
+    let rr_sq4 = 8usize;
 
     // 建图（当前最优配置：nav_m=32, DirectionalPrune）
     println_both!("\n--- 建图 (nav_m=32, DirectionalPrune) ---");
@@ -229,7 +230,7 @@ fn main() {
 
     for &ef in &ef_list {
         // SQ8
-        let sq8_r = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, po, rr, &SearchMode::SQ8(&sq8));
+        let sq8_r = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, po, rr_sq8, &SearchMode::SQ8(&sq8));
 
         println_both!(
             "  {:>6}  {:>6}  {:>10.4}  {:>12.0}  {:>12}  {:>12.1}  {:>10}",
@@ -237,7 +238,7 @@ fn main() {
         );
 
         // SQ4
-        let sq4_r = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, po, rr, &SearchMode::SQ4(&sq4));
+        let sq4_r = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, ef, po, rr_sq4, &SearchMode::SQ4(&sq4));
 
         let speedup = sq4_r.qps / sq8_r.qps;
         let recall_delta = sq4_r.recall - sq8_r.recall;
@@ -251,8 +252,8 @@ fn main() {
 
     // 结论
     println_both!("\n--- 结论 ---");
-    let sq8_50 = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, 50, po, rr, &SearchMode::SQ8(&sq8));
-    let sq4_50 = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, 50, po, rr, &SearchMode::SQ4(&sq4));
+    let sq8_50 = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, 50, po, rr_sq8, &SearchMode::SQ8(&sq8));
+    let sq4_50 = bench_stable(&train, &graph, &test, dim, nq, &gt, gt_k, k, 50, po, rr_sq4, &SearchMode::SQ4(&sq4));
     let speedup_50 = sq4_50.qps / sq8_50.qps;
     let recall_delta_50 = sq4_50.recall - sq8_50.recall;
 

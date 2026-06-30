@@ -149,7 +149,7 @@ impl VamanaGraph {
                         || VisitedTracker::new(n, config.l_build),
                         |visited, &node_id| {
                             let idx = progress.fetch_add(1, Ordering::Relaxed);
-                            if idx > 0 && idx % progress_interval == 0 {
+                            if idx > 0 && idx.is_multiple_of(progress_interval) {
                                 info!("[build] {}/{} ({}%)", idx, n, idx * 100 / n);
                             }
                             let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
@@ -254,7 +254,7 @@ impl VamanaGraph {
                         || VisitedTracker::new(n, config.l_build),
                         |visited, &node_id| {
                             let idx = progress.fetch_add(1, Ordering::Relaxed);
-                            if idx > 0 && idx % progress_interval == 0 {
+                            if idx > 0 && idx.is_multiple_of(progress_interval) {
                                 eprintln!("[build_qa] iter {}  {}/{} ({}%)  {:.1}s",
                                     iter + 1, idx, n, idx * 100 / n,
                                     iter_t0.elapsed().as_secs_f64());
@@ -386,8 +386,8 @@ impl VamanaGraph {
                 centroid[d] += v[d];
             }
         }
-        for d in 0..dim {
-            centroid[d] /= SAMPLE_COUNT as f32;
+        for c in centroid.iter_mut().take(dim) {
+            *c /= SAMPLE_COUNT as f32;
         }
         // 2. 在采样集中找离近似质心最近的点
         let mut best_id = sample[0];
@@ -412,8 +412,8 @@ impl VamanaGraph {
                 centroid[d] += v[d];
             }
         }
-        for d in 0..dim {
-            centroid[d] /= n as f32;
+        for c in centroid.iter_mut().take(dim) {
+            *c /= n as f32;
         }
         // 2. 找离质心最近的点
         let mut best_id = 0u32;
@@ -645,8 +645,8 @@ edge_size += is_new as usize;
 
             // 预取前 po 个邻居的向量数据
             let prefetch_count = po.min(edge_size);
-            for i in 0..prefetch_count {
-                let v = edge_buf[i] as usize;
+            for &node in edge_buf.iter().take(prefetch_count) {
+                let v = node as usize;
                 let ptr = &vectors[v * dim] as *const f32 as *const i8;
                 unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
             }
@@ -711,7 +711,7 @@ edge_size += is_new as usize;
                 let start = next_node as usize * storage.r_max();
                 let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
                 let neighbor_bytes = storage.r_max() * 4; // u32 per neighbor
-                let graph_lines = (neighbor_bytes + 63) / 64; // ceil to cache lines
+                let graph_lines = neighbor_bytes.div_ceil(64); // ceil to cache lines
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<0>(ptr);
                     for l in 1..graph_lines {
@@ -739,8 +739,8 @@ edge_size += is_new as usize;
             // 预取前 po 个邻居的 SQ8 码
             // SIFT-128: 128B = 2 cache lines，始终预取两行（分支消除）
             let prefetch_count = po.min(edge_size);
-            for i in 0..prefetch_count {
-                let v = edge_buf[i] as usize;
+            for &node in edge_buf.iter().take(prefetch_count) {
+                let v = node as usize;
                 let ptr = sq8.code(v).as_ptr() as *const i8;
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<0>(ptr);
@@ -809,7 +809,7 @@ edge_size += is_new as usize;
                 let start = next_node as usize * storage.r_max();
                 let ptr = storage.main_block().as_ptr().wrapping_add(start) as *const i8;
                 let neighbor_bytes = storage.r_max() * 4;
-                let graph_lines = (neighbor_bytes + 63) / 64;
+                let graph_lines = neighbor_bytes.div_ceil(64);
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<0>(ptr);
                     for l in 1..graph_lines {
@@ -834,8 +834,8 @@ edge_size += is_new as usize;
             // 预取前 po 个邻居的 SQ4 码
             // SIFT-128: 64B = 1 cache line，只需 1 条预取指令
             let prefetch_count = po.min(edge_size);
-            for i in 0..prefetch_count {
-                let v = edge_buf[i] as usize;
+            for &node in edge_buf.iter().take(prefetch_count) {
+                let v = node as usize;
                 let ptr = sq4.code(v).as_ptr() as *const i8;
                 unsafe {
                     std::arch::x86_64::_mm_prefetch::<0>(ptr);
@@ -919,8 +919,8 @@ edge_size += is_new as usize;
 
             // 预取前 po 个邻居的 PQ4 码（M/2 bytes，比 f32 小 16x）
             let prefetch_count = po.min(edge_size);
-            for i in 0..prefetch_count {
-                let v = edge_buf[i] as usize;
+            for &node in edge_buf.iter().take(prefetch_count) {
+                let v = node as usize;
                 let ptr = pq4.code(v).as_ptr() as *const i8;
                 unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
             }
@@ -1002,8 +1002,8 @@ edge_size += is_new as usize;
 
             // 预取前 po 个邻居的 PQ8 码（M bytes，比 f32 小 16x）
             let prefetch_count = po.min(edge_size);
-            for i in 0..prefetch_count {
-                let v = edge_buf[i] as usize;
+            for &node in edge_buf.iter().take(prefetch_count) {
+                let v = node as usize;
                 let ptr = pq8.code(v).as_ptr() as *const i8;
                 unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
             }
@@ -1266,16 +1266,12 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
         use crate::memory::serialize::{IndexHeader, crc32, FLAG_HAS_METADATA, FLAG_HAS_LAYERED_NAV};
 
         // 序列化 metadata TOML（如果有）
-        let metadata_bytes: Vec<u8> = match &self.metadata {
-            Some(m) => m.to_toml().unwrap_or_default().into_bytes(),
-            None => Vec::new(),
-        };
+        let metadata_bytes: Vec<u8> = self.metadata.as_ref()
+            .map_or_else(Vec::new, |m| m.to_toml().unwrap_or_default().into_bytes());
 
         // 序列化 layered nav（如果有）
-        let nav_bytes: Vec<u8> = match &self.layered_nav {
-            Some(nav) => nav.serialize_binary(),
-            None => Vec::new(),
-        };
+        let nav_bytes: Vec<u8> = self.layered_nav.as_ref()
+            .map_or_else(Vec::new, super::navigation::LayeredNavigation::serialize_binary);
 
         // 序列化文件体
         let mut body: Vec<u8> = Vec::with_capacity(
@@ -1291,7 +1287,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
             body.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
             body.extend_from_slice(&metadata_bytes);
             let padding = (4 - (metadata_bytes.len() % 4)) % 4;
-            body.extend(std::iter::repeat(0u8).take(padding));
+            body.extend(std::iter::repeat_n(0u8, padding));
         }
 
         // layered nav trailer（设计文档：保留随机层级）
@@ -1300,7 +1296,7 @@ impl crate::memory::serialize::Serializable for VamanaGraph {
             body.extend_from_slice(&(nav_bytes.len() as u32).to_le_bytes());
             body.extend_from_slice(&nav_bytes);
             let padding = (4 - (nav_bytes.len() % 4)) % 4;
-            body.extend(std::iter::repeat(0u8).take(padding));
+            body.extend(std::iter::repeat_n(0u8, padding));
         }
 
         // HybridBlockedCsr body
@@ -1779,7 +1775,7 @@ impl<'a> GraphSearcher<'a> {
 
         // 1. 编码查询向量为 SQ4 packed 4-bit（零分配，复用预分配 buffer）
         //    SQ4 码大小 = ceil(dim/2)，可能与 SQ8 的 dim 不同
-        let code_bytes = (dim + 1) / 2;
+        let code_bytes = dim.div_ceil(2);
         if self.query_code_buf.len() != code_bytes {
             self.query_code_buf = vec![0u8; code_bytes];
         }
@@ -1999,32 +1995,31 @@ impl<'a> GraphSearcher<'a> {
         let dim = self.dim;
         let storage = self.graph.storage();
         let sq8 = self.sq8;
+        let sq4 = self.sq4;
         let graph = self.graph;
         let navigation = self.navigation;
         let adaptive_ef = self.adaptive_ef.as_ref();
-        let f16_codes = self.f16.map(|ds| ds.codes());
+        let f16_codes = self.f16.map(super::super::distance::f16::F16Dataset::codes);
 
         // 公共逻辑：选择 entry_point + 计算 ef（SQ8/f32 路径共享，OPT-6 去重）
         let resolve_entry_and_ef = |query: &[f32]| -> (u32, usize) {
-            let (entry_point, nav_entry_dist) = if let Some(nav) = graph.layered_nav() {
+            let (entry_point, nav_entry_dist) = graph.layered_nav().map_or_else(|| {
+                navigation.map_or_else(|| (graph.entry_point(), None), |nav| {
+                    (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
+                })
+            }, |nav| {
                 let (ep, dist) = nav.initialize(vectors, dim, query);
                 (ep, Some(dist))
-            } else if let Some(nav) = navigation {
-                (Self::nearest_centroid(nav.centroids(), vectors, dim, query), None)
-            } else {
-                (graph.entry_point(), None)
-            };
+            });
 
-            let ef = if let Some(ref adaptive) = adaptive_ef {
+            let ef = adaptive_ef.map_or(default_ef, |adaptive| {
                 let entry_dist = nav_entry_dist.unwrap_or_else(|| {
                     l2_simd(query,
                         &vectors[entry_point as usize * dim
                             ..(entry_point as usize + 1) * dim])
                 });
                 adaptive.estimate_ef(entry_dist).max(k)
-            } else {
-                default_ef
-            };
+            });
             (entry_point, ef)
         };
 
@@ -2045,31 +2040,41 @@ impl<'a> GraphSearcher<'a> {
                 thread_local! {
                     static TLS_SEARCH: std::cell::RefCell<
                         (Option<VisitedTracker>, Option<LinearPool>, Option<Vec<u8>>)
-                    > = std::cell::RefCell::new((None, None, None));
+                    > = const { std::cell::RefCell::new((None, None, None)) };
                 }
 
                 TLS_SEARCH.with(|cell| {
                     let mut borrow = cell.borrow_mut();
                     if borrow.0.is_none() {
                         let cap = adaptive_ef
-                            .map(|c| c.max_ef())
-                            .unwrap_or(default_ef);
+                            .map_or(default_ef, super::adaptive_ef::AdaptiveEfConfig::max_ef);
                         borrow.0 = Some(VisitedTracker::new(n, cap));
                         borrow.1 = Some(LinearPool::new(cap));
-                        borrow.2 = Some(vec![0u8; dim]);
+                        // SQ8: 1 byte/dim, SQ4: ceil(dim/2) bytes
+                        let code_len = if sq8.is_some() { dim } else { dim.div_ceil(2) };
+                        borrow.2 = Some(vec![0u8; code_len]);
                     }
                     let (visited_opt, pool_opt, code_buf_opt) = &mut *borrow;
                     let visited = visited_opt.as_mut().unwrap();
                     let pool = pool_opt.as_mut().unwrap();
                     let query_code_buf = code_buf_opt.as_mut().unwrap();
 
-                    // 选择搜索路径：SQ8 > f32
+                    // 选择搜索路径：SQ8 > SQ4 > f32
                     if let Some(sq8) = sq8 {
                         sq8.params.encode_into(query, query_code_buf);
                         let (entry_point, ef) = resolve_entry_and_ef(query);
 
                         let cands = VamanaGraph::greedy_search_sq8::<true>(
                             sq8, storage, entry_point, query_code_buf,
+                            ef, visited, pool, po,
+                        );
+                        rerank_and_sort(cands, query)
+                    } else if let Some(sq4) = sq4 {
+                        sq4.params.encode_into(query, query_code_buf);
+                        let (entry_point, ef) = resolve_entry_and_ef(query);
+
+                        let cands = VamanaGraph::greedy_search_sq4(
+                            sq4, storage, entry_point, query_code_buf,
                             ef, visited, pool, po,
                         );
                         rerank_and_sort(cands, query)

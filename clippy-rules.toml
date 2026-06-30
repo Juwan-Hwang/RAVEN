@@ -1,0 +1,203 @@
+
+# ───────────────────────────────────────────────────────────────────────
+# RAVEN Clippy 规则配置
+#
+# 策略：all + pedantic + nursery + restriction 四分组一键全开（~400 条规则），
+#       再排除对高性能 HNSW 项目有害或无收益的规则。
+#
+# 以下配置已直接写入 Cargo.toml 的 [lints] 表，本文件仅作文档参考。
+# ───────────────────────────────────────────────────────────────────────
+
+[lints.rust]
+unused_crate_dependencies = "allow"
+
+[lints.clippy]
+# ── 四分组一键全开 ──
+all         = { level = "deny", priority = -1 }  # correctness + suspicious + style + complexity + perf
+pedantic    = { level = "deny", priority = -1 }  # ~170 条极致优化规则
+nursery     = { level = "deny", priority = -1 }  # ~50 条实验性规则
+restriction = { level = "deny", priority = -1 }  # ~90 条限制规则
+
+# ── 排除：有害（损害性能）──
+inline_always = "allow"              # 热路径必须 #[inline(always)]
+as_conversions = "allow"             # SIMD 指针 cast、usize→u32 全靠 as
+arithmetic_side_effects = "allow"    # 高性能库不能用 checked_*
+integer_division = "allow"
+float_arithmetic = "allow"
+modulo_arithmetic = "allow"
+indexing_slicing = "allow"           # 热路径用 get_unchecked 绕过边界检查
+
+# ── 排除：无收益（零性能影响）──
+missing_const_for_fn = "allow"       # const fn 对运行时零收益
+
+# Cast 类
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_ptr_alignment = "allow"
+ptr_as_ptr = "allow"
+borrow_as_ptr = "allow"
+ref_as_ptr = "allow"
+ptr_cast_constness = "allow"
+
+# 纯文档类
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_safety_doc = "allow"
+missing_fields_in_debug = "allow"
+missing_docs_in_private_items = "allow"
+missing_inline_in_public_items = "allow"
+doc_markdown = "allow"
+doc_link_with_quotes = "allow"
+doc_broken_link = "allow"
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+doc_paragraphs_missing_punctuation = "allow"
+
+# 纯命名/风格类
+module_name_repetitions = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+many_single_char_names = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+fn_params_excessive_bools = "allow"
+struct_excessive_bools = "allow"
+items_after_statements = "allow"
+min_ident_chars = "allow"
+single_char_lifetime_names = "allow"
+single_call_fn = "allow"
+
+# restriction 风格类
+absolute_paths = "allow"
+default_numeric_fallback = "allow"
+else_if_without_else = "allow"
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+mod_module_files = "allow"
+self_named_module_files = "allow"
+pattern_type_mismatch = "allow"
+semicolon_inside_block = "allow"
+semicolon_outside_block = "allow"
+implicit_return = "allow"
+non_ascii_literal = "allow"
+print_stdout = "allow"
+print_stderr = "allow"
+tests_outside_test_module = "allow"
+verbose_file_reads = "allow"
+unneeded_field_pattern = "allow"
+partial_pub_fields = "allow"
+pub_use = "allow"
+pub_with_shorthand = "allow"
+pub_without_shorthand = "allow"
+question_mark_used = "allow"
+renamed_function_params = "allow"
+arbitrary_source_item_ordering = "allow"
+cfg_not_test = "allow"
+create_dir = "allow"
+decimal_literal_representation = "allow"
+error_impl_error = "allow"
+exit = "allow"
+field_scoped_visibility_modifiers = "allow"
+host_endian_bytes = "allow"
+big_endian_bytes = "allow"
+little_endian_bytes = "allow"
+impl_trait_in_params = "allow"
+map_with_unused_argument_over_ranges = "allow"
+missing_trait_methods = "allow"
+mixed_read_write_in_expression = "allow"
+non_zero_suggestions = "allow"
+overflow_check_conditional = "allow"
+precedence_bits = "allow"
+same_name_method = "allow"
+unreachable = "allow"
+unwrap_in_result = "allow"
+use_debug = "allow"
+missing_assert_message = "allow"
+missing_asserts_for_indexing = "allow"
+let_underscore_must_use = "allow"
+let_underscore_untyped = "allow"
+std_instead_of_core = "allow"
+std_instead_of_alloc = "allow"
+alloc_instead_of_core = "allow"
+needless_raw_strings = "allow"
+deref_by_slicing = "allow"
+redundant_test_prefix = "allow"
+single_char_add_str = "allow"
+return_and_then = "allow"
+string_lit_chars_any = "allow"
+unused_result_ok = "allow"
+blanket_clippy_restriction_lints = "allow"
+
+# restriction 噪音规则（大量误报，零性能影响）
+unseparated_literal_suffix = "allow"
+integer_division_remainder_used = "allow"
+undocumented_unsafe_blocks = "allow"
+allow_attributes = "allow"
+allow_attributes_without_reason = "allow"
+unused_trait_names = "allow"
+multiple_unsafe_ops_per_block = "allow"
+shadow_reuse = "allow"
+shadow_unrelated = "allow"
+shadow_same = "allow"
+unwrap_used = "allow"
+expect_used = "allow"
+ref_patterns = "allow"
+if_then_some_else_none = "allow"
+type_complexity = "allow"
+module_inception = "allow"
+cognitive_complexity = "allow"
+unnecessary_safety_comment = "allow"
+needless_update = "allow"
+
+# pedantic/nursery 过度严格
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+unnested_or_patterns = "allow"
+match_wildcard_for_single_variants = "allow"
+match_bool = "allow"
+manual_let_else = "allow"
+option_option = "allow"
+range_minus_one = "allow"
+range_plus_one = "allow"
+same_functions_in_if_condition = "allow"
+if_not_else = "allow"
+implicit_hasher = "allow"
+inconsistent_struct_constructor = "allow"
+index_refutable_slice = "allow"
+maybe_infinite_iter = "allow"
+iter_not_returning_iterator = "allow"
+into_iter_without_iter = "allow"
+iter_without_into_iter = "allow"
+unused_self = "allow"
+no_mangle_with_rust_abi = "allow"
+mismatching_type_param_order = "allow"
+non_std_lazy_statics = "allow"
+checked_conversions = "allow"
+use_self = "allow"
+wildcard_imports = "allow"
+unreadable_literal = "allow"
+used_underscore_binding = "allow"
+used_underscore_items = "allow"
+needless_lifetimes = "allow"
+elidable_lifetime_names = "allow"
+float_cmp = "allow"
+float_cmp_const = "allow"
+useless_let_if_seq = "allow"
+default_trait_access = "allow"
+should_panic_without_expect = "allow"
+ignore_without_reason = "allow"
+unnecessary_wraps = "allow"
+unnecessary_debug_formatting = "allow"
+unnecessary_trailing_comma = "allow"
+bool_to_int_with_if = "allow"
+manual_string_new = "allow"
+manual_instant_elapsed = "allow"
+ref_option = "allow"
+ref_option_ref = "allow"
+pub_underscore_fields = "allow"
+same_length_and_capacity = "allow"
+zero_sized_map_values = "allow"
+unnecessary_literal_bound = "allow"

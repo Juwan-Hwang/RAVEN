@@ -23,6 +23,7 @@ use std::convert::TryInto;
 
 /// 导航层配置
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct NavigationConfig {
     /// 是否启用 centroid overlay 锚点节点
     /// 设计文档：可选层，可关闭
@@ -32,14 +33,6 @@ pub struct NavigationConfig {
     pub centroid_count: Option<usize>,
 }
 
-impl Default for NavigationConfig {
-    fn default() -> Self {
-        Self {
-            enable_centroid_overlay: false, // 默认关闭，保留随机层级
-            centroid_count: None,           // None 表示自动 √N
-        }
-    }
-}
 
 /// 导航层
 ///
@@ -113,8 +106,8 @@ impl NavigationLayer {
             let r: f32 = rng.gen();
             let mut cum = 0.0f32;
             let mut chosen = 0;
-            for si in 0..sample_size {
-                cum += dists[si] * dists[si] / total;
+            for (si, &d) in dists.iter().enumerate().take(sample_size) {
+                cum += d * d / total;
                 if cum >= r {
                     chosen = si;
                     break;
@@ -159,10 +152,10 @@ impl NavigationLayer {
             }
             for j in 0..centers.len() {
                 if counts[j] > 0 {
-                    for d in 0..dim {
-                        new_centers[j][d] /= counts[j] as f32;
+                    for c in new_centers[j].iter_mut().take(dim) {
+                        *c /= counts[j] as f32;
                     }
-                    centers[j] = std::mem::replace(&mut new_centers[j], Vec::new());
+                    centers[j] = std::mem::take(&mut new_centers[j]);
                 }
             }
         }
@@ -266,13 +259,12 @@ impl LayeredNavigation {
         let ml = 1.0 / (m as f64).ln();
         let mut node_levels = vec![0u8; n];
         let mut max_level: u8 = 0;
-        for i in 0..n {
+        for level in node_levels.iter_mut().take(n) {
             // level = floor(-ln(U) * mL), U ~ Uniform(0,1)
             let u: f64 = rng.gen();
-            let level = (-(u.max(1e-10).ln()) * ml).floor() as u8;
-            node_levels[i] = level;
-            if level > max_level {
-                max_level = level;
+            *level = (-(u.max(1e-10).ln()) * ml).floor() as u8;
+            if *level > max_level {
+                max_level = *level;
             }
         }
         // 强制 medoid 为顶层（HNSW 的 enterpoint_node_ 始终在最高层）
@@ -405,7 +397,7 @@ impl LayeredNavigation {
             let neighbors = RobustPrune::prune(&candidates, u, vectors, dim, 1.0, k, false);
 
             // 设置 u 的边
-            level_adj[u as usize] = neighbors.clone();
+            level_adj[u as usize].clone_from(&neighbors);
 
             // 双向加边：u → v 已设，现在加 v → u
             for &v in &neighbors {
@@ -463,7 +455,7 @@ impl LayeredNavigation {
             let neighbors = RobustPrune::prune(&candidate_ids, u, vectors, dim, 1.0, k, false);
 
             // 设置 u 的边
-            level_adj[u as usize] = neighbors.clone();
+            level_adj[u as usize].clone_from(&neighbors);
 
             // 双向加边
             for &v in &neighbors {

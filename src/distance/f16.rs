@@ -18,7 +18,7 @@
 use std::arch::x86_64::*;
 
 /// f16 类型（用 u16 存储，便于 SIMD 和序列化）
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F16(pub u16);
 
 impl F16 {
@@ -61,12 +61,7 @@ impl F16 {
             let shift = 14 - new_exp;
             // round-to-nearest-even
             let half = 1 << (shift - 1);
-            let mant_rounded = (mant >> shift) + if (mant & (half - 1)) > half
-                || ((mant & half) > 0 && (mant & (half - 1)) >= half) {
-                1
-            } else {
-                0
-            };
+            let mant_rounded = (mant >> shift) + u32::from((mant & (half - 1)) > half || ((mant & half) > 0 && (mant & (half - 1)) >= half));
             return Self(sign | mant_rounded as u16);
         }
 
@@ -75,11 +70,7 @@ impl F16 {
         // round-to-nearest-even
         let rem = mant & 0x1FFF;
         let half = 0x1000;
-        let round = if rem > half || (rem == half && (mant_f16 & 1) == 1) {
-            1
-        } else {
-            0
-        };
+        let round = u16::from(rem > half || (rem == half && (mant_f16 & 1) == 1));
         let result = sign | ((new_exp as u16) << 10) | mant_f16 | round;
         // 处理 round 导致的进位
         let result = if (result & 0x7C00) == 0x7C00 {
@@ -149,7 +140,7 @@ pub fn l2_f16(a: &[f32], b: &[f32]) -> f32 {
         let af = F16::from_f32(a[i]).to_f32();
         let bf = F16::from_f32(b[i]).to_f32();
         let d = af - bf;
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }
@@ -166,7 +157,7 @@ pub fn l2_f16_packed(a: &[F16], b: &[F16]) -> f32 {
         let af = a[i].to_f32();
         let bf = b[i].to_f32();
         let d = af - bf;
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }
@@ -182,7 +173,7 @@ pub fn l2_f16_mixed(query: &[f32], db_packed: &[F16]) -> f32 {
         let q = query[i];
         let d = db_packed[i].to_f32();
         let diff = q - d;
-        sum += diff * diff;
+        sum = diff.mul_add(diff, sum);
     }
     sum
 }

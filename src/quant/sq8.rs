@@ -91,7 +91,7 @@ impl SQ8Params {
         assert_eq!(buf.len(), self.dim);
         for d in 0..self.dim {
             // FMA: v * inv_scale + neg_offset_div ≡ (v - offset) / scale
-            let q = (v[d] * self.inv_scale[d] + self.neg_offset_div[d]).round();
+            let q = v[d].mul_add(self.inv_scale[d], self.neg_offset_div[d]).round();
             buf[d] = q.clamp(0.0, 255.0) as u8;
         }
     }
@@ -103,7 +103,7 @@ impl SQ8Params {
         for i in 0..n {
             let row = &data[i * self.dim..(i + 1) * self.dim];
             for d in 0..self.dim {
-                let q = (row[d] * self.inv_scale[d] + self.neg_offset_div[d]).round();
+                let q = row[d].mul_add(self.inv_scale[d], self.neg_offset_div[d]).round();
                 codes[i * self.dim + d] = q.clamp(0.0, 255.0) as u8;
             }
         }
@@ -117,7 +117,7 @@ impl SQ8Params {
     pub fn decode(&self, code: &[u8]) -> Vec<f32> {
         assert_eq!(code.len(), self.dim);
         (0..self.dim)
-            .map(|d| code[d] as f32 * self.scale[d] + self.offset[d])
+            .map(|d| (code[d] as f32).mul_add(self.scale[d], self.offset[d]))
             .collect()
     }
 }
@@ -197,7 +197,7 @@ pub unsafe fn l2_sq8_avx2(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
     let remainder_start = chunks * 32;
     for i in remainder_start..n {
         let diff = qa[i] as i32 - qb[i] as i32;
-        result += (diff * diff) as f32 * scale_sq[i];
+        result = ((diff * diff) as f32).mul_add(scale_sq[i], result);
     }
 
     result
@@ -337,7 +337,7 @@ fn l2_sq8_scalar(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
     let mut sum = 0.0f32;
     for i in 0..n {
         let diff = qa[i] as i32 - qb[i] as i32;
-        sum += (diff * diff) as f32 * scale_sq[i];
+        sum = ((diff * diff) as f32).mul_add(scale_sq[i], sum);
     }
     sum
 }

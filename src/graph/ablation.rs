@@ -91,7 +91,7 @@ impl EdgeLengthHistogram {
         let range = max - min;
         let bin_width = if range > 0.0 { range / bins_count as f32 } else { 1.0 };
 
-        let bins: Vec<f32> = (0..=bins_count).map(|i| min + i as f32 * bin_width).collect();
+        let bins: Vec<f32> = (0..=bins_count).map(|i| (i as f32).mul_add(bin_width, min)).collect();
         let mut counts = vec![0usize; bins_count];
 
         for &v in &sorted {
@@ -164,7 +164,7 @@ impl ErrorDistribution {
         let range = max - min;
         let bin_width = if range > 0.0 { range / bins_count as f32 } else { 1.0 };
 
-        let bins: Vec<f32> = (0..=bins_count).map(|i| min + i as f32 * bin_width).collect();
+        let bins: Vec<f32> = (0..=bins_count).map(|i| (i as f32).mul_add(bin_width, min)).collect();
         let mut counts = vec![0usize; bins_count];
 
         for &v in &sorted {
@@ -353,9 +353,9 @@ impl AblationFramework {
 
         // 拓扑证据：β 增大时，低误差边比例上升
         let low_error_ratio_increasing = sorted.windows(2).all(|w| {
-            let low_before = w[0].error_distribution.counts.get(0).copied().unwrap_or(0) as f64
+            let low_before = w[0].error_distribution.counts.first().copied().unwrap_or(0) as f64
                 / w[0].error_distribution.total_edges.max(1) as f64;
-            let low_after = w[1].error_distribution.counts.get(0).copied().unwrap_or(0) as f64
+            let low_after = w[1].error_distribution.counts.first().copied().unwrap_or(0) as f64
                 / w[1].error_distribution.total_edges.max(1) as f64;
             low_after >= low_before
         });

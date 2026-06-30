@@ -47,12 +47,14 @@ pub enum QuantizationMode {
 /// AVQ 训练信号来源
 ///
 /// 设计文档附录 B：AVQ 训练信号的具体实现（Week 5-6 决策）
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TrainingSignal {
     /// 选项一：批次内高分对采样（推荐先验证）
     /// 设计文档：对训练集做批次内点积，选 high-score 对，无额外索引依赖
     /// 论文方法节："we sample high-inner-product pairs within training batches
     ///             to weight the quantization error"
+    #[default]
     BatchHighScorePairs,
     /// 选项二：预采样近邻对
     /// 设计文档：需先用 f32 或粗量化跑一个近似近邻图，再采样
@@ -60,12 +62,6 @@ pub enum TrainingSignal {
     PreSampledNeighborPairs,
 }
 
-impl Default for TrainingSignal {
-    fn default() -> Self {
-        // 设计文档：选项一推荐先验证
-        TrainingSignal::BatchHighScorePairs
-    }
-}
 
 /// AVQ codebook
 ///
@@ -227,8 +223,7 @@ impl AVQCodebook {
         let initial_recon = Self::reconstruction_loss(&self.centers, vectors, self.dim, self.m,
             self.k, self.sub_dim);
         let initial_ret = self.retrieval_aware_loss(vectors);
-        eprintln!("[finetune α={:.2}] start: recon={:.4}, ret={:.4}",
-            alpha, initial_recon, initial_ret);
+        eprintln!("[finetune α={alpha:.2}] start: recon={initial_recon:.4}, ret={initial_ret:.4}");
 
         for iter in 0..iterations {
             // 两项梯度分别累加，分别归一化，保证 alpha 真正控制权重比例
@@ -249,7 +244,7 @@ impl AVQCodebook {
                         let ci_sub = &ci[sub * sub_dim..(sub + 1) * sub_dim];
                         let grad_base = sub * self.k * sub_dim + code * sub_dim;
                         for d in 0..sub_dim {
-                            grad_recon[grad_base + d] += 2.0 * (ci_sub[d] - vi_sub[d]);
+                            grad_recon[grad_base + d] = 2.0f32.mul_add(ci_sub[d] - vi_sub[d], grad_recon[grad_base + d]);
                         }
                     }
                 }
@@ -307,7 +302,7 @@ impl AVQCodebook {
             for (idx, (gr, gret)) in grad_recon.iter().zip(grad_ret.iter()).enumerate() {
                 let total = alpha * gr + (1.0 - alpha) * gret;
                 if total.is_finite() {
-                    self.centers[idx] -= lr * total;
+                    self.centers[idx] = lr.mul_add(-total, self.centers[idx]);
                 }
             }
 
@@ -352,7 +347,7 @@ impl AVQCodebook {
             let decoded = cb.decode(&cb.encode(v));
             for d in 0..dim {
                 let diff = v[d] - decoded[d];
-                total += diff * diff;
+                total = diff.mul_add(diff, total);
             }
         }
         total
@@ -453,7 +448,7 @@ impl AVQCodebook {
             weights[j as usize] += w;
         }
         // 归一化
-        let max_w = weights.iter().cloned().fold(0.0f32, f32::max);
+        let max_w = weights.iter().copied().fold(0.0f32, f32::max);
         if max_w > 0.0 {
             for w in &mut weights {
                 *w /= max_w;
@@ -514,7 +509,7 @@ impl AVQCodebook {
     pub fn edge_error(&self, u: u32, v: u32, vectors: &[f32]) -> f32 {
         let eu = self.node_error(u, vectors);
         let ev = self.node_error(v, vectors);
-        (eu + ev) / 2.0
+        f32::midpoint(eu, ev)
     }
 
     /// 计算 retrieval-aware loss
@@ -536,7 +531,7 @@ impl AVQCodebook {
             let quant_ip: f32 = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
             let parallel_error = (orig_ip - quant_ip).powi(2);
 
-            total += w * parallel_error;
+            total = w.mul_add(parallel_error, total);
             total_weight += w;
         }
 
@@ -659,11 +654,11 @@ fn weighted_kmeans_pp(
         }
         for j in 0..k {
             if weight_sums[j] > 0.0 {
-                for d in 0..dim {
-                    new_centers[j][d] /= weight_sums[j];
+                for c in new_centers[j].iter_mut().take(dim) {
+                    *c /= weight_sums[j];
                 }
             } else {
-                new_centers[j] = centers[j].clone();
+                new_centers[j].clone_from(&centers[j]);
             }
         }
 
@@ -685,7 +680,7 @@ fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = 0.0f32;
     for i in 0..a.len() {
         let d = a[i] - b[i];
-        sum += d * d;
+        sum = d.mul_add(d, sum);
     }
     sum
 }

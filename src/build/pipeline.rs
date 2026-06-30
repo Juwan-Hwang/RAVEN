@@ -198,7 +198,7 @@ prune_strategy: PruneStrategy::DirectionalPrune,
             .map(|i| avq.node_error(i as u32, &vectors))
             .collect();
 
-        let error_fn = |u: u32, v: u32| (node_errors[u as usize] + node_errors[v as usize]) / 2.0;
+        let error_fn = |u: u32, v: u32| f32::midpoint(node_errors[u as usize], node_errors[v as usize]);
 
         let qa_config = QuantAwarePruneConfig {
             alpha: self.config.alpha,
@@ -261,16 +261,14 @@ prune_strategy: PruneStrategy::DirectionalPrune,
     /// RP-Tuning 生成变体阶段
     fn rp_tuning(&self, state: &PipelineState) -> Vec<crate::graph::AlphaVariant> {
         use crate::graph::{RPTuning, RPTuningConfig};
-        if let Some(ref graph) = state.graph {
+        state.graph.as_ref().map_or_else(Vec::new, |graph| {
             let config = RPTuningConfig {
                 scheme: Default::default(),
                 alpha_points: vec![1.0, 1.2, 1.5, 2.0],
                 r_max: self.config.r_max,
             };
             RPTuning::generate_variants(graph, &state.vectors, state.dim, &config)
-        } else {
-            Vec::new()
-        }
+        })
     }
 }
 

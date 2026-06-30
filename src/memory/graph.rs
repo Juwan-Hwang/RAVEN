@@ -153,9 +153,7 @@ impl HybridBlockedCsr {
 
         // 填入新邻居
         let main_count = neighbors.len().min(self.r_max);
-        for i in 0..main_count {
-            self.main_block[start + i] = neighbors[i];
-        }
+        self.main_block[start..start + main_count].copy_from_slice(&neighbors[..main_count]);
         // 超出部分写入 overflow
         if neighbors.len() > self.r_max {
             self.overflow[node_id as usize].extend_from_slice(&neighbors[self.r_max..]);

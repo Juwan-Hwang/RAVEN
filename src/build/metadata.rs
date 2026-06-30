@@ -38,10 +38,10 @@ impl Default for BuildConfig {
     fn default() -> Self {
         let r_max = 64;
         Self {
-            rng_algorithm: "chacha8".to_string(),
+            rng_algorithm: "chacha8".to_owned(),
             rng_seed: 42,
-            shard_strategy: "static_range".to_string(),
-            build_version: crate::BUILD_VERSION.to_string(),
+            shard_strategy: "static_range".to_owned(),
+            build_version: crate::BUILD_VERSION.to_owned(),
             alpha: 1.2,
             l_build: 200,
             r_max,
@@ -92,8 +92,7 @@ impl BuildMetadata {
             build_version: config.build_version.clone(),
             build_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_secs()),
             n,
             dim,
             alpha: config.alpha,

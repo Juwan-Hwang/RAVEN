@@ -7,9 +7,37 @@ float:
     module: ann_benchmarks.algorithms.raven
     name: raven
     run_groups:
-      # ═══ 主提交曲线：SQ8（高 recall 段优势） ═══
-      # recall 0.94-0.99，覆盖完整 Pareto 前沿
-      # 最优配置：nav_m=32, DirectionalPrune, SQ8 RAW, po=8, rr=3
+      # ═══ 主力提交：SQ4（全区间 Pareto 优越） ═══
+      # recall 0.94-0.99，SQ4 在整条曲线上 QPS 更高且 recall 损失随 ef 收敛
+      # ef=50: +11% QPS, recallΔ=-0.38pp | ef=100: +10% QPS, recallΔ=-0.12pp
+      # 内存 64MB（vs SQ8 128MB），带宽减半
+      raven-sq4:
+        args:
+          R: 32
+          L: 200
+          alpha: 1.2
+          nav_m: 32
+          directional: true
+          quantization: sq4
+          rerank_factor: 8
+        query_args:
+          ef_search: [40, 45, 50, 55, 65, 70, 80, 100]
+
+      # ═══ 多线程峰值：SQ4 + 16 threads ═══
+      raven-sq4-mt:
+        args:
+          R: 32
+          L: 200
+          alpha: 1.2
+          nav_m: 32
+          directional: true
+          quantization: sq4
+          rerank_factor: 8
+          threads: 16
+        query_args:
+          ef_search: [50]
+
+      # ═══ 保底提交：SQ8（让榜单自动取包络） ═══
       raven-sq8:
         args:
           R: 32
@@ -20,44 +48,4 @@ float:
           quantization: sq8
           rerank_factor: 3
         query_args:
-          ef_search: [40, 45, 50, 55, 60, 65, 70, 80, 100]
-
-      # ═══ 补充曲线：SQ4（中低 recall 段 QPS 优势） ═══
-      # 内存减半（64MB vs 128MB），带宽减半 → +11-14% QPS
-      # rr=8 弥补 4-bit 量化误差（rr=3→5 recall 跳变饱和）
-      raven-sq4:
-        args:
-          R: 32
-          L: 200
-          alpha: 1.2
-          nav_m: 32
-          directional: true
-          quantization: sq4
-          rerank_factor: 8        # ← 关键：不是 3，是 8
-        query_args:
-          ef_search: [40, 45, 50, 55, 65, 70, 80, 100]  # skip 60: cache aliasing at ef×rr=480
-
-      # ═══ 对比组：不同 R ═══
-      raven-sq8-R24:
-        args:
-          R: 24
-          L: 200
-          alpha: 1.2
-          nav_m: 32
-          directional: true
-          quantization: sq8
-          rerank_factor: 3
-        query_args:
-          ef_search: [40, 50, 60, 70, 100]
-
-      raven-sq8-R48:
-        args:
-          R: 48
-          L: 200
-          alpha: 1.2
-          nav_m: 32
-          directional: true
-          quantization: sq8
-          rerank_factor: 3
-        query_args:
-          ef_search: [40, 50, 60, 70, 100]
+          ef_search: [40, 45, 50, 55, 65, 70, 80, 100]

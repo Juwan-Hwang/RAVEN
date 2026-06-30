@@ -112,12 +112,12 @@ fn default_prefetch_offset() -> usize { 8 }
 impl Default for Config {
     fn default() -> Self {
         Self {
-            distance: "l2".to_string(),
+            distance: "l2".to_owned(),
             m: 32,
             ef_construction: 200,
             alpha: 1.2,
-            kernel: "auto".to_string(),
-            pq_mode: "avq".to_string(),
+            kernel: "auto".to_owned(),
+            pq_mode: "avq".to_owned(),
             prefetch_window: 4,
             beta: 0.3,
             r_soft_ratio: 1.5,
@@ -298,12 +298,12 @@ pub fn merge_config(
 
     // 3. CLI 参数
     if let Some(cli_cfg) = cli {
-        cfg.distance = cli_cfg.distance.clone();
+        cfg.distance.clone_from(&cli_cfg.distance);
         cfg.m = cli_cfg.m;
         cfg.ef_construction = cli_cfg.ef_construction;
         cfg.alpha = cli_cfg.alpha;
-        cfg.kernel = cli_cfg.kernel.clone();
-        cfg.pq_mode = cli_cfg.pq_mode.clone();
+        cfg.kernel.clone_from(&cli_cfg.kernel);
+        cfg.pq_mode.clone_from(&cli_cfg.pq_mode);
         cfg.prefetch_window = cli_cfg.prefetch_window;
         cfg.beta = cli_cfg.beta;
         cfg.r_soft_ratio = cli_cfg.r_soft_ratio;

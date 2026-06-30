@@ -47,7 +47,7 @@ pub unsafe fn l2_avx2(a: &[f32], b: &[f32]) -> Distance {
     for i in 0..remainder {
         let idx = chunks * 8 + i;
         let d = a[idx] - b[idx];
-        result += d * d;
+        result = d.mul_add(d, result);
     }
 
     result
@@ -75,7 +75,7 @@ pub unsafe fn ip_avx2(a: &[f32], b: &[f32]) -> Distance {
 
     for i in 0..remainder {
         let idx = chunks * 8 + i;
-        result += a[idx] * b[idx];
+        result = a[idx].mul_add(b[idx], result);
     }
 
     -result

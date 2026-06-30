@@ -18,7 +18,7 @@ pub const LATENCY_THRESHOLD_NS: u64 = 10_000;
 
 /// 稳定性验证持续时间（设计文档 F.10：连续运行 5 分钟）
 /// 注：实际验证时可通过配置缩短用于测试
-const STABILITY_TEST_DURATION: Duration = Duration::from_secs(300);
+const STABILITY_TEST_DURATION: Duration = Duration::from_mins(5);
 
 /// 稳定性通过标准：steady-state QPS >= 瞬时 QPS × 0.95（设计文档 F.10）
 const STABILITY_THRESHOLD: f64 = 0.95;
@@ -258,26 +258,20 @@ fn env_forced_kernel() -> Option<KernelVariant> {
 
 /// 默认缓存路径（~/.cache/raven/kernel_cache.toml）
 fn default_cache_path() -> std::path::PathBuf {
-    let mut p = std::env::var("RAVEN_CACHE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
+    let mut p = std::env::var("RAVEN_CACHE_DIR").map_or_else(|_| {
             dirs_fallback_cache_dir()
-        });
+        }, std::path::PathBuf::from);
     p.push("kernel_cache.toml");
     p
 }
 
 /// 不依赖外部 crate 的 cache 目录兜底
 fn dirs_fallback_cache_dir() -> std::path::PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        let mut p = std::path::PathBuf::from(home);
-        p.push(".cache");
-        p.push("raven");
+    std::env::var("HOME").map_or_else(|_| std::path::PathBuf::from("."), |home| {
+        let p = std::path::PathBuf::from(home).join(".cache").join("raven");
         std::fs::create_dir_all(&p).ok();
         p
-    } else {
-        std::path::PathBuf::from(".")
-    }
+    })
 }
 
 /// 从缓存加载内核选择
@@ -317,7 +311,7 @@ fn run_three_stage_selection(dim: usize, stability_duration: Duration) -> Kernel
     let finalist = candidates
         .into_iter()
         .max_by_key(|k| measure_qps(*k, dim))
-        .unwrap_or(fallback_kernel(dim));
+        .unwrap_or_else(|| fallback_kernel(dim));
 
     // 第三阶段：持续稳定性验证
     if !validate_kernel_stability(finalist, dim, stability_duration) {
@@ -347,6 +341,7 @@ pub fn fallback_kernel(_dim: usize) -> KernelVariant {
 /// 设计文档：缓存最优配置（首次选定后落盘，跳过微基准）
 /// 支持强制指定内核（环境变量或配置文件覆盖）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub struct KernelCache {
     /// 维度到内核的映射
     pub entries: Vec<KernelCacheEntry>,
@@ -394,26 +389,20 @@ impl KernelCache {
     pub fn set(&mut self, dim: usize, variant: KernelVariant) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         if let Some(entry) = self.entries.iter_mut().find(|e| e.dim == dim) {
-            entry.kernel = variant.name().to_string();
+            variant.name().clone_into(&mut entry.kernel);
             entry.selected_at = now;
         } else {
             self.entries.push(KernelCacheEntry {
                 dim,
-                kernel: variant.name().to_string(),
+                kernel: variant.name().to_owned(),
                 selected_at: now,
             });
         }
     }
 }
 
-impl Default for KernelCache {
-    fn default() -> Self {
-        Self { entries: Vec::new() }
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -23,18 +23,16 @@ fn main() {
                 None
             }
         })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
 
     // ── git dirty 标记（有未提交改动则加 +） ──
     let git_dirty = Command::new("git")
         .args(["status", "--porcelain"])
         .output()
         .ok()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
+        .is_some_and(|o| !o.stdout.is_empty());
     let git_hash_full = if git_dirty {
-        format!("{}+dirty", git_hash)
+        format!("{git_hash}+dirty")
     } else {
         git_hash
     };
@@ -51,9 +49,8 @@ fn main() {
                 None
             }
         })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
 
-    println!("cargo:rustc-env=RAVEN_GIT_HASH={}", git_hash_full);
-    println!("cargo:rustc-env=RAVEN_BUILD_TS={}", build_ts);
+    println!("cargo:rustc-env=RAVEN_GIT_HASH={git_hash_full}");
+    println!("cargo:rustc-env=RAVEN_BUILD_TS={build_ts}");
 }
