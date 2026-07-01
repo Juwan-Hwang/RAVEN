@@ -7,10 +7,7 @@ float:
     module: ann_benchmarks.algorithms.raven
     name: raven
     run_groups:
-      # ═══ 主力提交：SQ4（全区间 Pareto 优越） ═══
-      # recall 0.94-0.99，SQ4 在整条曲线上 QPS 更高且 recall 损失随 ef 收敛
-      # ef=50: +11% QPS, recallΔ=-0.38pp | ef=100: +10% QPS, recallΔ=-0.12pp
-      # 内存 64MB（vs SQ8 128MB），带宽减半
+      # 固定 ef 模式：8 个 ef 值，建图 1 次
       raven-sq4:
         args:
           R: 32
@@ -20,14 +17,10 @@ float:
           directional: true
           quantization: sq4
           rerank_factor: 8
-        query_args:
-          ef_search: [40, 45, 50, 55, 65, 70, 80, 100]
+        query_args: [[40, 45, 50, 55, 65, 70, 80, 100]]
 
-      # ═══ Pareto 填隙：SQ4 + AdaptiveEf ═══
-      # 根据 query→entry-point 距离分布动态预测 ef，
-      # 在固定 ef 曲线的 recall 间隙（0.945-0.960）生成 Pareto 最优点。
-      # query_args 格式：[gamma, min_ef, max_ef]
-      # 配置精选自 adaptive_ef_bench 多轮验证（recall 确定性，不受热节流影响）
+      # Adaptive ef 模式：gamma × min_ef × max_ef 笛卡尔积
+      # 合并原来的 3 个 run_group（35-65, 35-75, 35-85），建图 1 次
       raven-sq4-adaptive:
         args:
           R: 32
@@ -37,18 +30,12 @@ float:
           directional: true
           quantization: sq4
           rerank_factor: 8
-          adaptive_ef: true
         query_args:
-          - [3.5, 35, 65]   # recall≈0.9453 — 填 ef=40 与 ef=45 之间
-          - [2.4, 35, 65]   # recall≈0.9493
-          - [2.2, 35, 65]   # recall≈0.9501
-          - [2.0, 35, 65]   # recall≈0.9513
-          - [2.3, 35, 75]   # recall≈0.9537 — 填 ef=45 与 ef=50 之间
-          - [2.0, 35, 75]   # recall≈0.9558
-          - [2.3, 35, 85]   # recall≈0.9577
-          - [2.0, 35, 85]   # recall≈0.9600 — 填 ef=50 与 ef=55 之间
+          - [3.5, 2.4, 2.2, 2.0, 2.3]
+          - [35]
+          - [65, 75, 85]
 
-      # ═══ 多线程峰值：SQ4 + 16 threads ═══
+      # 多线程模式：16 线程，建图 1 次
       raven-sq4-mt:
         args:
           R: 32
@@ -59,5 +46,4 @@ float:
           quantization: sq4
           rerank_factor: 8
           threads: 16
-        query_args:
-          ef_search: [50]
+        query_args: [[50]]

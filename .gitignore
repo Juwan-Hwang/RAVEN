@@ -24,6 +24,7 @@ __pycache__/
 /glass-ref/
 /NGT-ref/
 /patann-main/
+/ann-benchmarks-repo/
 
 # Zip archives
 *.zip

@@ -30,18 +30,12 @@ class Raven(BaseANN):
         self.quantization = method_param.get("quantization", "sq8")
         self.rerank_factor = method_param.get("rerank_factor", 3)
         self.threads = method_param.get("threads", 0)  # 0 = single-thread
-        self.adaptive_ef = method_param.get("adaptive_ef", False)
-
-        if self.adaptive_ef:
-            self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, adaptive)" % (
-                self.R, self.L, self.nav_m,
-                self.quantization, self.rerank_factor,
-            )
-        else:
-            self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d)" % (
-                self.R, self.L, self.nav_m,
-                self.quantization, self.rerank_factor,
-            )
+        # adaptive_ef 不再是构造参数：fit 时始终预计算 adaptive_config，
+        # set_query_arguments 根据参数个数(1=ef, 3=gamma,min,max)切换模式
+        self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d)" % (
+            self.R, self.L, self.nav_m,
+            self.quantization, self.rerank_factor,
+        )
 
     def fit(self, X):
         # ann-benchmarks passes float32 numpy arrays
@@ -58,13 +52,14 @@ class Raven(BaseANN):
             quantization=self.quantization,
             rerank_factor=self.rerank_factor,
             threads=self.threads,
-            adaptive_ef=self.adaptive_ef,
+            adaptive_ef=True,  # 始终预计算，查询时用 set_ef/set_adaptive_ef 切换
         )
         self.index.build(X)
         self.searcher = self.index.searcher()
 
     def set_query_arguments(self, *args):
-        if self.adaptive_ef:
+        if len(args) == 3:
+            # adaptive 模式: [gamma, min_ef, max_ef]
             gamma, min_ef, max_ef = args
             self.searcher.set_adaptive_ef(gamma, min_ef, max_ef)
             self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, γ=%.1f(%d,%d))" % (
@@ -73,6 +68,7 @@ class Raven(BaseANN):
                 gamma, min_ef, max_ef,
             )
         else:
+            # 固定 ef 模式
             ef = args[0]
             self.searcher.set_ef(ef)
             self.name = "raven_(R=%d, L=%d, nav_m=%d, %s, rr=%d, ef=%d)" % (
