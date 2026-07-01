@@ -49,9 +49,9 @@ impl PyIndex {
     /// 参数对应全参数扫描后的最优配置：
     ///   R=32, L=200, alpha=1.2, nav_m=32, directional=True
     ///   quantization="sq8" (default) 或 "sq4"
-    ///   rerank_factor=3 (SQ8) 或 8 (SQ4)
+    ///   rerank_factor=5 (默认，SQ4/SQ8 均适用)
     #[new]
-    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=3, threads=0, adaptive_ef=false))]
+    #[pyo3(signature = (metric, dim, r=32, l=200, alpha=1.2, nav_m=32, directional=true, quantization="sq8", rerank_factor=5, threads=0, adaptive_ef=false))]
     fn new(
         metric: &str,
         dim: usize,
@@ -169,7 +169,7 @@ impl PyIndex {
             sq8,
             sq4,
             ef: 50,
-            po: 8,
+            po: 16,
             rerank: self.rerank,
             threads: self.threads,
             adaptive_config,

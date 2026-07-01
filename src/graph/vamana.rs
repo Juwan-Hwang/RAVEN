@@ -1487,7 +1487,7 @@ impl<'a> GraphSearcher<'a> {
             navigation: None,
             last_visited_count: 0,
             last_ef_used: ef_search,
-            prefetch_offset: 8,
+            prefetch_offset: 16,
             sq8: None,
             sq4: None,
             pq4: None,
@@ -1495,7 +1495,7 @@ impl<'a> GraphSearcher<'a> {
             adaptive_ef: None,
             pool: LinearPool::new(ef_search),
             query_code_buf: vec![0u8; dim],
-            rerank_factor: 3,
+            rerank_factor: 5,
             f16: None,
         }
     }
@@ -1521,7 +1521,7 @@ impl<'a> GraphSearcher<'a> {
             navigation: Some(navigation),
             last_visited_count: 0,
             last_ef_used: ef_search,
-            prefetch_offset: 8,
+            prefetch_offset: 16,
             sq8: None,
             sq4: None,
             pq4: None,
@@ -1529,7 +1529,7 @@ impl<'a> GraphSearcher<'a> {
             adaptive_ef: None,
             pool: LinearPool::new(ef_search),
             query_code_buf: vec![0u8; dim],
-            rerank_factor: 3,
+            rerank_factor: 5,
             f16: None,
         }
     }

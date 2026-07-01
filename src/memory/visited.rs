@@ -28,11 +28,15 @@ impl VisitedTracker {
     /// 创建 VisitedTracker
     ///
     /// n: 节点总数
-    /// ef_search: 搜索宽度，history 按 ef_search × 3 预分配（设计文档第三层）
+    /// ef_search: 搜索宽度，history 按 ef_search × 256 预分配
+    ///
+    /// 容量公式：ef_search × max_degree_estimate。max_degree_estimate = 256
+    /// 覆盖 R ≤ 256（远超实际使用范围），确保 visit_unchecked_branchless
+    /// 的无检查写入不会越界。内存开销：ef=100 → 100KB，远小于 visited 数组。
     pub fn new(n: usize, ef_search: usize) -> Self {
         Self {
             visited: vec![0u8; n],
-            history: Vec::with_capacity(ef_search * 64),
+            history: Vec::with_capacity(ef_search * 256),
         }
     }
 
@@ -77,7 +81,9 @@ impl VisitedTracker {
     /// - 消除 history.push() 内部的 capacity 检查分支
     ///
     /// SAFETY: idx 必须 < visited.len()
-    ///         history 容量必须 > 本次查询的唯一节点访问数
+    ///
+    /// history 容量通过 new(ef_search × 256) 保证充足，
+    /// 极端情况下若仍溢出，自动 fallback 到 push（带扩容）。
     #[inline(always)]
     pub unsafe fn visit_unchecked_branchless(&mut self, idx: u32) -> bool {
         let i = idx as usize;
@@ -86,9 +92,13 @@ impl VisitedTracker {
         let is_new = (was == 0) as usize;
         // Branchless history push: always write, only advance if new
         let len = self.history.len();
-        debug_assert!(len < self.history.capacity(), "history overflow");
-        *self.history.as_mut_ptr().add(len) = idx;
-        self.history.set_len(len + is_new);
+        if len < self.history.capacity() {
+            *self.history.as_mut_ptr().add(len) = idx;
+            self.history.set_len(len + is_new);
+        } else if is_new == 1 {
+            // 极端溢出保护：fallback 到 push（自动扩容）
+            self.history.push(idx);
+        }
         is_new == 1
     }
 
