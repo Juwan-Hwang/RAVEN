@@ -1,0 +1,34 @@
+name: SISAP26 task 2 dev evaluation
+on:
+  workflow_dispatch:
+    inputs:
+      balance:
+        description: 'RAVEN_BALANCE (1 = query balancing on, 0 = off)'
+        required: true
+        default: '1'
+jobs:
+  dev-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t raven-sisap26 .
+      - name: Fetch llama-dev
+        run: |
+          mkdir -p data
+          curl -sSL -o data/llama-dev.h5 https://huggingface.co/datasets/SISAP-Challenges/SISAP2026/resolve/main/llama-dev/llama-dev.h5
+          curl -sSL -o data/config.json https://huggingface.co/datasets/SISAP-Challenges/SISAP2026/resolve/main/llama-dev/config.json
+      - name: Run search (same command as TIRA)
+        run: |
+          mkdir -p out && chmod 777 out
+          docker run --rm -e RAVEN_BALANCE=${{ inputs.balance }} -v $PWD/data:/in:ro -v $PWD/out:/out raven-sisap26 \
+            sh -c '/app/search.py --input /in/*.h5 --task-description /in/config.json --output /out'
+      - name: Evaluate every result file
+        run: |
+          echo "directory order:"; ls -U out
+          docker run --rm -v $PWD/data:/in:ro -v $PWD/out:/out raven-sisap26 python /app/eval.py /in/llama-dev.h5 /out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev-results
+          path: out
