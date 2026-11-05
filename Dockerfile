@@ -12,4 +12,4 @@ COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir numpy h5py /wheels/*.whl && rm -rf /wheels
 WORKDIR /app
 COPY sisap26/ /app/
-ENTRYPOINT ["python", "/app/search.py"]
+CMD ["python", "/app/search.py", "--help"]
