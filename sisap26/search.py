@@ -35,7 +35,7 @@ L = int(os.environ.get("RAVEN_L", 200))
 RR = int(os.environ.get("RAVEN_RR", 4))
 BALANCE = os.environ.get("RAVEN_BALANCE", "1") != "0"
 P = float(os.environ.get("RAVEN_BALANCE_P", 0.25))
-EFS_BAL = "50,60,70,85,100,115,130,145,155,160,165,170,180,190,210"
+EFS_BAL = "60,85,110,130,145,155,160,165,170,175,180,190,200,215,235"
 EFS_RAW = "100,130,160,180,200,210,220,230,240,250,260,280,300,340,400"
 EFS = [int(e) for e in os.environ.get("RAVEN_EFS", EFS_BAL if BALANCE else EFS_RAW).split(",")][:15]
 PRIOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama_dev_query_moment.npy")
@@ -108,7 +108,7 @@ def main():
         D = -np.einsum("qkd,qd->qk", X[I], Q)
         querytime = time.time() - t
         params = f"r={R},l={L},rr={RR},ef={ef},sq8adc" + (f",balance_p={P}" if Wq is not None else "")
-        fn = os.path.join(a.output, f"raven_r{R}_l{L}_ef{ef}.h5")
+        fn = os.path.join(a.output, f"raven_r{R}_l{L}_ef{ef:04d}.h5")
         with h5py.File(fn, "w") as f:
             f.attrs.update(algo="raven", task=task, dataset=cfg.get("dataset_name", ""), buildtime=buildtime,
                            querytime=querytime, params=params)
