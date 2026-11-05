@@ -57,9 +57,16 @@ Kept for reference, with corrections. The rival rows are the ann-benchmarks webs
 ¹ The @0.95 and @0.97 entries are the same measurement: ef=40, recall 0.9746 (the lowest ef that was measured).
 
 - At 0.98, qsgngt leads this table (29,920 vs RAVEN 28,804).
-- The index-size column has been removed: RAVEN's value was a kB/MB unit error (see above), and the rival values copied from the website very likely carry the same error; they have not been re-measured.
+- The index-size column has been removed. RAVEN's value was a kB/MB unit error (see above), and so were the rival values: ann-benchmarks reports `index_size` in kB, and the current sift-128 page (checked 2026-11-05) lists qsgngt at 5,183,608–6,535,088 kB, i.e. about 5.2–6.5 GB, not "5.4 MB". Descartes and kgn no longer appear on that page, so their old "7.1 MB" / "3.3 MB" entries could not be re-checked; read as kB they would be about 7.1 GB and 3.3 GB. No index-size ratio is claimed here.
+- The rival rows were copied from the website when this table was first written; Descartes and kgn are not on the current page, so those two rows cannot be re-checked there.
 
-**Multi-threaded** (separate from the single-thread tables): ef=50, recall 0.9827, 153,369 QPS with 16 threads via `batch_search` on the same desktop (5.8× its single-thread figure). RAVEN has a parallel batch path (`batch_search`); the tables above are single-thread only.
+#### Multi-threaded (separate; not comparable with the single-thread tables)
+
+| Engine | Threads | API | ef | recall@10 | QPS | Machine |
+|---|---:|---|---:|---:|---:|---|
+| RAVEN | 16 | `batch_search` | 50 | 0.9827 | 153,369 | author's desktop, AMD Ryzen 7 8845H (5.8× its own single-thread figure) |
+
+No rival was measured multi-threaded, so there is no multi-threaded comparison.
 
 ### Architecture
 
