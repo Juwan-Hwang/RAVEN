@@ -61,7 +61,12 @@ def main():
     ap.add_argument("--output", required=True)
     ap.add_argument("--task", default=None)
     ap.add_argument("--task-description", default=None)
+    ap.add_argument("--efs", default=None, help="comma-separated ef values; overrides the default grid "
+                    "(e.g. --efs 180 writes a single result file)")
     a = ap.parse_args()
+    global EFS
+    if a.efs:
+        EFS = [int(e) for e in a.efs.split(",")][:15]
     cfg = json.load(open(a.task_description)) if a.task_description and os.path.exists(a.task_description) else {}
     task = a.task or cfg.get("task", "task2")
     if task != "task2":
