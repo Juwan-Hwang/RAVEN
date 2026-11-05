@@ -13,41 +13,53 @@ RAVEN implements a Vamana/DiskANN-style graph index with a unified, battle-teste
 
 ### Performance
 
-SIFT-1M benchmark (1M vectors, dim=128, SQ4, single thread, 2026-11-05):
+All numbers below are single-thread, k=10, ann-benchmarks recall (a returned point counts if its distance is ≤ the true 10th-NN distance + 1e-3).
+
+#### SIFT-1M, same machine, same process (2026-11-05)
+
+Machine: Instabox microVM, AMD EPYC (Zen 5), 4 vCPU / 8 GiB, Debian 13. Both engines run through their Python bindings in one process, search pinned to one core, 10,000 queries, median of 3 passes, two interleaved rounds (RAVEN→Descartes, then Descartes→RAVEN). RAVEN = this repository at `f88ad5d` with the configuration in this README (R=32, L=200, α=1.2, nav_m=32, SQ4, rerank 5, po 16). Descartes = `py01ai` with the ann-benchmarks configuration M=64, S=2, L=384 (ex=0 and ex=1 points).
+
+QPS at a recall level is interpolated linearly along each engine's Pareto front; the range covers the two rounds.
+
+| Algorithm | @0.90 | @0.95 | @0.97 | @0.98 | @0.99 |
+|---|---:|---:|---:|---:|---:|
+| RAVEN | 44.3–45.5K | 35.0–35.2K | 28.1K | 22.9–23.0K | 16.5K |
+| Descartes | 39.4–40.1K | 29.7–30.7K | 24.1–25.2K | 21.3–22.0K | 17.5–17.7K |
+| RAVEN / Descartes | 1.10–1.16× | 1.14–1.18× | 1.11–1.16× | 1.04–1.08× | **0.93–0.94×** |
+
+At 0.99 Descartes is ahead on the interpolated front (taking instead the best measured point with recall ≥ 0.99, the two are level: 15.9–16.1K vs 15.6–15.8K). qsgngt and kgn were not run on this machine.
+
+RAVEN points (same run, QPS = range over the two rounds):
 
 | ef | recall@10 | QPS |
 |---:|---:|---:|
-| 40 | 0.9746 | 30,540 |
-| 45 | 0.9789 | 28,804 |
-| 50 | 0.9827 | 26,464 |
-| 55 | 0.9855 | 24,026 |
-| 65 | 0.9892 | 21,408 |
-| 70 | 0.9905 | 20,141 |
-| 80 | 0.9926 | 18,008 |
-| 100 | 0.9952 | 14,640 |
+| 25 | 0.9442 | 37.0–37.3K |
+| 30 | 0.9587 | 31.9–32.2K |
+| 40 | 0.9746 | 25.4–26.0K |
+| 50 | 0.9827 | 21.4–21.8K |
+| 60 | 0.9875 | 18.2–18.8K |
+| 70 | 0.9905 | 15.9–16.1K |
+| 100 | 0.9952 | 11.7–12.1K |
 
-**Working point**: ef=50, recall=0.9827, QPS=26,464. Index size: 1.5 MB (64 B/vector).
+**Index size**: about 1.3 GB for SIFT-1M (process RSS grew by 1,330 MB during the build on this machine; ann-benchmarks reports `index_size` ≈ 1,299,700 kB). This includes the f32 vectors used for reranking; the SQ4 codes alone are 64 B/vector. An earlier version of this README said "1.5 MB" — that was the kB figure read as MB.
 
-**Multi-threaded**: ef=50, recall=0.9827, QPS=153,369 (5.8× single-thread, 16 threads, `batch_search`).
+#### Earlier table (superseded; not a same-machine comparison)
 
-### Comparison (same machine, same day)
+Kept for reference, with corrections. The rival rows are the ann-benchmarks website values (their own hardware and harness: best run with recall ≥ the level). The RAVEN row was measured with this repository's own harness on the author's desktop (AMD Ryzen 7 8845H) and uses a different rule: the first measured ef point at or above the level, not an interpolated or best-run value. The two recall/QPS conventions differ, so the rows are not directly comparable.
 
-ann-benchmarks, sift-128-euclidean (1M × 128-dim), single-threaded QPS at matched recall levels:
+| Algorithm | @0.95 | @0.97 | @0.98 | @0.99 |
+|---|---:|---:|---:|---:|
+| qsgngt (website) | 34,841 | 29,920 | **29,920** | 22,425 |
+| descartes (website) | **37,722** | **33,156** | 26,616 | **23,957** |
+| kgn (website) | 32,185 | 24,161 | 22,225 | 16,484 |
+| RAVEN (desktop) | 30,540¹ | 30,540¹ | 28,804 | 20,141 |
 
-| Algorithm | @0.95 | @0.97 | @0.98 | @0.99 | Index size |
-|---|---:|---:|---:|---:|---:|
-| qsgngt | 34,841 | 29,920 | **29,920** | **22,425** | 5.4 MB |
-| descartes | **37,722** | **33,156** | 26,616 | 23,957 | 7.1 MB |
-| kgn | 32,185 | 24,161 | 22,225 | 16,484 | 3.3 MB |
-| RAVEN | 30,540¹ | 30,540 | 28,804 | 20,141 | **1.5 MB** |
-| RAVEN MT16 | — | — | 153,369 (recall 0.983) | — | **1.5 MB** |
+¹ The @0.95 and @0.97 entries are the same measurement: ef=40, recall 0.9746 (the lowest ef that was measured).
 
-¹ RAVEN's pipeline curve starts at recall 0.9746 (ef=40); lower-recall operating points are not part of the tuned envelope.
+- At 0.98, qsgngt leads this table (29,920 vs RAVEN 28,804).
+- The index-size column has been removed: RAVEN's value was a kB/MB unit error (see above), and the rival values copied from the website very likely carry the same error; they have not been re-measured.
 
-Notes:
-
-- RAVEN is the smallest index by 2.2–4.7× (SQ4, 64 B/vector) and the only one with a parallel batch path (`batch_query`).
-- At recall 0.98, RAVEN single-thread leads descartes by +8.2%; MT16 reaches 153K QPS.
+**Multi-threaded** (separate from the single-thread tables): ef=50, recall 0.9827, 153,369 QPS with 16 threads via `batch_search` on the same desktop (5.8× its single-thread figure). RAVEN has a parallel batch path (`batch_search`); the tables above are single-thread only.
 
 ### Architecture
 
