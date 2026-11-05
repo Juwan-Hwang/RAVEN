@@ -26,7 +26,7 @@ pub struct HybridBlockedCsr {
     r_max: usize,
     /// 主块：n × r_max 的连续数组，空槽填 SENTINEL
     /// 邻居起点 = node_id × r_max，无需 offset 数组
-    main_block: Vec<u32>,
+    main_block: crate::memory::aligned::AlignedBuf<u32>,
     /// overflow 区：度数超 R_max 的节点的额外邻居
     /// key = node_id, value = 溢出的邻居列表
     overflow: Vec<Vec<u32>>,
@@ -49,7 +49,7 @@ impl HybridBlockedCsr {
         Self {
             n,
             r_max,
-            main_block: vec![SENTINEL; n * r_max],
+            main_block: vec![SENTINEL; n * r_max].into(),
             overflow: vec![Vec::new(); n],
             degrees: vec![0u16; n],
         }
@@ -75,6 +75,10 @@ impl HybridBlockedCsr {
     /// 邻居起点 = node_id × r_max，无需 offset 数组。
     /// 使用 degrees 数组直接切片，O(1) 复杂度（无需 SENTINEL 线性扫描）。
     #[inline(always)]
+    /// R14：degrees 数组首地址（用于预取下一候选的度数）
+    #[inline(always)]
+    pub fn degrees_ptr(&self) -> *const u16 { self.degrees.as_ptr() }
+
     pub fn neighbors(&self, node_id: u32) -> &[u32] {
         let start = node_id as usize * self.r_max;
         let len = self.degrees[node_id as usize] as usize;
@@ -93,7 +97,7 @@ impl HybridBlockedCsr {
     pub fn prefetch_neighbors(&self, node_id: u32) {
         let start = node_id as usize * self.r_max;
         let ptr = self.main_block.as_ptr().wrapping_add(start) as *const i8;
-        unsafe { std::arch::x86_64::_mm_prefetch::<0>(ptr); }
+        unsafe { crate::arch::prefetch_l1(ptr); }
     }
 
     /// 获取节点 node_id 的所有邻居（主块 + overflow）
@@ -239,12 +243,18 @@ impl HybridBlockedCsr {
             })
             .collect();
 
-        Self { n, r_max, main_block, overflow, degrees }
+        Self { n, r_max, main_block: main_block.into(), overflow, degrees }
     }
 
     /// 导出主块引用（用于序列化）
+    /// H42 A/B：与外部缓冲交换 main_block（长度须一致）
+    pub fn swap_main_block(&mut self, other: &mut crate::memory::aligned::AlignedBuf<u32>) {
+        assert_eq!(other.len(), self.main_block.len());
+        std::mem::swap(&mut self.main_block, other);
+    }
+
     pub fn main_block(&self) -> &[u32] {
-        &self.main_block
+        &self.main_block[..]
     }
 
     /// 导出 overflow 引用（用于序列化）
@@ -328,7 +338,7 @@ impl super::serialize::Serializable for HybridBlockedCsr {
         buf.extend_from_slice(&(self.r_max as u64).to_le_bytes());
         buf.extend_from_slice(&(self.main_block.len() as u64).to_le_bytes());
         // main_block（u32 数组，直接按字节拷贝）
-        let mb_bytes: &[u8] = bytemuck::cast_slice(&self.main_block);
+        let mb_bytes: &[u8] = bytemuck::cast_slice(&self.main_block[..]);
         buf.extend_from_slice(mb_bytes);
         // overflow：只存非空条目以节省空间
         let nonempty: Vec<(usize, &Vec<u32>)> = self.overflow.iter().enumerate()
@@ -362,9 +372,7 @@ impl super::serialize::Serializable for HybridBlockedCsr {
                 "main_block truncated",
             )));
         }
-        let main_block: Vec<u32> = bytemuck::cast_slice(
-            &bytes[24..24 + mb_bytes_needed],
-        ).to_vec();
+        let main_block: Vec<u32> = crate::util_le_u32_vec(&bytes[24..24 + mb_bytes_needed]);
 
         let mut off = 24 + mb_bytes_needed;
         let ov_count = u64::from_le_bytes(bytes[off..off+8].try_into()?) as usize;
@@ -388,7 +396,7 @@ impl super::serialize::Serializable for HybridBlockedCsr {
                     "overflow entry data truncated",
                 )));
             }
-            let data: Vec<u32> = bytemuck::cast_slice(&bytes[off..off + v_len * 4]).to_vec();
+            let data: Vec<u32> = crate::util_le_u32_vec(&bytes[off..off + v_len * 4]);
             off += v_len * 4;
             if node_id < n {
                 overflow[node_id] = data;

@@ -13,6 +13,7 @@
 //! AVX2 内核：每次处理 16 个 u8 → 2×__m128i(i16) → madd_epi16 → 2×__m128(i32) → cvt f32 → FMA
 //! 128 维 = 8 次迭代（每次 16 维）
 
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 /// SQ8 量化参数（per-dimension min/max/scale）
@@ -143,6 +144,7 @@ impl SQ8Params {
 ///   - 实测 QPS +6.6%（11997 → 12786 @ ef=50），recall 完全一致
 ///
 /// SIFT-128: 4 次迭代（vs 128-bit 版 8 次），吞吐翻倍
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn l2_sq8_avx2(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
@@ -204,6 +206,7 @@ pub unsafe fn l2_sq8_avx2(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
 }
 
 /// __m256 水平求和（8 个 f32 → 1 个 f32）
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn horizontal_sum_256(v: __m256) -> f32 {
     // [a, b, c, d, e, f, g, h]
@@ -214,6 +217,7 @@ unsafe fn horizontal_sum_256(v: __m256) -> f32 {
 }
 
 /// __m128 水平求和（4 个 f32 → 1 个 f32）
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn horizontal_sum_128(v: __m128) -> f32 {
     let shuf = _mm_movehdup_ps(v); // [b, b, d, d]
@@ -226,6 +230,7 @@ unsafe fn horizontal_sum_128(v: __m128) -> f32 {
 // ─── i32 水平求和（无加权距离核专用） ──────────────────────────────────
 
 /// __m256i 水平求和（8 个 i32 → 1 个 i32）
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn horizontal_sum_i32_256(v: __m256i) -> i32 {
     let hi128 = _mm256_extracti128_si256::<1>(v);
@@ -240,6 +245,7 @@ unsafe fn horizontal_sum_i32_256(v: __m256i) -> i32 {
 ///   [s0, s1, s2, s3] → shuffle 0x4E → [s2, s3, s0, s1]
 ///   add → [s0+s2, s1+s3, ...] → shuffle 0x01 → [s1+s3, s0+s2, ...]
 ///   add → [s0+s1+s2+s3, ...]
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn horizontal_sum_i32_128(v: __m128i) -> i32 {
     let shuf = _mm_shuffle_epi32::<0x4E>(v); // _MM_SHUFFLE(1,0,3,2): [s2, s3, s0, s1]
@@ -262,6 +268,7 @@ unsafe fn horizontal_sum_i32_128(v: __m128i) -> i32 {
 /// - SIFT-128 共 4 chunks，净节省 24 条指令
 ///
 /// 用途：图导航只需相对排序，最终 f32 rerank 保证精度
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn l2_sq8_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
@@ -306,6 +313,92 @@ pub unsafe fn l2_sq8_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
     result
 }
 
+
+// ─── NEON L2 距离核（H01：aarch64） ───────────────────────────────────
+
+/// SQ8 加权 L2 距离（NEON）：每次 16 维
+///
+/// |a-b|（vabdq_u8）→ u16 平方（vmull_u8）→ u32 → f32 → FMA scale_sq
+///
+/// # Safety
+/// `qa.len() == qb.len() == scale_sq.len()`
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub unsafe fn l2_sq8_neon(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let n = qa.len();
+    debug_assert_eq!(qb.len(), n);
+    debug_assert_eq!(scale_sq.len(), n);
+    let pa = qa.as_ptr();
+    let pb = qb.as_ptr();
+    let ps = scale_sq.as_ptr();
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let chunks = n / 16;
+    for c in 0..chunks {
+        let base = c * 16;
+        let d = vabdq_u8(vld1q_u8(pa.add(base)), vld1q_u8(pb.add(base)));
+        let sq_lo = vmull_u8(vget_low_u8(d), vget_low_u8(d)); // 8 × u16
+        let sq_hi = vmull_high_u8(d, d); // 8 × u16
+        let f0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(sq_lo)));
+        let f1 = vcvtq_f32_u32(vmovl_high_u16(sq_lo));
+        let f2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(sq_hi)));
+        let f3 = vcvtq_f32_u32(vmovl_high_u16(sq_hi));
+        acc0 = vfmaq_f32(acc0, f0, vld1q_f32(ps.add(base)));
+        acc1 = vfmaq_f32(acc1, f1, vld1q_f32(ps.add(base + 4)));
+        acc0 = vfmaq_f32(acc0, f2, vld1q_f32(ps.add(base + 8)));
+        acc1 = vfmaq_f32(acc1, f3, vld1q_f32(ps.add(base + 12)));
+    }
+    let mut result = vaddvq_f32(vaddq_f32(acc0, acc1));
+    for i in chunks * 16..n {
+        let diff = qa[i] as i32 - qb[i] as i32;
+        result = ((diff * diff) as f32).mul_add(scale_sq[i], result);
+    }
+    result
+}
+
+/// SQ8 无加权 L2 距离（NEON）：Σ (qa-qb)²
+///
+/// dotprod 可用时：|a-b| 自点积（udot，16 维/指令）；否则 vmull_u8 + vpadalq_u16。
+///
+/// # Safety
+/// `qa.len() == qb.len()`
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub unsafe fn l2_sq8_raw_neon(qa: &[u8], qb: &[u8]) -> f32 {
+    use std::arch::aarch64::*;
+    let n = qa.len();
+    debug_assert_eq!(qb.len(), n);
+    let pa = qa.as_ptr();
+    let pb = qb.as_ptr();
+    let mut acc0 = vdupq_n_u32(0);
+    let mut acc1 = vdupq_n_u32(0);
+    let pairs = n / 32;
+    for c in 0..pairs {
+        let base = c * 32;
+        let d0 = vabdq_u8(vld1q_u8(pa.add(base)), vld1q_u8(pb.add(base)));
+        let d1 = vabdq_u8(vld1q_u8(pa.add(base + 16)), vld1q_u8(pb.add(base + 16)));
+        #[cfg(target_feature = "dotprod")]
+        {
+            acc0 = vdotq_u32(acc0, d0, d0);
+            acc1 = vdotq_u32(acc1, d1, d1);
+        }
+        #[cfg(not(target_feature = "dotprod"))]
+        {
+            acc0 = vpadalq_u16(acc0, vmull_u8(vget_low_u8(d0), vget_low_u8(d0)));
+            acc0 = vpadalq_u16(acc0, vmull_high_u8(d0, d0));
+            acc1 = vpadalq_u16(acc1, vmull_u8(vget_low_u8(d1), vget_low_u8(d1)));
+            acc1 = vpadalq_u16(acc1, vmull_high_u8(d1, d1));
+        }
+    }
+    let mut result = vaddvq_u32(vaddq_u32(acc0, acc1));
+    for i in pairs * 32..n {
+        let diff = qa[i] as i32 - qb[i] as i32;
+        result += (diff * diff) as u32;
+    }
+    result as f32
+}
+
 /// 统一分发：AVX2 → 标量
 ///
 /// 当 `target-cpu=native` 编译且 CPU 支持 AVX2+FMA 时，
@@ -313,19 +406,28 @@ pub unsafe fn l2_sq8_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
 /// 消除每次距离计算的 `is_x86_feature_detected!` 运行时分支开销。
 #[inline(always)]
 pub fn l2_sq8(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
+    crate::diag_count!(QUANT_DIST);
     // 编译期已知 AVX2+FMA：零运行时开销
     #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
     {
         unsafe { l2_sq8_avx2(qa, qb, scale_sq) }
     }
     // 运行时检测（非 native 编译或非 AVX2 CPU）
-    #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+    #[cfg(all(target_arch = "x86_64", not(all(target_feature = "avx2", target_feature = "fma"))))]
     {
         if is_sq8_avx2_supported() {
             unsafe { l2_sq8_avx2(qa, qb, scale_sq) }
         } else {
             l2_sq8_scalar(qa, qb, scale_sq)
         }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { l2_sq8_neon(qa, qb, scale_sq) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        l2_sq8_scalar(qa, qb, scale_sq)
     }
 }
 
@@ -361,11 +463,12 @@ fn l2_sq8_raw_scalar(qa: &[u8], qb: &[u8]) -> f32 {
 /// 图导航专用：最终 f32 rerank 保证结果精度。
 #[inline(always)]
 pub fn l2_sq8_raw(qa: &[u8], qb: &[u8]) -> f32 {
+    crate::diag_count!(QUANT_DIST);
     #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
     {
         unsafe { l2_sq8_raw_avx2(qa, qb) }
     }
-    #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+    #[cfg(all(target_arch = "x86_64", not(all(target_feature = "avx2", target_feature = "fma"))))]
     {
         if is_sq8_avx2_supported() {
             unsafe { l2_sq8_raw_avx2(qa, qb) }
@@ -373,11 +476,40 @@ pub fn l2_sq8_raw(qa: &[u8], qb: &[u8]) -> f32 {
             l2_sq8_raw_scalar(qa, qb)
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { l2_sq8_raw_neon(qa, qb) }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        l2_sq8_raw_scalar(qa, qb)
+    }
 }
 
 /// 检测 AVX2 支持
 pub fn is_sq8_avx2_supported() -> bool {
-    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// 非 x86 平台占位：`is_sq8_avx2_supported()` 恒为 false，热路径不会选到这里
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn l2_sq8_avx2(qa: &[u8], qb: &[u8], scale_sq: &[f32]) -> f32 {
+    l2_sq8(qa, qb, scale_sq)
+}
+
+/// 非 x86 平台占位：`is_sq8_avx2_supported()` 恒为 false，热路径不会选到这里
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn l2_sq8_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
+    l2_sq8_raw(qa, qb)
 }
 
 // ─── SQ8 量化数据集 ──────────────────────────────────────────────────
@@ -392,15 +524,74 @@ pub struct SQ8Dataset {
     pub dim: usize,
     /// 向量数
     pub n: usize,
+    /// R53 ADC：每向量 Σ s_d^2 c_d^2（解码向量相对 offset 的平方范数）
+    pub adc_norm: Vec<f32>,
+}
+
+/// R53 ADC 查询：w_d = s_d (q_d - off_d) 量化为 i16（每查询一尺度 alpha）
+#[derive(Default, Clone)]
+pub struct Sq8AdcQuery { pub w: Vec<i16>, pub alpha: f32, pub qn: f32 }
+
+pub fn sq8_adc_enabled() -> bool { static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *E.get_or_init(|| std::env::var("RAVEN_SQ8_ADC").map(|v| v != "0").unwrap_or(false)) }
+
+/// u8 × i16 点积（AVX2：cvtepu8→i16 + madd）
+#[inline(always)]
+pub fn dot_u8_i16(a: &[u8], w: &[i16]) -> i32 {
+    #[cfg(target_arch = "x86_64")]
+    { if std::is_x86_feature_detected!("avx2") { return unsafe { dot_u8_i16_avx2(a, w) }; } }
+    a.iter().zip(w).map(|(&x, &y)| x as i32 * y as i32).sum()
+}
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_u8_i16_avx2(a: &[u8], w: &[i16]) -> i32 {
+    use std::arch::x86_64::*;
+    let n = a.len(); let mut i = 0; let mut acc0 = _mm256_setzero_si256(); let mut acc1 = _mm256_setzero_si256();
+    while i + 32 <= n {
+        let c0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(a.as_ptr().add(i) as *const __m128i));
+        let c1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(a.as_ptr().add(i + 16) as *const __m128i));
+        acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(c0, _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i)));
+        acc1 = _mm256_add_epi32(acc1, _mm256_madd_epi16(c1, _mm256_loadu_si256(w.as_ptr().add(i + 16) as *const __m256i)));
+        i += 32;
+    }
+    if i + 16 <= n {
+        let c0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(a.as_ptr().add(i) as *const __m128i));
+        acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(c0, _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i)));
+        i += 16;
+    }
+    let acc = _mm256_add_epi32(acc0, acc1);
+    let s = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01001110));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10110001));
+    let mut r = _mm_cvtsi128_si32(s);
+    while i < n { r += *a.get_unchecked(i) as i32 * *w.get_unchecked(i) as i32; i += 1; }
+    r
 }
 
 impl SQ8Dataset {
+    /// R53：准备 ADC 查询（f32 查询不取整、不截断；按每维尺度加权）
+    pub fn adc_prepare(&self, q: &[f32], out: &mut Sq8AdcQuery) {
+        let d = self.dim; out.w.resize(d, 0);
+        let mut mx = 0f32;
+        let wf: Vec<f32> = (0..d).map(|i| { let v = self.params.scale[i] * (q[i] - self.params.offset[i]); mx = mx.max(v.abs()); v }).collect();
+        out.qn = (0..d).map(|i| { let t = q[i] - self.params.offset[i]; t * t }).sum();
+        out.alpha = if mx > 0.0 { mx / 32000.0 } else { 1.0 };
+        let inv = 1.0 / out.alpha;
+        for i in 0..d { out.w[i] = (wf[i] * inv).round() as i16; }
+    }
+    /// SAFETY: idx < n
+    #[inline(always)]
+    pub unsafe fn adc_dist_unchecked(&self, aq: &Sq8AdcQuery, idx: usize) -> f32 {
+        crate::diag_count!(QUANT_DIST);
+        let dot = dot_u8_i16(self.code_unchecked(idx), &aq.w);
+        (aq.qn + *self.adc_norm.get_unchecked(idx) - 2.0 * aq.alpha * dot as f32).max(0.0)
+    }
     /// 从 f32 数据集构建 SQ8 量化数据集
     pub fn build(data: &[f32], dim: usize) -> Self {
         let n = data.len() / dim;
         let params = SQ8Params::fit(data, dim);
         let codes = params.encode_all(data);
-        Self { codes, params, dim, n }
+        let adc_norm = (0..n).map(|i| (0..dim).map(|d| { let c = codes[i * dim + d] as f32 * params.scale[d]; c * c }).sum()).collect();
+        Self { codes, params, dim, n, adc_norm }
     }
 
     /// 获取第 idx 个向量的 SQ8 code 引用
@@ -454,6 +645,40 @@ impl SQ8Dataset {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_arch = "aarch64")]
+    fn neon_rand_bytes(n: usize, seed: u64) -> Vec<u8> {
+        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sq8_neon_matches_scalar() {
+        for n in [1usize, 15, 16, 17, 31, 32, 33, 64, 100, 128, 960] {
+            for seed in 0..5u64 {
+                let a = neon_rand_bytes(n, seed * 31 + n as u64);
+                let b = neon_rand_bytes(n, seed * 17 + 1000 + n as u64);
+                let sc: Vec<f32> = (0..n).map(|i| 0.01 + (i % 13) as f32 * 0.37).collect();
+                let s = super::l2_sq8_raw_scalar(&a, &b);
+                let v = unsafe { super::l2_sq8_raw_neon(&a, &b) };
+                assert_eq!(s, v, "raw n={n} seed={seed}");
+                let s = super::l2_sq8_scalar(&a, &b, &sc);
+                let v = unsafe { super::l2_sq8_neon(&a, &b, &sc) };
+                assert!((s - v).abs() <= 1e-4 * s.abs().max(1.0), "weighted n={n} s={s} v={v}");
+            }
+        }
+        let a = vec![0u8; 128];
+        let b = vec![255u8; 128];
+        assert_eq!(unsafe { super::l2_sq8_raw_neon(&a, &b) }, 128.0 * 65025.0);
+    }
     use super::*;
 
     #[test]
@@ -572,5 +797,19 @@ mod tests {
         let code = p.encode(&[1.0, 5.0]);
         // 编码不应 panic
         assert_eq!(code.len(), 2);
+    }
+
+    /// H14：SQ8 原始距离在 d=25/100/784/960 等非 32 倍数维度下与标量一致
+    #[test]
+    fn h14_sq8_raw_non32_dims() {
+        let mut s = 4242u64;
+        let mut rnd = || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; (s >> 24) as u8 };
+        for dim in [1usize, 25, 31, 33, 96, 100, 256, 784, 960] {
+            for _ in 0..20 {
+                let a: Vec<u8> = (0..dim).map(|_| rnd()).collect();
+                let b: Vec<u8> = (0..dim).map(|_| rnd()).collect();
+                assert_eq!(l2_sq8_raw(&a, &b), l2_sq8_raw_scalar(&a, &b), "dim={dim}");
+            }
+        }
     }
 }

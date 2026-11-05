@@ -18,6 +18,9 @@
 
 #![warn(missing_docs)]
 
+pub mod arch;
+#[macro_use]
+pub mod counters;
 pub mod distance;
 pub mod memory;
 pub mod graph;
@@ -25,6 +28,7 @@ pub mod build;
 pub mod quant;
 pub mod config;
 pub mod bench;
+pub mod pipeline;
 
 #[cfg(feature = "python")]
 pub mod python;
@@ -41,3 +45,11 @@ pub use distance::{DistanceMetric, l2_dynamic, l2_simd};
 pub use memory::{VisitedTracker, HybridBlockedCsr, QueryContext};
 pub use graph::{VamanaGraph, RobustPrune, RPTuning};
 pub use build::{BuildConfig, BuildMetadata, ChaCha8Rng};
+
+/// Decode little-endian u32s from a byte slice of arbitrary alignment
+/// (bytemuck::cast_slice panics when the slice is not 4-byte aligned).
+pub fn util_le_u32_vec(b: &[u8]) -> Vec<u32> {
+    b.chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}

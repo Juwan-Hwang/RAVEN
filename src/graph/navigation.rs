@@ -234,6 +234,26 @@ pub struct LayeredNavigation {
 }
 
 impl LayeredNavigation {
+    /// H02：按 old_to_new 置换节点 ID（层级、上层边、入口全部跟随），保持导航结构逐位等价。
+    pub fn remapped(&self, old_to_new: &[u32]) -> Self {
+        let n = self.node_levels.len();
+        let mut node_levels = vec![0u8; n];
+        let mut upper_lists: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let m = |x: u32| if (x as usize) < n { old_to_new[x as usize] } else { x };
+        for old in 0..n {
+            let nw = old_to_new[old] as usize;
+            node_levels[nw] = self.node_levels[old];
+            upper_lists[nw] = self.upper_lists[old].iter().map(|&x| m(x)).collect();
+        }
+        LayeredNavigation {
+            entry_point: m(self.entry_point),
+            max_level: self.max_level,
+            k: self.k,
+            node_levels,
+            upper_lists,
+            entry_candidates: self.entry_candidates.iter().map(|&x| m(x)).collect(),
+        }
+    }
     /// 构建分层导航
     ///
     /// 在 flat Vamana 图构建完成后调用：
@@ -303,6 +323,8 @@ impl LayeredNavigation {
     }
 
     /// 最高层级
+    pub fn level_of(&self, i: u32) -> u8 { self.node_levels[i as usize] }
+
     pub fn max_level(&self) -> u8 {
         self.max_level
     }
@@ -598,6 +620,92 @@ impl LayeredNavigation {
     // 搜索初始化
     // ========================================================================
 
+    /// 搜索初始化（上层 ef>1 beam search 版本）
+    ///
+    /// 方案 B：Layer ≥2 仍用 ef=1 贪心下降（小层，ef=1 足够），
+    /// Layer 1（~31K 节点）用 ef=upper_ef beam search，获得更好的 Layer 0 入口点。
+    ///
+    /// 理论依据：RAVEN Layer 1 有 31K 节点（远大于竞品上层），
+    /// ef=1 贪心容易陷入局部最优，导致 Layer 0 入口偏离目标 → avg_visited 增加。
+    ///
+    /// `visited` 和 `pool` 由调用方传入（复用 GraphSearcher 预分配资源，零额外分配）。
+    /// 调用后 `visited` 会包含上层标记，但 `greedy_search_sq4` 会先 `reset()` 再使用。
+    pub fn initialize_with_upper_ef(
+        &self,
+        vectors: &[f32],
+        dim: usize,
+        query: &[f32],
+        upper_ef: usize,
+        visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
+    ) -> (u32, f32) {
+        if self.max_level == 0 || upper_ef <= 1 {
+            return self.initialize(vectors, dim, query);
+        }
+
+        // ── Step 1: ef=1 贪心下降 from max_level → Layer 2 ──
+        // 与 initialize() 逻辑完全相同，但只走到 Layer 2（跳过 Layer 1）
+        let mut u = self.entry_point;
+        let mut cur_dist =
+            l2_simd(query, &vectors[u as usize * dim..(u as usize + 1) * dim]);
+
+        for level in (2..=self.max_level).rev() {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                let edges = &self.upper_lists[u as usize];
+                let start = (level as usize - 1) * self.k;
+                if start >= edges.len() {
+                    break;
+                }
+                let end = (start + self.k).min(edges.len());
+                for &v in &edges[start..end] {
+                    if v == u {
+                        continue;
+                    }
+                    let d =
+                        l2_simd(query, &vectors[v as usize * dim..(v as usize + 1) * dim]);
+                    if d < cur_dist {
+                        cur_dist = d;
+                        u = v;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // ── Step 2: ef=upper_ef beam search on Layer 1 ──
+        // Layer 1 边在 upper_lists[node] 的 [0..k) 范围内
+        visited.reset();
+        pool.reset_for(upper_ef);
+
+        visited.visit(u);
+        pool.insert(u, cur_dist);
+
+        while let Some((node, _dist)) = pool.pop() {
+            let edges = &self.upper_lists[node as usize];
+            let end = self.k.min(edges.len());
+            for &v in &edges[..end] {
+                if v == node {
+                    continue;
+                }
+                if visited.visit(v) {
+                    let d =
+                        l2_simd(query, &vectors[v as usize * dim..(v as usize + 1) * dim]);
+                    pool.insert(v, d);
+                }
+            }
+        }
+
+        // 返回 beam search 结果中最近的节点作为 Layer 0 入口
+        let results = pool.to_sorted_vec();
+        if let Some(&(best, best_dist)) = results.first() {
+            (best, best_dist)
+        } else {
+            (u, cur_dist)
+        }
+    }
+
     /// 搜索初始化：从 entry_point 顶层贪心下降到 Layer 0
     ///
     /// 与 Glass `HNSWInitializer::initialize()` 对齐：
@@ -620,6 +728,7 @@ impl LayeredNavigation {
 
         // 单一入口：从 entry_point 贪心下降
         let mut u = self.entry_point;
+        crate::diag_count!(NAV_DIST);
         let mut cur_dist =
             l2_simd(query, &vectors[u as usize * dim..(u as usize + 1) * dim]);
 
@@ -638,6 +747,7 @@ impl LayeredNavigation {
                     if v == u {
                         continue; // 跳过自填充
                     }
+                    crate::diag_count!(NAV_DIST);
                     let d =
                         l2_simd(query, &vectors[v as usize * dim..(v as usize + 1) * dim]);
                     if d < cur_dist {
@@ -649,6 +759,94 @@ impl LayeredNavigation {
             }
         }
 
+        (u, cur_dist)
+    }
+
+    /// H09：可配置的贪心下降（距离函数可替换为 SQ4、可去重、可提前停层、可记录轨迹）
+    ///
+    /// - `dist`：距离函数（f32 `l2_simd` 或 SQ4 raw）
+    /// - `visited`：Some 时对已计算过距离的节点去重（贪心下降中 cur_dist 单调递减，
+    ///   已算过且未胜出的节点不可能再胜出 → 结果与不去重完全一致，只省距离计算）
+    /// - `stop_level`：下降到该层（含）为止；1 = 完整下降到 Layer 1（与 `initialize` 一致）
+    /// - `trace`：Some 时记录每次计算的 (node, dist)（含入口）
+    ///
+    /// 返回 (Layer 0 入口, 其距离)。max_level == 0 时只算入口。
+    /// R26 段归因：节点 u 的上层邻接表地址与字节数（diag_cm 预热用）
+    pub fn upper_row(&self, u: u32) -> (usize, usize) {
+        self.upper_lists.get(u as usize).map(|e| (e.as_ptr() as usize, e.len() * 4)).unwrap_or((0, 0))
+    }
+
+    pub fn descend_with<F: FnMut(u32) -> f32>(
+        &self,
+        dist: F,
+        visited: Option<&mut VisitedTracker>,
+        stop_level: u8,
+        trace: Option<&mut Vec<(u32, f32)>>,
+    ) -> (u32, f32) {
+        self.descend_with_pf(dist, |_| {}, visited, stop_level, trace)
+    }
+
+    /// H51：同 `descend_with`，但在扫描每个节点的第 level 层邻接前，先对全部邻居调用 `pf`（预取其码），
+    /// 使 k 个相互独立的随机取码并行（原实现逐个串行缺失）。结果逐位一致。
+    pub fn descend_with_pf<F: FnMut(u32) -> f32, P: Fn(u32)>(
+        &self,
+        mut dist: F,
+        pf: P,
+        mut visited: Option<&mut VisitedTracker>,
+        stop_level: u8,
+        mut trace: Option<&mut Vec<(u32, f32)>>,
+    ) -> (u32, f32) {
+        let mut u = self.entry_point;
+        crate::diag_count!(NAV_DIST);
+        let mut cur_dist = dist(u);
+        if let Some(vis) = visited.as_deref_mut() {
+            vis.visit(u);
+        }
+        if let Some(t) = trace.as_deref_mut() {
+            t.push((u, cur_dist));
+        }
+        if self.max_level == 0 {
+            return (u, cur_dist);
+        }
+        let stop = stop_level.max(1);
+        let mut level = self.max_level;
+        while level >= stop {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                let edges = &self.upper_lists[u as usize];
+                let start = (level as usize - 1) * self.k;
+                if start >= edges.len() {
+                    break;
+                }
+                let end = (start + self.k).min(edges.len());
+                for &v in &edges[start..end] { pf(v); }
+                for &v in &edges[start..end] {
+                    if v == u {
+                        continue;
+                    }
+                    if let Some(vis) = visited.as_deref_mut() {
+                        if !vis.visit(v) {
+                            continue;
+                        }
+                    }
+                    crate::diag_count!(NAV_DIST);
+                    let d = dist(v);
+                    if let Some(t) = trace.as_deref_mut() {
+                        t.push((v, d));
+                    }
+                    if d < cur_dist {
+                        cur_dist = d;
+                        u = v;
+                        changed = true;
+                    }
+                }
+            }
+            if level == stop {
+                break;
+            }
+            level -= 1;
+        }
         (u, cur_dist)
     }
 
@@ -740,7 +938,7 @@ impl LayeredNavigation {
             if buf.len() < off + list_len * 4 || node_id >= n {
                 return None;
             }
-            upper_lists[node_id] = bytemuck::cast_slice(&buf[off..off + list_len * 4]).to_vec();
+            upper_lists[node_id] = crate::util_le_u32_vec(&buf[off..off + list_len * 4]);
             off += list_len * 4;
         }
 
@@ -749,7 +947,7 @@ impl LayeredNavigation {
             let ec_len = u32::from_le_bytes(buf[off..off + 4].try_into().ok()?) as usize;
             off += 4;
             if buf.len() >= off + ec_len * 4 {
-                bytemuck::cast_slice(&buf[off..off + ec_len * 4]).to_vec()
+                crate::util_le_u32_vec(&buf[off..off + ec_len * 4])
             } else {
                 vec![entry_point]
             }
@@ -979,4 +1177,37 @@ mod tests {
         let found_90 = results.iter().any(|(id, dist)| *id == 90 && *dist == 0.0);
         assert!(found_90, "should find node 90 with dist=0");
     }
+    /// H09：descend_with(去重) 与 initialize 结果逐位一致，且距离计算不多于不去重
+    #[test]
+    fn descend_with_dedup_matches_initialize() {
+        let (n, dim) = (3000usize, 16usize);
+        let mut rng = ChaCha8Rng::seed_from(7);
+        let vectors: Vec<f32> = (0..n * dim).map(|_| rng.gen::<f32>()).collect();
+        let storage = HybridBlockedCsr::new(n, 8);
+        let nav = LayeredNavigation::build(&vectors, dim, &storage, 0, 4, 8);
+        assert!(nav.max_level() >= 2);
+        let mut vis = VisitedTracker::new(n, 16);
+        for qi in 0..50 {
+            let q: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+            let legacy = nav.initialize(&vectors, dim, &q);
+            let mut cnt_plain = 0usize;
+            let plain = nav.descend_with(
+                |v| { cnt_plain += 1; l2_simd(&q, &vectors[v as usize * dim..(v as usize + 1) * dim]) },
+                None, 1, None,
+            );
+            vis.reset();
+            let mut cnt_dedup = 0usize;
+            let mut trace = Vec::new();
+            let dedup = nav.descend_with(
+                |v| { cnt_dedup += 1; l2_simd(&q, &vectors[v as usize * dim..(v as usize + 1) * dim]) },
+                Some(&mut vis), 1, Some(&mut trace),
+            );
+            assert_eq!(legacy, plain, "query {qi}");
+            assert_eq!(legacy, dedup, "query {qi}");
+            assert!(cnt_dedup <= cnt_plain);
+            assert_eq!(trace.len(), cnt_dedup);
+            assert_eq!(vis.visited_count(), cnt_dedup);
+        }
+    }
+
 }

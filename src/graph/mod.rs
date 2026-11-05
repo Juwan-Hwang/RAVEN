@@ -16,6 +16,9 @@ pub mod navigation;
 pub mod refiner;
 pub mod linear_pool;
 pub mod adaptive_ef;
+pub mod qg;
+pub mod stoptrace;
+pub mod cellconfirm;
 
 pub use vamana::{VamanaGraph, VamanaBuildConfig, GraphSearcher};
 pub use adaptive_ef::AdaptiveEfConfig;

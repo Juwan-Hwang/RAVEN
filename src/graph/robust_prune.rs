@@ -2,7 +2,7 @@
 //!
 //! 包含两种剪枝算法：
 //! 1. RobustPrune（Vamana/DiskANN 标准）：多轮 α 递增 + saturation 填充
-//! 2. DirectionalPrune（RAVEN 超越方案）：方向性扫描 + 自适应连通性补底，无 saturation
+//! 2. DirectionalPrune（RAVEN 超越方案）：方向性扫描 + 自适应连通性补底 + 跳跃边，无 saturation
 //!
 //! DirectionalPrune 的设计动机：
 //!   RobustPrune 的 saturation 用远距离候选填满 r_max → avg_visited 略高（1227 vs Glass 1041, H20 实测）
@@ -53,14 +53,14 @@ fn prepare_candidates(
 /// 剪枝策略选择
 ///
 /// - `RobustPrune`：Vamana/DiskANN 标准多轮 α 递增 + saturation 填充
-/// - `DirectionalPrune`：RAVEN 超越方案，方向性扫描 + 自适应连通性补底
+/// - `DirectionalPrune`：RAVEN 超越方案，方向性扫描 + 自适应连通性补底 + 跳跃边
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(Default)]
 pub enum PruneStrategy {
     /// Vamana/DiskANN 标准 RobustPrune（baseline）
     #[default]
     RobustPrune,
-    /// RAVEN DirectionalPrune（方向性 + 连通性补底，无 saturation）
+    /// RAVEN DirectionalPrune（方向性 + 连通性补底 + 跳跃边，无 saturation）
     DirectionalPrune,
 }
 
@@ -72,7 +72,9 @@ pub enum PruneStrategy {
 /// RobustPrune 配置
 #[derive(Debug, Clone)]
 pub struct RobustPruneConfig {
+    /// 距离放大因子（α > 1 允许更多长程边，提升连通性）
     pub alpha: f32,
+    /// 每个节点最大邻居数（度数上限）
     pub r_max: usize,
 }
 
@@ -211,6 +213,27 @@ pub struct DirectionalPruneConfig {
     /// Pass 2 放宽 α：允许方向性稍弱的长程边
     /// 默认 1.2，与 Vamana 第二轮 α 一致
     pub backfill_alpha: f32,
+    /// Pass 1 核心方向性判据的遮挡阈值
+    ///
+    /// 判据: d²(j,i) < alpha_core · d²(i,q) → j 遮挡 i（剪枝）
+    ///
+    /// - alpha_core = 1.0（默认）：标准方向性判据，等价 Glass Heuristic2
+    /// - alpha_core < 1.0：阈值更严 → 更难遮挡 → 更多边存活 → 图更密
+    /// - alpha_core > 1.0：阈值更松 → 更易遮挡 → 更少边存活 → 图更稀
+    ///
+    /// 这是真正决定图拓扑质量的核心自由度——
+    /// 对比 `backfill_alpha` 只控制从不触发的 Pass 2 补底。
+    pub alpha_core: f32,
+    /// Pass 3 跳跃边数量（0 = 禁用）
+    ///
+    /// DirectionalPrune Pass 1 的遮挡判定 d(j,i) < d(i,q) 在几何上
+    /// 等价于 cos(θ) > r_j/(2*r_i)。当已接受邻居 j 很近时，即使
+    /// 候选 i 在 90° 方向上也会被遮挡——远距离但方向唯一的「跳跃边」
+    /// 被系统性剪掉，导致搜索需要更多跳数才能到达目标。
+    ///
+    /// Pass 3 从被拒绝的远距离候选中，选择遮挡比 d²(j,i)/d²(i,q)
+    /// 最接近 1.0 的（=方向最独特），保留 n_jumps 条。
+    pub n_jumps: usize,
 }
 
 impl DirectionalPruneConfig {
@@ -230,7 +253,15 @@ impl DirectionalPruneConfig {
             r_max,
             r_min: (r_max / divisor).max(1),
             backfill_alpha: alpha.max(1.0),
+            alpha_core: 1.0,
+            n_jumps: 0,
         }
+    }
+
+    /// 启用跳跃边
+    pub fn with_jumps(mut self, n_jumps: usize) -> Self {
+        self.n_jumps = n_jumps;
+        self
     }
 }
 
@@ -238,6 +269,17 @@ impl Default for DirectionalPruneConfig {
     fn default() -> Self {
         Self::from_params(64, 1.2)
     }
+}
+
+/// 跳跃边候选评分
+///
+/// occlusion_ratio = max over accepted j of d²(j,i) / d²(i,q)
+/// - ratio ≈ 1.0: 勉强被遮挡，方向最独特 → 最佳跳跃边
+/// - ratio ≈ 0.0: 被强遮挡，方向重叠 → 冗余
+#[derive(Clone, Copy)]
+struct JumpCandidate {
+    occlusion_ratio: f32,
+    id: u32,
 }
 
 /// RAVEN DirectionalPrune — 融合 RobustPrune 和 Heuristic2 的超越方案
@@ -248,6 +290,7 @@ impl Default for DirectionalPruneConfig {
 /// ├─────────────────┼──────────────────┼───────────────────┼──────────────────────────┤
 /// │ Pass 1 方向性   │ α=1.0 多轮       │ α=1.0 单轮        │ α=1.0 单轮               │
 /// │ 长程边          │ α=1.2 多轮补充   │ 无                │ α=backfill 补到 r_min    │
+/// │ 跳跃边          │ 无               │ 无                │ Pass 3: 方向最独特远边   │
 /// │ Saturation      │ 填到 r_max（垃圾）│ 无               │ 无                       │
 /// │ 连通性保证      │ 靠 saturation    │ 靠 HNSW 多层      │ 靠 r_min 补底             │
 /// │ avg_visited     │ 1227             │ 1041 (H20 实测)   │ 目标：低                 │
@@ -265,16 +308,15 @@ impl Default for DirectionalPruneConfig {
 ///    若 d²(i,q)/d²(i,j) > backfill_alpha → 仍遮挡，跳过
 ///    否则接受，但只补到 r_min，不补到 r_max
 ///    产出：少量高质量长程边，保证全局连通
-/// 4. 无 saturation：剩余槽位留空，不盲目填充远距离候选
-///
-/// 核心创新：r_min 分离"必须连通"和"锦上添花"
-/// - Vamana 错在填到 r_max：saturation 塞入垃圾边 → avg_visited 膨胀
-/// - Glass 弱在无补底：纯 α=1.0 可能产生孤岛 → 依赖 HNSW 多层
-/// - RAVEN 两者兼得：方向直 + 保连通 + 无垃圾边
+/// 4. Pass 3 — 跳跃边（n_jumps > 0 时）：
+///    对被 Pass 1 遮挡的候选，计算遮挡比 = max_j d²(j,i)/d²(i,q)。
+///    比值越接近 1.0 = 勉强被遮挡 = 方向最独特 = 最佳跳跃边。
+///    保留 n_jumps 条，占用 r_max 度数预算。
+/// 5. 无 saturation：剩余槽位留空，不盲目填充远距离候选
 pub struct DirectionalPrune;
 
 impl DirectionalPrune {
-    /// 执行 DirectionalPrune 剪枝
+    /// 执行 DirectionalPrune 剪枝（alpha_core=1.0, n_jumps=0，等价于无跳跃边）
     ///
     /// 返回剪枝后的邻居列表（长度 ≤ r_max）
     pub fn prune(
@@ -285,6 +327,24 @@ impl DirectionalPrune {
         r_max: usize,
         r_min: usize,
         backfill_alpha: f32,
+    ) -> Vec<u32> {
+        Self::prune_with_jumps(candidates, query_node, vectors, dim, r_max, r_min, backfill_alpha, 1.0, 0)
+    }
+
+    /// 执行 DirectionalPrune 剪枝（含跳跃边）
+    ///
+    /// `n_jumps > 0` 时在 Pass 2 之后执行 Pass 3：从被拒绝的远距离候选中
+    /// 选择方向最独特的（遮挡比最接近 1.0），保留 n_jumps 条跳跃边。
+    pub fn prune_with_jumps(
+        candidates: &[u32],
+        query_node: u32,
+        vectors: &[f32],
+        dim: usize,
+        r_max: usize,
+        r_min: usize,
+        backfill_alpha: f32,
+        alpha_core: f32,
+        n_jumps: usize,
     ) -> Vec<u32> {
         if candidates.is_empty() {
             return Vec::new();
@@ -298,17 +358,19 @@ impl DirectionalPrune {
         let n = scored.len();
         let mut result: Vec<u32> = Vec::with_capacity(r_max);
 
-        // ── Pass 1：方向性扫描（α=1.0，等价 Glass Heuristic2）──
+        // ── Pass 1：方向性扫描（alpha_core 可调，默认 1.0 等价 Glass Heuristic2）──
         //
-        // 对每个候选 i（近→远），检查所有已接受邻居 j：
-        //   d²(i,j) < d²(i,q) → i 被 j 遮挡（j 比 q 更靠近 i，i 是冗余方向）
-        // 这与 Glass getNeighborsByHeuristic2 的 `curdist < dist_to_query` 完全等价
+        // 判据: d²(j,i) < alpha_core · d²(i,q) → j 方向性遮挡 i
+        //
+        // alpha_core = 1.0：标准方向性判据
+        // alpha_core < 1.0：更难遮挡 → 更多方向独特的边存活 → 图更密
+        // alpha_core > 1.0：更易遮挡 → 边更少 → 图更稀，可能触发 Pass 2 补底
         for i in 0..n {
             if result.len() >= r_max {
                 break;
             }
 
-            let dist_iq_sq = scored[i].0; // d²(candidate, query)
+            let dist_iq_sq = scored[i].0;
             let candidate_vec =
                 &vectors[scored[i].1 as usize * dim..(scored[i].1 as usize + 1) * dim];
 
@@ -316,11 +378,9 @@ impl DirectionalPrune {
             for &accepted_id in &result {
                 let accepted_vec =
                     &vectors[accepted_id as usize * dim..(accepted_id as usize + 1) * dim];
-                let dist_ji_sq = l2_simd(accepted_vec, candidate_vec); // d²(accepted, candidate)
+                let dist_ji_sq = l2_simd(accepted_vec, candidate_vec);
 
-                // 方向性遮挡：accepted 离 candidate 比 query 离 candidate 更近
-                // → candidate 方向与 accepted 重叠，冗余
-                if dist_ji_sq < dist_iq_sq {
+                if dist_ji_sq < alpha_core * dist_iq_sq {
                     good = false;
                     break;
                 }
@@ -332,15 +392,6 @@ impl DirectionalPrune {
         }
 
         // ── Pass 2：连通性补底（仅当度数不足 r_min）──
-        //
-        // Pass 1 的 α=1.0 在密集区域可能只选出极少邻居（方向性太严格）。
-        // Vamana 用 saturation 填到 r_max → 垃圾边膨胀 avg_visited
-        // Glass 不补 → 依赖 HNSW 多层结构
-        // RAVEN：用放宽 α 补到 r_min，只补充方向性稍弱但仍合理的长程边
-        //
-        // 放宽判定：d²(i,q) / d²(i,j) > backfill_alpha → 仍遮挡
-        // backfill_alpha=1.2 时，有效阈值 d(i,q)/d(i,j) > sqrt(1.2) ≈ 1.095
-        // 即允许 j 到 i 的距离比 q 到 i 近 9.5% 以内的候选
         if result.len() < r_min {
             let accepted_set: std::collections::HashSet<u32> = result.iter().copied().collect();
 
@@ -362,7 +413,6 @@ impl DirectionalPrune {
                         &vectors[accepted_id as usize * dim..(accepted_id as usize + 1) * dim];
                     let dist_ji_sq = l2_simd(accepted_vec, candidate_vec);
 
-                    // 放宽遮挡：ratio_sq = d²(i,q) / d²(i,j) > backfill_alpha → 遮挡
                     if dist_ji_sq == 0.0 {
                         good = false;
                         break;
@@ -380,6 +430,58 @@ impl DirectionalPrune {
             }
         }
 
+        // ── Pass 3：跳跃边（n_jumps > 0 时执行）──
+        //
+        // Pass 1 的遮挡判定 d(j,i) < d(i,q) 在几何上等价于
+        // cos(θ) > r_j / (2*r_i)。当 j 很近时，即使 θ≈90° 也会遮挡。
+        // 这导致远距离但方向唯一的跳跃边被系统性剪掉。
+        //
+        // 修复：对被拒绝的候选，计算遮挡比 = max_j d²(j,i)/d²(i,q)。
+        // 比值越接近 1.0 = 勉强被遮挡 = 方向最独特 = 最佳跳跃边。
+        if n_jumps > 0 && result.len() < r_max {
+            let slots = (r_max - result.len()).min(n_jumps);
+            let accepted_set: std::collections::HashSet<u32> = result.iter().copied().collect();
+
+            let mut jump_candidates: Vec<JumpCandidate> = Vec::new();
+
+            for &(dist_iq_sq, id) in &scored {
+                if accepted_set.contains(&id) {
+                    continue;
+                }
+
+                let candidate_vec =
+                    &vectors[id as usize * dim..(id as usize + 1) * dim];
+
+                // 计算遮挡比 = max over accepted j of d²(j,i) / d²(i,q)
+                let mut max_ratio = 0.0f32;
+                for &accepted_id in &result {
+                    let accepted_vec =
+                        &vectors[accepted_id as usize * dim..(accepted_id as usize + 1) * dim];
+                    let dist_ji_sq = l2_simd(accepted_vec, candidate_vec);
+                    let ratio = dist_ji_sq / dist_iq_sq;
+                    if ratio > max_ratio {
+                        max_ratio = ratio;
+                    }
+                }
+
+                jump_candidates.push(JumpCandidate {
+                    occlusion_ratio: max_ratio,
+                    id,
+                });
+            }
+
+            // 按遮挡比降序（最接近 1.0 = 最独特 的优先）
+            jump_candidates.sort_by(|a, b| {
+                b.occlusion_ratio
+                    .partial_cmp(&a.occlusion_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for jc in jump_candidates.into_iter().take(slots) {
+                result.push(jc.id);
+            }
+        }
+
         // 无 saturation：不填充剩余槽位
         result
     }
@@ -392,7 +494,11 @@ impl DirectionalPrune {
         dim: usize,
         config: &DirectionalPruneConfig,
     ) -> Vec<u32> {
-        Self::prune(candidates, query_node, vectors, dim, config.r_max, config.r_min, config.backfill_alpha)
+        Self::prune_with_jumps(
+            candidates, query_node, vectors, dim,
+            config.r_max, config.r_min, config.backfill_alpha,
+            config.alpha_core, config.n_jumps,
+        )
     }
 }
 
@@ -404,7 +510,7 @@ impl DirectionalPrune {
 ///
 /// 共享 alpha/r_max/saturate 语义：
 /// - RobustPrune：直接传递
-/// - DirectionalPrune：r_min = r_max/4, backfill_alpha = alpha
+/// - DirectionalPrune：r_min = r_max/4, backfill_alpha = alpha, n_jumps 从 RAVEN_N_JUMPS 环境变量读取
 pub fn prune_dispatch(
     strategy: PruneStrategy,
     candidates: &[u32],
@@ -420,10 +526,20 @@ pub fn prune_dispatch(
             RobustPrune::prune(candidates, query_node, vectors, dim, alpha, r_max, saturate)
         }
         PruneStrategy::DirectionalPrune => {
-            let config = DirectionalPruneConfig::from_params(r_max, alpha);
-            DirectionalPrune::prune(
+            let mut config = DirectionalPruneConfig::from_params(r_max, alpha);
+            config.n_jumps = std::env::var("RAVEN_N_JUMPS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            config.alpha_core = std::env::var("RAVEN_ALPHA_CORE")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|&v| v > 0.0)
+                .unwrap_or(1.0);
+            DirectionalPrune::prune_with_jumps(
                 candidates, query_node, vectors, dim,
                 config.r_max, config.r_min, config.backfill_alpha,
+                config.alpha_core, config.n_jumps,
             )
         }
     }
@@ -477,21 +593,14 @@ mod tests {
 
     #[test]
     fn prune_dedup_candidates() {
-        // 非共线向量：候选在 query 的不同方向上，α=1.0 剪枝不会误杀
-        //
-        // 旧测试用 make_vectors 生成共线数据 [0,1,2,3], [4,5,6,7], [8,9,10,11]...
-        // 共线 → 所有候选在同一方向 → α 剪枝只保留最近的 1 个 → assert(3) 失败
-        //
-        // 修复：正交放置，3 个候选在 120° 分隔的方向上，全部存活
         let v = vec![
-            0.0, 0.0,   // node 0 (query)
-            3.0, 0.0,   // node 1 — 0°
-            0.0, 3.0,   // node 2 — 90°
-           -3.0, 0.0,   // node 3 — 180°
+            0.0, 0.0,
+            3.0, 0.0,
+            0.0, 3.0,
+           -3.0, 0.0,
         ];
         let candidates = vec![1, 1, 2, 2, 3];
         let result = RobustPrune::prune(&candidates, 0, &v, 2, 1.0, 8, false);
-        // 去重后 3 个候选，方向正交 → 全部通过 α=1.0 剪枝
         assert_eq!(result.len(), 3);
     }
 
@@ -522,13 +631,11 @@ mod tests {
 
     #[test]
     fn directional_prune_dedup() {
-        // 非共线向量：同 prune_dedup_candidates 的修复理由
-        // 共线数据下 DirectionalPrune Pass 1 的 d²(j,i) < d²(i,q) 对同方向候选恒成立 → 只留 1 个
         let v = vec![
-            0.0, 0.0,   // node 0 (query)
-            3.0, 0.0,   // node 1 — 0°
-            0.0, 3.0,   // node 2 — 90°
-           -3.0, 0.0,   // node 3 — 180°
+            0.0, 0.0,
+            3.0, 0.0,
+            0.0, 3.0,
+           -3.0, 0.0,
         ];
         let candidates = vec![1, 1, 2, 2, 3];
         let result = DirectionalPrune::prune(&candidates, 0, &v, 2, 8, 2, 1.2);
@@ -537,25 +644,18 @@ mod tests {
 
     #[test]
     fn directional_prune_no_saturation() {
-        // DirectionalPrune 绝不用远距离候选填充
-        // 用 1D 向量确保 Pass 1 只选少量方向性边，验证不填充到 r_max
         let v = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let candidates: Vec<u32> = (1..10).collect();
-        // r_min=1 → Pass 2 不触发；r_max=8 → 但不应填到 8
         let result = DirectionalPrune::prune(&candidates, 0, &v, 1, 8, 1, 1.2);
-        // 在 1D 线上，方向性检查下只有最近的邻居能入选
         assert!(result.len() <= 8);
         assert!(!result.is_empty());
     }
 
     #[test]
     fn directional_prune_backfill_connectivity() {
-        // 当 Pass 1 产出不足 r_min 时，Pass 2 应补到 r_min
         let v = make_vectors(20, 4);
         let candidates: Vec<u32> = (1..15).collect();
-        // r_min=5 → 如果 Pass 1 < 5，Pass 2 应补到至少 5（如果候选足够）
         let result = DirectionalPrune::prune(&candidates, 0, &v, 4, 10, 5, 1.5);
-        // 应该至少有一些结果
         assert!(!result.is_empty());
         assert!(result.len() <= 10);
     }
@@ -566,6 +666,36 @@ mod tests {
         let candidates: Vec<u32> = (1..40).collect();
         let result = DirectionalPrune::prune(&candidates, 0, &v, 4, 8, 2, 1.2);
         assert!(result.len() <= 8);
+    }
+
+    // ── 跳跃边测试 ──
+
+    #[test]
+    fn jump_edges_add_neighbors() {
+        // 跳跃边应增加邻居数量
+        let v = vec![
+            0.0, 0.0,   // node 0 (query)
+            1.0, 0.0,   // node 1: 近, 0°
+            0.9, 0.1,   // node 2: 近, ~6°
+            0.8, 0.2,   // node 3: 近, ~14°
+            2.0, 2.0,   // node 4: 中, 45°
+            1.5, 1.5,   // node 5: 中, 45° (被4遮挡)
+            5.0, -1.0,  // node 6: 远
+            5.0, 1.0,   // node 7: 远
+            4.0, 3.0,   // node 8: 远
+            3.0, 4.0,   // node 9: 远
+            -3.0, 4.0,  // node 10: 远, ~127°
+            -4.0, 3.0,  // node 11: 远, ~143°
+            -5.0, 0.0,  // node 12: 远, 180°
+            0.0, 5.0,   // node 13: 远, 90°
+            0.0, -5.0,  // node 14: 远, -90°
+        ];
+        let candidates: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+
+        let base = DirectionalPrune::prune(&candidates, 0, &v, 2, 10, 3, 1.2);
+        let with_jumps = DirectionalPrune::prune_with_jumps(&candidates, 0, &v, 2, 10, 3, 1.2, 1.0, 4);
+
+        assert!(with_jumps.len() > base.len(), "跳跃边应增加邻居数: base={}, jumps={}", base.len(), with_jumps.len());
     }
 
     // ── dispatch 测试 ──
@@ -585,6 +715,8 @@ mod tests {
     fn dispatch_directional_prune() {
         let v = make_vectors(20, 4);
         let candidates: Vec<u32> = (1..15).collect();
+        // 确保 RAVEN_N_JUMPS 未设置
+        std::env::remove_var("RAVEN_N_JUMPS");
         let r1 = prune_dispatch(
             PruneStrategy::DirectionalPrune, &candidates, 0, &v, 4, 1.2, 8, true,
         );

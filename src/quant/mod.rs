@@ -20,6 +20,7 @@ pub mod avq;
 pub mod sq8;
 pub mod sq4;
 pub mod pq4;
+pub mod bitcell;
 
 pub use pq::{PQCodebook, PQ, PQ8Dataset};
 pub use opq::OPQRotation;

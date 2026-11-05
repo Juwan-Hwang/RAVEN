@@ -15,6 +15,7 @@
 //! - 尾数位：10 bits
 //! - 范围：±65504，最小正规数约 6.1e-5
 
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 /// f16 类型（用 u16 存储，便于 SIMD 和序列化）
@@ -194,7 +195,14 @@ pub fn l2_f16_mixed(query: &[f32], db_packed: &[F16]) -> f32 {
 
 /// 检测 CPU 是否支持 F16C 指令
 pub fn is_f16c_supported() -> bool {
-    std::is_x86_feature_detected!("f16c")
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("f16c")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 /// SIMD f16 L2 距离（AVX-512 + F16C，混合模式）
@@ -207,6 +215,7 @@ pub fn is_f16c_supported() -> bool {
 /// - 2 次 _mm256_cvtph_ps 将 f16 转为 f32（寄存器内）
 /// - _mm512_insertf32x8 合并为 16-wide f32
 /// - _mm512_fmadd_ps 做距离累加
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 #[target_feature(enable = "f16c")]
 #[inline]
@@ -259,6 +268,7 @@ pub unsafe fn l2_f16_mixed_avx512(query: &[f32], db_packed: &[F16]) -> f32 {
 /// SIMD f16 L2 距离（AVX2 + F16C，混合模式）
 ///
 /// 8-wide f32 计算，适用于不支持 AVX-512 的平台
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[target_feature(enable = "f16c")]
 #[inline]
@@ -298,6 +308,20 @@ pub unsafe fn l2_f16_mixed_avx2(query: &[f32], db_packed: &[F16]) -> f32 {
     result + buf.iter().sum::<f32>()
 }
 
+/// 非 x86 平台占位：特性检测恒为 false，不会被选中
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn l2_f16_mixed_avx512(query: &[f32], db_packed: &[F16]) -> f32 {
+    l2_f16_mixed(query, db_packed)
+}
+
+/// 非 x86 平台占位：特性检测恒为 false，不会被选中
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn l2_f16_mixed_avx2(query: &[f32], db_packed: &[F16]) -> f32 {
+    l2_f16_mixed(query, db_packed)
+}
+
 /// 统一 SIMD f16 L2 距离分发（AVX-512 > AVX2 > 标量）
 ///
 /// 设计文档：f16 带宽优化快路径
@@ -315,12 +339,26 @@ pub fn l2_f16_mixed_simd(query: &[f32], db_packed: &[F16]) -> f32 {
 
 /// 检测 AVX-512 + F16C 同时支持
 pub fn is_avx512_and_f16c_supported() -> bool {
-    std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("f16c")
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("f16c")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 /// 检测 AVX2 + F16C 同时支持
 pub fn is_avx2_and_f16c_supported() -> bool {
-    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c")
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 // ─── F16Dataset：预量化数据集 ─────────────────────────────────────

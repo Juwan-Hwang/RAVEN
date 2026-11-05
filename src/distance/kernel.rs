@@ -73,9 +73,15 @@ impl KernelVariant {
                 }
             }
             KernelVariant::Neon => {
-                // ARM 平台，当前 x86_64 不支持
-                tracing::warn!("NEON requested but not supported on x86_64, falling back to scalar");
-                Box::new(super::scalar::ScalarKernel { metric })
+                #[cfg(target_arch = "aarch64")]
+                {
+                    Box::new(super::neon::NeonKernel { metric })
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    tracing::warn!("NEON requested but not supported on this arch, falling back to scalar");
+                    Box::new(super::scalar::ScalarKernel { metric })
+                }
             }
         }
     }
@@ -95,6 +101,10 @@ pub fn available_kernels() -> Vec<KernelVariant> {
     // Week 7-8：AVX-512 在 CPU 支持时加入候选
     if super::avx512::is_avx512_supported() {
         kernels.push(KernelVariant::Avx512);
+    }
+    // H01：aarch64 上 NEON 为基线特性
+    if cfg!(target_arch = "aarch64") {
+        kernels.push(KernelVariant::Neon);
     }
     kernels
 }

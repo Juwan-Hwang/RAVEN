@@ -8,6 +8,7 @@
 //! - Visited 标记：Clear-List 模式 Vec<u8>，O(V) 重置
 //! - 批量查询架构：feature-gate 隔离，独立 QueryContext
 
+pub mod aligned;
 pub mod visited;
 pub mod graph;
 pub mod serialize;

@@ -29,6 +29,7 @@ mod graph_benches {
                 r_max: 32,
                 r_soft: 48,
                 max_iterations: 1,
+                ..Default::default()
             };
             divan::black_box(VamanaGraph::build(&vectors, dim, &config, &mut rng));
         });

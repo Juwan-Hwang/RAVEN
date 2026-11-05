@@ -27,6 +27,16 @@ impl ChaCha8Rng {
         Self::seed_from(42)
     }
 
+    /// 断点续建：流位置
+    pub fn get_word_pos(&self) -> u128 {
+        self.0.get_word_pos()
+    }
+
+    /// 断点续建：恢复流位置（同一种子下）
+    pub fn set_word_pos(&mut self, wp: u128) {
+        self.0.set_word_pos(wp)
+    }
+
     /// 获取内部 RNG 可变引用
     pub fn inner(&mut self) -> &mut InnerRng {
         &mut self.0

@@ -11,6 +11,7 @@
 //! - aligned vs unaligned load 以基准结果为准（当前用 loadu，兼容未对齐数据）
 
 use super::{Distance, DistanceKernel, DistanceMetric};
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 /// AVX2 L2 距离（平方欧氏距离）
@@ -21,6 +22,7 @@ use std::arch::x86_64::*;
 /// - _mm256_fmadd_ps: d*d + sum（融合乘加，单指令完成）
 ///
 /// 每 cycle 处理 8 个 f32，理论峰值是标量的 8 倍
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn l2_avx2(a: &[f32], b: &[f32]) -> Distance {
@@ -54,6 +56,7 @@ pub unsafe fn l2_avx2(a: &[f32], b: &[f32]) -> Distance {
 }
 
 /// AVX2 内积距离（1 - inner product，MIPS 场景预留）
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn ip_avx2(a: &[f32], b: &[f32]) -> Distance {
@@ -82,6 +85,7 @@ pub unsafe fn ip_avx2(a: &[f32], b: &[f32]) -> Distance {
 }
 
 /// __m256 水平求和
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn horizontal_sum_ps(v: __m256) -> f32 {
     // 提取高低 128 bit
@@ -95,6 +99,21 @@ unsafe fn horizontal_sum_ps(v: __m256) -> f32 {
     let shuf2 = _mm_movehl_ps(sum128, sums);
     let sums2 = _mm_add_ss(sums, shuf2);
     _mm_cvtss_f32(sums2)
+}
+
+/// 非 x86 平台占位：签名与 x86 版一致，内部走标量/动态路径。
+/// `is_avx2_supported()` 在非 x86 上恒为 false，热路径不会选到这里。
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn l2_avx2(a: &[f32], b: &[f32]) -> Distance {
+    super::dynamic::l2_dynamic(a, b)
+}
+
+/// 非 x86 平台占位（标量内积）
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn ip_avx2(a: &[f32], b: &[f32]) -> Distance {
+    -a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>()
 }
 
 /// AVX2 距离核实现
@@ -141,7 +160,14 @@ impl DistanceKernel for Avx2Kernel {
 
 /// 检测当前 CPU 是否支持 AVX2 + FMA
 pub fn is_avx2_supported() -> bool {
-    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 /// 运行时分发的 L2 距离
@@ -154,13 +180,17 @@ pub fn l2_dispatch(a: &[f32], b: &[f32]) -> Distance {
     {
         unsafe { l2_avx2(a, b) }
     }
-    #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+    #[cfg(all(target_arch = "x86_64", not(all(target_feature = "avx2", target_feature = "fma"))))]
     {
         if is_avx2_supported() {
             unsafe { l2_avx2(a, b) }
         } else {
             super::dynamic::l2_dynamic(a, b)
         }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        super::l2_simd(a, b)
     }
 }
 

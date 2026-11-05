@@ -15,6 +15,7 @@
 //! 三阶段筛选（kernel.rs）负责在运行时决定是否启用。
 
 use super::{Distance, DistanceKernel, DistanceMetric};
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 /// AVX-512 L2 距离（平方欧氏距离）
@@ -26,6 +27,7 @@ use std::arch::x86_64::*;
 /// - 尾部用 _mm512_maskz_loadu_ps 掩码加载，避免越界
 ///
 /// 每 cycle 处理 16 个 f32，理论峰值是 AVX2 的 2 倍
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 #[inline]
 pub unsafe fn l2_avx512(a: &[f32], b: &[f32]) -> Distance {
@@ -59,6 +61,13 @@ pub unsafe fn l2_avx512(a: &[f32], b: &[f32]) -> Distance {
 
     // 水平求和主循环累加结果
     result + _mm512_reduce_add_ps(sum)
+}
+
+/// 非 x86 平台占位：`is_avx512_supported()` 恒为 false，热路径不会选到这里。
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn l2_avx512(a: &[f32], b: &[f32]) -> Distance {
+    super::dynamic::l2_dynamic(a, b)
 }
 
 /// AVX-512 距离核实现
@@ -96,7 +105,14 @@ impl DistanceKernel for Avx512Kernel {
 ///
 /// 只需要 avx512f：L2 距离只用基础的加减乘加
 pub fn is_avx512_supported() -> bool {
-    std::is_x86_feature_detected!("avx512f")
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]

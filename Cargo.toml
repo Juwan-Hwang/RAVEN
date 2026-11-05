@@ -14,6 +14,8 @@ crate-type = ["rlib", "cdylib"]
 # 批量查询模式：feature-gate 隔离，不污染单查询主路径（设计文档第二层）
 # 不同查询强行共享 visited 会改变搜索语义，直接损害召回率
 batch_mode = []
+# R53/R59 QOOR 查询越界修正：编译期开关（缺省关；运行期还需 RAVEN_QOOR=1）
+qoor = []
 # AVX-512 内核（Week 7-8，当前预留）
 avx512 = []
 # big-ann SSD 扩展路径（Week 9+，当前仅预留接口）
@@ -22,6 +24,14 @@ big_ann = []
 python = ["dep:pyo3", "dep:numpy"]
 # Fast approx powf：用快速多项式近似替代 powf（AdaptiveEf 热路径优化）
 fast_powf = []
+# 诊断计数器（距离计算次数 / 扩展节点数）；QPS 构建不启用
+diag_counters = ["diag"]
+# 热循环诊断分支（H63 门卫 DK_CFG、H64 边长准入 EL_TAU）；默认构建编译期消除（第 10 轮）
+diag = []
+# 分段计时（cntvct，诊断用）
+diag_prof = []
+# R25 代价模型裁决 oracle（固定轨迹的完美准入 / 人工串行链 / 额外独立取码）；默认构建编译期消除
+diag_cm = []
 
 [dependencies]
 # 构建可复现性：ChaCha8 速度快、质量足够、跨平台结果一致（设计文档第四层 F.7）

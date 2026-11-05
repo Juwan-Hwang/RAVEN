@@ -1,2 +1,7 @@
 ﻿[build]
 rustflags = ["-C", "target-cpu=native"]
+
+# R43 接力-3：ARM arm4 四方 6 轮（steal<5%）r42c+align-loops=64 对 main GloVe-100 中位 +2.9%、SIFT +1.7%（单独 r42c +1.4%/+0.4%）。
+# 注意 target 段 rustflags 会覆盖 [build] 段，所以这里重复 target-cpu=native。
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native", "-C", "llvm-args=-align-loops=64"]
