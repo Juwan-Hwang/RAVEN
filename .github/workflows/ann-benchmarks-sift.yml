@@ -1,0 +1,29 @@
+name: ann-benchmarks sift-128 (RAVEN)
+on:
+  workflow_dispatch:
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: lscpu | grep -E "Model name|^CPU\(s\)|Flags" | cut -c1-400; free -g
+      - name: Build RAVEN wheel
+        run: |
+          pip install maturin numpy
+          RUSTFLAGS="-C target-cpu=native" maturin build --release --features python
+          pip install target/wheels/*.whl
+      - name: ann-benchmarks
+        run: |
+          git clone --depth 1 https://github.com/erikbern/ann-benchmarks ab
+          cd ab
+          pip install -r requirements.txt
+          rm -rf ann_benchmarks/algorithms/raven && cp -r ../ann_benchmarks/algorithms/raven ann_benchmarks/algorithms/raven
+          rm -rf ann_benchmarks/algorithms/raven/__pycache__
+          cp ../bench/ab-sift-config.yml ann_benchmarks/algorithms/raven/config.yml
+          python run.py --local --dataset sift-128-euclidean --algorithm raven --runs 3 --timeout 7200
+          python data_export.py --out ../raven-sift.csv
+      - uses: actions/upload-artifact@v4
+        with: {name: raven-sift, path: raven-sift.csv}
