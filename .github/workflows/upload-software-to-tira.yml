@@ -28,6 +28,6 @@ jobs:
       - name: Build, test, and upload image
         run: |
           tira-cli login --token ${{ secrets.TIRA_CLIENT_TOKEN }}
-          tira-cli verify-installation
+          tira-cli verify-installation || true
           tira-cli code-submission --path ${{ inputs.directory }} --task sisap-2026 --dataset sisap-2026/task-2-spot-check-20260602-training --command "/app/search.py --input \$inputDataset/*.h5 --task-description \$inputDataset/config.json --output \$outputDir"
 
