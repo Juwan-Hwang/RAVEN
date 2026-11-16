@@ -41,7 +41,7 @@ pub struct SQ4Params {
     /// 维度
     pub dim: usize,
     /// R42c LP：投影矩阵（m×原维 行主序；空 = 不投影）。放在量化参数里而不是 GraphSearcher 上，
-    /// 使原路径 GraphSearcher 布局与 main 完全相同（R43 接力-2：ARM 上 r42b 多一个 24 B 字段即 −4%）。
+    /// 使原路径 GraphSearcher 布局与主线完全相同（ARM 上多一个 24 B 字段即 −4%）。
     pub proj: Vec<f32>,
 }
 
@@ -82,7 +82,7 @@ impl SQ4Params {
 
     /// H17：稳健量化范围——每维取 `[clip, 1-clip]` 分位数作为 min/max（超出范围的值在编码时被 clamp 到 0/15）。
     /// `clip = 0` 等价于 [`SQ4Params::fit`]。分位数在至多 200K 行的确定性等距样本上计算。
-    /// 动机（internal runs）：glove-100 归一化后各维有长尾，min/max 让 16 级大多浪费在尾部；
+    /// 动机：glove-100 归一化后各维有长尾，min/max 让 16 级大多浪费在尾部；
     /// clip=0.005 时穷举 SQ4 + 精排 top-20 的 recall 0.852→0.964，sift 0.958→0.970。
     pub fn fit_clipped(data: &[f32], dim: usize, clip: f32) -> Self {
         if clip <= 0.0 {
@@ -522,7 +522,7 @@ pub unsafe fn l2_sq4_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
 //   t<0 ：2|t|·c + t^2            t>15：2(t-15)·(15-c) + (t-15)^2
 // 修正恒 ≥0，故分段提前放弃（部分和为下界）仍无损。只对越界维（稀疏）逐维加；
 // 同分布数据集无越界维 → 全局开关恒 false，热路径只多一次 relaxed 读。
-// R56：QOOR 默认关（RAVEN_QOOR=1 开），保证未启用档召回与 main 逐位一致（门控 a）。
+// R56：QOOR 默认关（RAVEN_QOOR=1 开），保证未启用档召回与主线逐位一致（门控 a）。
 pub static QOOR_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub const QOOR_MAX: usize = 256;
 pub static QD_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -536,7 +536,7 @@ pub fn qoor_enabled() -> bool { static E: std::sync::OnceLock<bool> = std::sync:
 /// 若 qa 是当前线程登记的查询码，返回对 qb 的越界修正；否则 0。
 #[inline(always)]
 pub fn qoor_corr(qa: &[u8], qb: &[u8]) -> f32 {
-    // R59：QOOR 编译期隔离（cargo feature "qoor"，缺省关）→ 缺省构建热路径与 main 指令级相同（R58a x86 (a) 测得运行期开关 −2.6%/−4.4%）
+    // R59：QOOR 编译期隔离（cargo feature "qoor"，缺省关）→ 缺省构建热路径与主线指令级相同（R58a x86 (a) 测得运行期开关 −2.6%/−4.4%）
     #[cfg(not(feature = "qoor"))]
     { let _ = (qa, qb); return 0.0; }
     #[cfg(feature = "qoor")]

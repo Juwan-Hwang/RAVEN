@@ -4,7 +4,7 @@
 //! `search_sq4` 走原路径（逐位一致）；`ef ≥ gate` 时 searcher 以 `E = er·ef` 跑图得到精确 top-k 与
 //! 第 k 名距离 T，再按查询到 k-means 中心的距离取前 `P = pr·ef` 个单元，用 [`BitCells`] fastscan
 //! 以免排序门槛 `est < T − ‖q−c‖² + m·2‖q−c‖·ē·g/√D` 预筛，幸存者批量精算并入 top-k。
-//! 机制与原创点见 design notes R32-2 / R33-1。
+//! 机制与原创点见开发日志。
 
 use crate::quant::bitcell::{rotate, BitCells, QueryLut};
 
@@ -58,7 +58,7 @@ impl Default for HrParams {
     // R35：两平台统一映射 v2（P 上限 0.30·ef + 耐心早停 2/0.3）。x86 R34 证实；ARM R35 配对 v2 对 v1 6/6 +7…+26%（steal<5%）
     // R36 合并候选 B2：S2C sa 8、su 2、sc 5，P 上限 0.64·ef（sc 4 的 c1 在 ef ≥ 280 同 ef 召回比 v2 低 >0.003，sc 5 两平台守住），待档位门控 (a)(b) 逐平台判定
     fn default() -> Self {
-        // R41 合并候选：两平台默认回到 v2（sa 0 = 不走 S2C 分段确认，P 上限 0.30·ef），与 main R35 行为相同；
+        // R41 合并候选：两平台默认回到 v2（sa 0 = 不走 S2C 分段确认，P 上限 0.30·ef），与主线行为相同；
         // B2（sa 8/su 2/sc 5/P 0.64·ef）x86 (a) 五批全负（R40）→ 留在叠加池，RAVEN_HR_SA/SU/SC/PR 可开。
         HrParams { gate: 200, er: 0.37, pr: 0.30, margin: 1.0, pat: 2, pminr: 0.3, sa: 0, su: 2, ss: 0, sc: 5, saf: 0.0, rk: 0, rmg: 1.02, pg: 0, stat: false, ek: true, c8: 0.0 }
     }
@@ -127,7 +127,7 @@ pub struct CcScratch {
 }
 
 /// 一个 searcher 上启用的 HR 计划（Copy，挂在 GraphSearcher 上）。
-/// R42b：只留热字段（与 main R35 相同的 5 个），R35/R36 的分段确认/RH 覆盖参数移到 [`CcScratch::ext`]（已装箱，冷数据），
+/// R42b：只留热字段（与主线相同的 5 个），R35/R36 的分段确认/RH 覆盖参数移到 [`CcScratch::ext`]（已装箱，冷数据），
 /// 避免 GraphSearcher 变大改变原路径布局（R43 接力测得 x86 GloVe 未启用档 −3…−6%、ARM HR 档 −4%）。
 #[derive(Clone, Copy)]
 pub struct CcActive<'a> {
@@ -177,7 +177,7 @@ pub fn default_nl(n: usize) -> usize {
     p
 }
 
-/// 采样 k-means（与 R31/R32 eval harness sv3_kmeans 同算法：nl·64 个等距采样点、10 轮 Lloyd、angular 时中心归一化），
+/// 采样 k-means（与 raven_eval 中 sv3_kmeans 同算法：nl·64 个等距采样点、10 轮 Lloyd、angular 时中心归一化），
 /// 最后对全部点做一次分配。vectors 为内部序 n×dim。
 pub fn kmeans(vectors: &[f32], dim: usize, nl: usize, angular: bool) -> (Vec<f32>, Vec<u32>) {
     use rayon::prelude::*;

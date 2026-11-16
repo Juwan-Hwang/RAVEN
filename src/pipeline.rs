@@ -1,4 +1,4 @@
-//! Accepted search stack as one library entry point, shared by `eval harness --pipeline 1`
+//! Accepted search stack as one library entry point, shared by `raven_eval --pipeline 1`
 //! and the Python binding (ann-benchmarks path), so production gets exactly what was measured.
 //!
 //! Stack (all accepted 2026-10-29/30 on SIFT1M + GloVe-100):
@@ -373,6 +373,149 @@ pub fn prepare(mut graph: VamanaGraph, vectors: Vec<f32>, dim: usize, o: &Pipeli
     p
 }
 
+/// R55 MLOO（原创"掩码留一标定"）：标定查询取库内点 x_i 本身，但搜索期间把 i 的 f32 向量、LP/全维 SQ4 码与 u8 副本
+/// 临时改写成"远点"（码取每半字节最远值，向量取 1e6 常量），使导航、遍历、精排都看不见 i（模拟库外同分布查询，
+/// 不像普通留一那样直接落在自身、其邻表即近邻表而过易；也不像中点查询那样被两个距离极近的库内点"夹住"）。
+/// 真值 = 去掉 i 的精确 top-k。`RAVEN_CALQ=mloo` 开（默认 mid = 旧中点查询，逐位不变）。
+/// 标定在 prepare 内顺序执行（召回/计时循环单线程），改写-恢复成对出现；并行段只读未改写的数据。
+pub fn calq_mloo() -> bool { std::env::var("RAVEN_CALQ").map(|v| v == "mloo").unwrap_or(false) }
+/// R57 计划判定确定化（RAVEN_PLAN_DET，缺省 on；`0` = R54/R42 旧计时判定，逐位旧行为）。
+/// 计时比 r = A 耗时 / B 同召回插值耗时：r ≤ m·(1−h) 判赢、r ≥ m·(1+h) 判负；落在死区 (1±h) 内（两条曲线代价近乎重合，
+/// 计时噪声决定胜负）时改由确定性计数代价模型（R43-2 特征，逐位确定）判定：模型比 ≤ m 判赢。h = RAVEN_PLAN_BAND（缺省 0.08）。
+/// `RAVEN_PLAN_DET=model`：完全不计时，只用模型（严格确定）。
+/// SDX 缺省 = model（两臂同一码、只差度数截断，模型无码宽偏差；ARM 上 2 进程争用时死区 ±8% 也被计时噪声击穿
+/// → 只有纯模型满足"同数据同机每次相同"）。`RAVEN_PLAN_DET=1` 死区+模型裁决，`0` 旧计时（逐位旧行为）。
+pub fn plan_det() -> u8 { match std::env::var("RAVEN_PLAN_DET").as_deref() { Ok("0") => 0, Ok("1") => 1, _ => 2 } }
+/// LPX 缺省仍为旧判定（R48d：整码预取下模型对全维码失真，纯模型不可用；死区方案待 x86 fashion/mnist 验证）。
+/// `RAVEN_PLAN_DET_LPX=1` 死区+模型裁决，`model` 纯模型。
+pub fn plan_det_lpx() -> u8 { match std::env::var("RAVEN_PLAN_DET_LPX").as_deref() { Ok("1") => 1, Ok("model") => 2, _ => 0 } }
+pub fn plan_band() -> f64 { std::env::var("RAVEN_PLAN_BAND").ok().and_then(|v| v.parse().ok()).unwrap_or(0.08) }
+/// 按召回单调化后的 (召回网格, 耗时) 上做对数插值，返回达到召回 r 的耗时（超出网格最高召回 → None）
+fn interp_t(rs: &[f64], ts: &[f64], r: f64) -> Option<f64> {
+    let mut tm = ts.to_vec(); for i in (0..tm.len().saturating_sub(1)).rev() { tm[i] = tm[i].min(tm[i + 1]); }
+    if r <= rs[0] { return Some(tm[0]); }
+    for i in 1..rs.len() { if r <= rs[i] { let f = if rs[i] > rs[i - 1] { (r - rs[i - 1]) / (rs[i] - rs[i - 1]) } else { 1.0 };
+        return Some((tm[i - 1].ln() + f * (tm[i].ln() - tm[i - 1].ln())).exp()); } }
+    None
+}
+/// R57 单点判定：返回 (赢?, 标记)。det=0：旧规则 at ≤ m·bt。
+fn det_win(det: u8, m: f64, h: f64, at: f64, bt: Option<f64>, am: f64, bm: Option<f64>) -> (bool, &'static str) {
+    match det {
+        0 => (bt.map(|t| at <= m * t).unwrap_or(false), ""),
+        2 => (bm.map(|t| am <= m * t).unwrap_or(false), "m"),
+        _ => match bt { None => (false, ""), Some(t) => { let r = at / t;
+            if r <= m * (1.0 - h) { (true, "") } else if r >= m * (1.0 + h) { (false, "") } else { (bm.map(|t| am <= m * t).unwrap_or(false), "~") } } },
+    }
+}
+
+pub struct CalMask { i: usize, v: Vec<f32>, c: Vec<u8>, cf: Vec<u8>, u: Vec<u8> }
+
+fn far_code(c: &[u8]) -> Vec<u8> { c.iter().map(|&b| { let lo = if b & 15 < 8 { 15 } else { 0 }; let hi = if (b >> 4) < 8 { 15 } else { 0 }; lo | (hi << 4) }).collect() }
+
+impl CalMask {
+    /// 改写 i（ids 为空 = 中点模式，不做任何事）
+    pub fn on(p: &Prepared, ids: &[usize], ci: usize) -> Option<CalMask> {
+        let i = *ids.get(ci)?;
+        let dim = p.vectors.len() / p.graph.len().max(1);
+        unsafe {
+            let vp = (p.vectors.as_ptr() as *mut f32).add(i * dim);
+            let v = std::slice::from_raw_parts(vp, dim).to_vec();
+            for d in 0..dim { std::ptr::write_volatile(vp.add(d), 1.0e6); }
+            let wc = |q: &SQ4Dataset| -> Vec<u8> {
+                let cb = q.code_bytes; let cp = (q.codes.as_ptr() as *mut u8).add(i * cb);
+                let old = std::slice::from_raw_parts(cp, cb).to_vec(); let fc = far_code(&old);
+                for b in 0..cb { std::ptr::write_volatile(cp.add(b), fc[b]); } old };
+            let c = wc(&p.sq4);
+            let cf = p.sq4_full.as_ref().map(|q| wc(q)).unwrap_or_default();
+            let u = match &p.vec_u8 { Some(b) => { let up = (b.as_ptr() as *mut u8).add(i * dim); let old = std::slice::from_raw_parts(up, dim).to_vec();
+                for d in 0..dim { std::ptr::write_volatile(up.add(d), 255 - old[d]); } old } None => Vec::new() };
+            Some(CalMask { i, v, c, cf, u })
+        }
+    }
+    pub fn off(self, p: &Prepared) {
+        let (i, dim) = (self.i, self.v.len());
+        unsafe {
+            let vp = (p.vectors.as_ptr() as *mut f32).add(i * dim);
+            for d in 0..dim { std::ptr::write_volatile(vp.add(d), self.v[d]); }
+            let rc = |q: &SQ4Dataset, old: &[u8]| { let cb = q.code_bytes; let cp = (q.codes.as_ptr() as *mut u8).add(i * cb); for b in 0..cb { std::ptr::write_volatile(cp.add(b), old[b]); } };
+            rc(&p.sq4, &self.c);
+            if let Some(q) = &p.sq4_full { rc(q, &self.cf); }
+            if let Some(b) = &p.vec_u8 { let up = (b.as_ptr() as *mut u8).add(i * dim); for d in 0..dim { std::ptr::write_volatile(up.add(d), self.u[d]); } }
+        }
+    }
+}
+/// 掩码包裹一次搜索
+#[inline]
+pub fn cal_run<R>(p: &Prepared, ids: &[usize], ci: usize, f: impl FnOnce() -> R) -> R {
+    if ids.is_empty() { return f(); }
+    let m = CalMask::on(p, ids, ci); let r = f(); if let Some(m) = m { m.off(p); } r
+}
+
+/// MLOO 标定查询集：nc 个不同库内点（种子 seed），返回 (查询向量, 去自身后精确第 k 名距离², 点 id)
+pub fn mloo_queries(base: &[f32], dim: usize, n: usize, nc: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<usize>) {
+    use rand::RngCore;
+    use rayon::prelude::*;
+    let mut rng = ChaCha8Rng::seed_from(seed);
+    let mut seen = std::collections::HashSet::new(); let mut ids = Vec::with_capacity(nc);
+    while ids.len() < nc.min(n) { let qi = (rng.next_u64() % n as u64) as usize; if seen.insert(qi) { ids.push(qi); } }
+    let mut qv = Vec::with_capacity(ids.len() * dim);
+    for &qi in &ids { qv.extend_from_slice(&base[qi * dim..(qi + 1) * dim]); }
+    let thr: Vec<f32> = ids.par_iter().map(|&qi| {
+        let q = &base[qi * dim..(qi + 1) * dim];
+        let mut top: Vec<f32> = Vec::with_capacity(k + 2);
+        for j in 0..n {
+            if j == qi { continue; }
+            let d = crate::distance::l2_simd(q, &base[j * dim..(j + 1) * dim]);
+            if top.len() < k { top.push(d); if top.len() == k { top.sort_by(|a, b| a.total_cmp(b)); } }
+            else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+        }
+        if top.len() < k { top.sort_by(|a, b| a.total_cmp(b)); }
+        top[top.len() - 1] * (1.0 + 1e-5) + 1e-6
+    }).collect();
+    (qv, thr, ids)
+}
+
+/// R55 MLOO 保真度诊断（只测召回，平台无关）：对 sd ∈ {p.sd, 0} × {LP, 全维} × ef 网格，打印中点查询 / MLOO / 测试查询三者的召回。
+/// 标定判定依赖的是"同召回下谁更便宜"，故关键看 LP 与全维（或截断与全度数）两条曲线的相对位置在标定与测试下是否一致。
+pub fn cal_fidelity(p: &Prepared, dim: usize, k: usize, tq: &[f32], tthr: &[f32]) {
+    use rand::RngCore;
+    use rayon::prelude::*;
+    let n = p.graph.len(); let base = &p.vectors; let nc = 1000.min(n);
+    let mut rng = ChaCha8Rng::seed_from(42);
+    let mut mq: Vec<f32> = Vec::with_capacity(nc * dim);
+    for _ in 0..nc {
+        let qi = (rng.next_u64() % n as u64) as usize;
+        let nb = p.graph.neighbors(qi as u32);
+        let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
+        mq.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
+    }
+    let mthr: Vec<f32> = (0..nc).into_par_iter().map(|ci| {
+        let q = &mq[ci * dim..(ci + 1) * dim];
+        let mut top: Vec<f32> = Vec::with_capacity(k + 2);
+        for j in 0..n { let d = crate::distance::l2_simd(q, &base[j * dim..(j + 1) * dim]);
+            if top.len() < k { top.push(d); if top.len() == k { top.sort_by(|a, b| a.total_cmp(b)); } }
+            else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); } }
+        top[top.len() - 1] * (1.0 + 1e-5) + 1e-6 }).collect();
+    let (lq, lthr, lids) = mloo_queries(base, dim, n, nc, k, 42);
+    let nt = tthr.len();
+    let sds: Vec<usize> = if p.sd != 0 { vec![p.sd, 0] } else { vec![0] };
+    let efs: Vec<usize> = [10usize, 12, 15, 20, 25, 30, 40, 60, 80, 100, 150].iter().map(|&m| (m * k + 9) / 10).collect();
+    for &sd in &sds { for full in [false, true] {
+        if full && p.sq4_full.is_none() { continue; }
+        for &ef in &efs {
+            let mk = || { let mut s = if full { p.searcher_full(ef) } else { p.searcher_lp(ef) }; s.with_search_degree(sd); s };
+            let rec = |qv: &[f32], thr: &[f32], ids: &[usize]| -> f64 {
+                let mut s = mk(); let m = thr.len(); let mut h = 0usize;
+                for ci in 0..m { let q = &qv[ci * dim..(ci + 1) * dim];
+                    let r = cal_run(p, ids, ci, || s.search_auto(q, k));
+                    h += r.iter().take(k).filter(|x| crate::distance::l2_simd(q, &base[x.0 as usize * dim..(x.0 as usize + 1) * dim]) <= thr[ci]).count(); }
+                h as f64 / (m * k) as f64 };
+            let a = rec(&mq, &mthr, &[]); let b = rec(&lq, &lthr, &lids); let c = rec(&tq[..nt * dim], tthr, &[]);
+            eprintln!("R55 FID sd={sd} {} ef={ef} mid={a:.4} mloo={b:.4} test={c:.4}", if full { "full" } else { "lp" });
+        }
+    } }
+}
+
 /// R54 SDX 标定：中点查询（与 sd/LPX 标定同法，不碰测试数据）上测截断度数 A = searcher_plain_sd 与全度数 B 的 (ef → 召回, 耗时)，
 /// 判定规则与 LPX 相同（A 在同召回下耗时 ≤ B 插值耗时则判赢；首个判负处为 ef_max）；全网格都赢 → None（行为与旧版逐位相同）。
 pub fn calibrate_sdx(p: &Prepared, dim: usize, o: &PipelineOpts) -> Option<LpxPlan> {
@@ -383,39 +526,53 @@ pub fn calibrate_sdx(p: &Prepared, dim: usize, o: &PipelineOpts) -> Option<LpxPl
     let nc: usize = std::env::var("RAVEN_SDX_CALN").ok().and_then(|v| v.parse().ok()).unwrap_or(if n <= 200_000 { 1000 } else { 500 }).min(n);
     let k = o.k.max(1);
     let base = &p.vectors;
-    let mut rng = ChaCha8Rng::seed_from(54);
-    let mut qv: Vec<f32> = Vec::with_capacity(nc * dim);
-    for _ in 0..nc {
-        let qi = (rng.next_u64() % n as u64) as usize;
-        let nb = p.graph.neighbors(qi as u32);
-        let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
-        qv.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
-    }
-    let thr: Vec<f32> = (0..nc).into_par_iter().map(|ci| {
-        let q = &qv[ci * dim..(ci + 1) * dim];
-        let mut top: Vec<f32> = Vec::with_capacity(k + 2);
-        for j in 0..n {
-            let d = crate::distance::l2_simd(q, &base[j * dim..(j + 1) * dim]);
-            if top.len() < k { top.push(d); if top.len() == k { top.sort_by(|a, b| a.total_cmp(b)); } }
-            else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+    let (qv, thr, ids) = if calq_mloo() { mloo_queries(base, dim, n, nc, k, 54) } else {
+        let mut rng = ChaCha8Rng::seed_from(54);
+        let mut qv: Vec<f32> = Vec::with_capacity(nc * dim);
+        for _ in 0..nc {
+            let qi = (rng.next_u64() % n as u64) as usize;
+            let nb = p.graph.neighbors(qi as u32);
+            let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
+            qv.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
         }
-        if top.len() < k { top.sort_by(|a, b| a.total_cmp(b)); }
-        top[top.len() - 1] * (1.0 + 1e-5) + 1e-6
-    }).collect();
+        let thr: Vec<f32> = (0..nc).into_par_iter().map(|ci| {
+            let q = &qv[ci * dim..(ci + 1) * dim];
+            let mut top: Vec<f32> = Vec::with_capacity(k + 2);
+            for j in 0..n {
+                let d = crate::distance::l2_simd(q, &base[j * dim..(j + 1) * dim]);
+                if top.len() < k { top.push(d); if top.len() == k { top.sort_by(|a, b| a.total_cmp(b)); } }
+                else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+            }
+            if top.len() < k { top.sort_by(|a, b| a.total_cmp(b)); }
+            top[top.len() - 1] * (1.0 + 1e-5) + 1e-6
+        }).collect();
+    (qv, thr, Vec::<usize>::new()) };
     let mk = |ef: usize, full: bool| if full { p.plain_with(ef, 0, p.lpx_sdx.as_ref().or(p.lpx.as_ref())) } else { p.plain_with(ef, p.sd, p.lpx.as_ref()) };
+    let det = plan_det();
+    let feats_of = std::cell::RefCell::new(std::collections::HashMap::<(usize, bool), [f64; COST_FEATS]>::new());
     let recall_of = |ef: usize, full: bool| -> f64 {
         let mut s = mk(ef, full); let mut h = 0usize;
         for ci in 0..nc {
             let q = &qv[ci * dim..(ci + 1) * dim];
-            h += s.search_auto(q, k).iter().take(k)
+            let r = cal_run(p, &ids, ci, || s.search_auto(q, k));
+            h += r.iter().take(k)
                 .filter(|x| crate::distance::l2_simd(q, &base[x.0 as usize * dim..(x.0 as usize + 1) * dim]) <= thr[ci]).count();
+        }
+        if det != 0 {
+            // R57 计数遍（同 LPX）：novis 关，只取特征
+            let nv = crate::graph::vamana::novis_mode(); crate::graph::vamana::set_novis(0);
+            let mut s = mk(ef, full); let mut fs = [0f64; COST_FEATS];
+            for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; let _ = cal_run(p, &ids, ci, || s.search_auto(q, k));
+                let f = CostModel::feats(&s, k, dim, 0); for i in 0..COST_FEATS { fs[i] += f[i] / nc as f64; } }
+            crate::graph::vamana::set_novis(nv);
+            feats_of.borrow_mut().insert((ef, full), fs);
         }
         h as f64 / (nc * k) as f64
     };
     let time_of = |ef: usize, full: bool| -> f64 {
         let mut s = mk(ef, full); let mut sink = 0usize;
         let t = Instant::now();
-        for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; sink += s.search_auto(q, k).len(); }
+        for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; sink += cal_run(p, &ids, ci, || s.search_auto(q, k)).len(); }
         let el = t.elapsed().as_secs_f64(); std::hint::black_box(sink);
         el * 1e6 / nc as f64
     };
@@ -425,10 +582,14 @@ pub fn calibrate_sdx(p: &Prepared, dim: usize, o: &PipelineOpts) -> Option<LpxPl
     let br = mono(efs.iter().map(|&e| recall_of(e, true)).collect());
     let rounds: usize = std::env::var("RAVEN_SDX_CALR").ok().and_then(|v| v.parse().ok()).unwrap_or(5).max(1);
     let (mut at, mut bt) = (vec![f64::MAX; efs.len()], vec![f64::MAX; efs.len()]);
-    for rd in 0..rounds {
+    if det != 2 { for rd in 0..rounds {
         let order: Vec<usize> = if rd % 2 == 0 { (0..efs.len()).collect() } else { (0..efs.len()).rev().collect() };
         for &i in &order { at[i] = at[i].min(time_of(efs[i], false)); bt[i] = bt[i].min(time_of(efs[i], true)); }
-    }
+    } }
+    let (am, bm): (Vec<f64>, Vec<f64>) = if det != 0 { let cm = CostModel::platform(); let fo = feats_of.borrow();
+        (efs.iter().map(|&e| cm.cost(&fo[&(e, false)]) * 1e-3).collect(), efs.iter().map(|&e| cm.cost(&fo[&(e, true)]) * 1e-3).collect()) }
+        else { (vec![0.0; efs.len()], vec![0.0; efs.len()]) };
+    let h = plan_band();
     let mut btm = bt.clone(); for i in (0..btm.len().saturating_sub(1)).rev() { btm[i] = btm[i].min(btm[i + 1]); }
     let b_t_at = |r: f64| -> Option<f64> {
         if r <= br[0] { return Some(btm[0]); }
@@ -437,18 +598,22 @@ pub fn calibrate_sdx(p: &Prepared, dim: usize, o: &PipelineOpts) -> Option<LpxPl
         None
     };
     let br_max = br[br.len() - 1];
-    let margin: f64 = std::env::var("RAVEN_SDX_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    // R57：模型判定（det=2）沿用 R43-2 约定的 0.85 裕量（模型误差约 ±10%）：ARM sift100k 裕量 1.0 时模型判截断度数赢到 ef80（比值 0.90–0.97），
+    // 同机安静 ABBA 实测 @0.95/0.995 慢 5–10% → 截断度数只有在模型认为便宜 ≥15% 时才采用
+    let margin: f64 = std::env::var("RAVEN_SDX_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(if det == 2 { 0.85 } else { 1.0 });
     let mut ef_max = 0usize; let mut msg = String::new(); let mut streak = true;
     for i in 0..efs.len() {
         // 两条曲线都饱和（≥0.999 且 A 已达 B 的最高召回）时无区分力，沿用前一判定
         let sat = br_max >= 0.999 && ar[i] >= br_max - 1e-9;
-        let w = if sat { streak } else { match b_t_at(ar[i]) { Some(t) => at[i] <= margin * t, None => false } };
-        msg += &format!(" ef{}: sd{} {:.4}/{:.0}us full {:.4}/{:.0}us{}", efs[i], p.sd, ar[i], at[i], br[i], bt[i], if w { " W" } else { "" });
+        let (w, tag) = if sat { (streak, "") } else if det == 0 { (match b_t_at(ar[i]) { Some(t) => at[i] <= margin * t, None => false }, "") }
+            else { det_win(det, margin, h, at[i], interp_t(&br, &bt, ar[i]), am[i], interp_t(&br, &bm, ar[i])) };
+        msg += &format!(" ef{}: sd{} {:.4}/{:.0}us full {:.4}/{:.0}us{}{}", efs[i], p.sd, ar[i], at[i], br[i], bt[i],
+            if det != 0 { format!(" m{:.2}", am[i] / interp_t(&br, &bm, ar[i]).unwrap_or(f64::NAN)) } else { String::new() }, if w { format!(" W{tag}") } else { tag.to_string() });
         if streak && w { ef_max = efs[i]; } else { streak = false; }
     }
     if streak { ef_max = usize::MAX; }
     if let Some(v) = std::env::var("RAVEN_SDX_EFMAX").ok().and_then(|v| v.parse().ok()) { ef_max = v; }
-    eprintln!("R54 SDX calib ({nc} mid q, k={k}, {:.1}s):{msg} -> ef_max {ef_max}", t0.elapsed().as_secs_f64());
+    eprintln!("R54 SDX calib ({nc} {} q, k={k}, {:.1}s):{msg} -> ef_max {ef_max}", if ids.is_empty() { "mid" } else { "mloo" }, t0.elapsed().as_secs_f64());
     if ef_max == usize::MAX { return None; }
     let mut pl = LpxPlan { ef_max, lp: efs.iter().cloned().zip(ar).collect(), full: efs.iter().cloned().zip(br).collect(), scale: 1.0 };
     if ef_max > 0 { pl.scale = (pl.match_ef(ef_max, 1) as f64 / ef_max as f64).min(1.0); }
@@ -629,39 +794,41 @@ pub fn calibrate_lpx(p: &Prepared, dim: usize, o: &PipelineOpts, sd: usize, marg
     let nc: usize = std::env::var("RAVEN_LPX_CALN").ok().and_then(|v| v.parse().ok()).unwrap_or(if n <= 200_000 { 1000 } else { 500 }).min(n);
     let k = o.k.max(1);
     let base = &p.vectors;
-    let mut rng = ChaCha8Rng::seed_from(42);
-    // 中点查询（库内点与随机图邻居的中点；与 sd 标定同法）：比留一库内点更接近测试查询难度，避免全维码召回在 1.0 饱和
-    let mut qv: Vec<f32> = Vec::with_capacity(nc * dim);
-    for _ in 0..nc {
-        let qi = (rng.next_u64() % n as u64) as usize;
-        let nb = p.graph.neighbors(qi as u32);
-        let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
-        qv.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
-    }
-    let thr: Vec<f32> = (0..nc).into_par_iter().map(|ci| {
-        let q = &qv[ci * dim..(ci + 1) * dim];
-        let mut top: Vec<f32> = Vec::with_capacity(k + 2);
-        for j in 0..n {
-            let d = crate::distance::l2_simd(q, &base[j * dim..(j + 1) * dim]);
-            if top.len() < k { top.push(d); if top.len() == k { top.sort_by(|a, b| a.total_cmp(b)); } }
-            else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+    let (qv, thr, ids) = if calq_mloo() { mloo_queries(base, dim, n, nc, k, 42) } else {
+        let mut rng = ChaCha8Rng::seed_from(42);
+        // 中点查询（库内点与随机图邻居的中点；与 sd 标定同法）：比留一库内点更接近测试查询难度，避免全维码召回在 1.0 饱和
+        let mut qv: Vec<f32> = Vec::with_capacity(nc * dim);
+        for _ in 0..nc {
+            let qi = (rng.next_u64() % n as u64) as usize;
+            let nb = p.graph.neighbors(qi as u32);
+            let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
+            qv.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
         }
-        if top.len() < k { top.sort_by(|a, b| a.total_cmp(b)); }
-        top[top.len() - 1] * (1.0 + 1e-5) + 1e-6
-    }).collect();
+        let thr: Vec<f32> = (0..nc).into_par_iter().map(|ci| {
+            let q = &qv[ci * dim..(ci + 1) * dim];
+            let mut top: Vec<f32> = Vec::with_capacity(k + 2);
+            for j in 0..n {
+                let d = crate::distance::l2_simd(q, &base[j * dim..(j + 1) * dim]);
+                if top.len() < k { top.push(d); if top.len() == k { top.sort_by(|a, b| a.total_cmp(b)); } }
+                else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+            }
+            if top.len() < k { top.sort_by(|a, b| a.total_cmp(b)); }
+            top[top.len() - 1] * (1.0 + 1e-5) + 1e-6
+        }).collect();
+        (qv, thr, Vec::<usize>::new()) };
     let mk = |ef: usize, full: bool| { let mut s = if full { p.searcher_full(ef) } else { p.searcher_lp(ef) }; s.with_search_degree(sd); s };
     let feats_of = std::cell::RefCell::new(std::collections::HashMap::<(usize, bool), [f64; COST_FEATS]>::new());
     let recall_of = |ef: usize, full: bool| -> f64 {
         let mut s = mk(ef, full); let mut h = 0usize; let mut fs = [0f64; COST_FEATS];
         for ci in 0..nc {
             let q = &qv[ci * dim..(ci + 1) * dim];
-            let r = s.search_auto(q, k);
+            let r = cal_run(p, &ids, ci, || s.search_auto(q, k));
             h += r.iter().take(k)
                 .filter(|x| crate::distance::l2_simd(q, &base[x.0 as usize * dim..(x.0 as usize + 1) * dim]) <= thr[ci]).count();
         }
         let nv = crate::graph::vamana::novis_mode(); crate::graph::vamana::set_novis(0);
         let mut s = mk(ef, full);
-        for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; let _ = s.search_auto(q, k);
+        for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; let _ = cal_run(p, &ids, ci, || s.search_auto(q, k));
             let f = CostModel::feats(&s, k, dim, 0); for i in 0..COST_FEATS { fs[i] += f[i] / nc as f64; } }
         crate::graph::vamana::set_novis(nv);
         feats_of.borrow_mut().insert((ef, full), fs);
@@ -670,7 +837,7 @@ pub fn calibrate_lpx(p: &Prepared, dim: usize, o: &PipelineOpts, sd: usize, marg
     let time_of = |ef: usize, full: bool| -> f64 {
         let mut s = mk(ef, full); let mut sink = 0usize;
         let t = Instant::now();
-        for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; sink += s.search_auto(q, k).len(); }
+        for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; sink += cal_run(p, &ids, ci, || s.search_auto(q, k)).len(); }
         let el = t.elapsed().as_secs_f64(); std::hint::black_box(sink);
         el * 1e6 / nc as f64
     };
@@ -684,11 +851,13 @@ pub fn calibrate_lpx(p: &Prepared, dim: usize, o: &PipelineOpts, sd: usize, marg
     // 单一 β 无法同时贴合 fashion/mnist/arxiv（β=0.08 mnist −20%，β=0.6 arxiv −30%）。LPX 判定改为默认计时（RAVEN_CAL=model 退回模型）。
     let full_pf = { let cl = (dim / 2).div_ceil(64); let p = crate::graph::vamana::PF_LINES.load(std::sync::atomic::Ordering::Relaxed); cl >= 4 && (p == usize::MAX || p >= cl) };
     let model_forced = std::env::var("RAVEN_CAL").map(|v| v == "model").unwrap_or(false);
-    let timed = timed0 || (full_pf && !model_forced);
+    let det = plan_det_lpx();
+    let timed = (timed0 || (full_pf && !model_forced)) && det != 2;
     let cm = CostModel::platform();
     let fo = feats_of.borrow().clone();
     let mut lt: Vec<f64> = efs.iter().map(|&e| cm.cost(&fo[&(e, false)]) * 1e-3).collect();
     let mut ft: Vec<f64> = efs.iter().map(|&e| cm.cost(&fo[&(e, true)]) * 1e-3).collect();
+    let (lm, fm) = (lt.clone(), ft.clone());
     if timed || dump {
         let mut tl = vec![f64::MAX; efs.len()]; let mut tf = vec![f64::MAX; efs.len()];
         for rd in 0..rounds {
@@ -722,14 +891,16 @@ pub fn calibrate_lpx(p: &Prepared, dim: usize, o: &PipelineOpts, sd: usize, marg
         // R49d：整码预取下默认计时判定时，LP 的 LOO 召回 ≥0.99 也视为饱和（LOO 下全维码比 LP 更早饱和，近 1 的召回差
         // 无区分力；IBX-2 mnist 计时 ef_max 曾在 20/25/30/∞ 间翻转，实测 ∞ 最优；R49b 的 10% 迟滞把 fashion 推到 25–30，弃用）
         let sat = (fr_max >= 0.999 && lr[i] >= fr_max - 1e-9) || (full_pf && !timed0 && lr[i] >= 0.99);
-        let w = if sat { streak } else { match full_t_at(lr[i]) { Some(t) => lt[i] <= margin * t, None => false } };
-        msg += &format!(" ef{}: lp {:.4}/{:.0}us full {:.4}/{:.0}us{}", efs[i], lr[i], lt[i], fr[i], ft[i], if w { " W" } else { "" });
+        // R57：计时判定时用死区 + 模型裁决（det=1）；模型判定（未计时）路径不变
+        let (w, tag) = if sat { (streak, "") } else if det == 0 || !timed { (match full_t_at(lr[i]) { Some(t) => lt[i] <= margin * t, None => false }, "") }
+            else { det_win(det, margin, plan_band(), lt[i], full_t_at(lr[i]), lm[i], interp_t(&fr, &fm, lr[i])) };
+        msg += &format!(" ef{}: lp {:.4}/{:.0}us full {:.4}/{:.0}us{}", efs[i], lr[i], lt[i], fr[i], ft[i], if w { format!(" W{tag}") } else { tag.to_string() });
         if streak && w { ef_max = efs[i]; } else { streak = false; }
     }
     // 全网格都赢 → 不设上限（网格外不切换；否则 gist/mnist 这类 LP 全程占优的集在 ef>10k 时会被错误切回全维码）
     if streak { ef_max = usize::MAX; }
     if let Some(v) = std::env::var("RAVEN_LPX_EFMAX").ok().and_then(|v| v.parse().ok()) { ef_max = v; }
-    eprintln!("R42 LPX calib (sd {sd}, {nc} LOO q, k={k}, {:.1}s):{msg} -> ef_max {ef_max}", t0.elapsed().as_secs_f64());
+    eprintln!("R42 LPX calib (sd {sd}, {nc} {} q, k={k}, {:.1}s):{msg} -> ef_max {ef_max}", if ids.is_empty() { "mid" } else { "mloo" }, t0.elapsed().as_secs_f64());
     let mut pl = LpxPlan { ef_max, lp: efs.iter().cloned().zip(lr).collect(), full: efs.iter().cloned().zip(fr).collect(), scale: 1.0 };
     if ef_max > 0 && ef_max < usize::MAX { pl.scale = (pl.match_ef(ef_max, 1) as f64 / ef_max as f64).min(1.0); }
     if let Some(v) = std::env::var("RAVEN_LPX_SCALE").ok().and_then(|v| v.parse().ok()) { pl.scale = v; }
@@ -796,24 +967,26 @@ fn calibrate_inner(p: &Prepared, dim: usize, o: &PipelineOpts, do_po: bool) -> (
     let n = p.graph.len();
     let (nc, k) = (o.sd_calib_n.min(n), o.k);
     let base = &p.vectors;
-    let mut rng = ChaCha8Rng::seed_from(7);
-    let mut qv: Vec<f32> = Vec::with_capacity(nc * dim);
-    for _ in 0..nc {
-        let qi = (rng.next_u64() % n as u64) as usize;
-        let nb = p.graph.neighbors(qi as u32);
-        let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
-        qv.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
-    }
-    let thr: Vec<f64> = (0..nc).map(|ci| {
-        let q = &qv[ci * dim..(ci + 1) * dim];
-        let mut top: Vec<f64> = Vec::with_capacity(k + 1);
-        for j in 0..n {
-            let d = l2(q, &base[j * dim..(j + 1) * dim]);
-            if top.len() < k { top.push(d); top.sort_by(|a, b| a.total_cmp(b)); }
-            else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+    let (qv, thr, ids): (Vec<f32>, Vec<f64>, Vec<usize>) = if calq_mloo() { let (q, t, ids) = mloo_queries(base, dim, n, nc, k, 7); (q, t.iter().map(|&x| x as f64).collect(), ids) } else {
+        let mut rng = ChaCha8Rng::seed_from(7);
+        let mut qv: Vec<f32> = Vec::with_capacity(nc * dim);
+        for _ in 0..nc {
+            let qi = (rng.next_u64() % n as u64) as usize;
+            let nb = p.graph.neighbors(qi as u32);
+            let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
+            qv.extend((0..dim).map(|d| 0.5 * (base[qi * dim + d] + base[j * dim + d])));
         }
-        top[k - 1] * (1.0 + 1e-6) + 1e-9
-    }).collect();
+        let thr: Vec<f64> = (0..nc).map(|ci| {
+            let q = &qv[ci * dim..(ci + 1) * dim];
+            let mut top: Vec<f64> = Vec::with_capacity(k + 1);
+            for j in 0..n {
+                let d = l2(q, &base[j * dim..(j + 1) * dim]);
+                if top.len() < k { top.push(d); top.sort_by(|a, b| a.total_cmp(b)); }
+                else if d < top[k - 1] { top[k - 1] = d; top.sort_by(|a, b| a.total_cmp(b)); }
+            }
+            top[k - 1] * (1.0 + 1e-6) + 1e-9
+        }).collect();
+        (qv, thr, Vec::new()) };
     let eval_po = |sdv: usize, ef: usize, po: usize| -> (f64, f64) {
         let mut s = p.searcher(ef);
         s.with_search_degree(sdv);
@@ -823,13 +996,13 @@ fn calibrate_inner(p: &Prepared, dim: usize, o: &PipelineOpts, do_po: bool) -> (
             // R43-2：确定性代价（召回一次 + novis 关计数遍）；RAVEN_CAL=time 恢复计时
             for ci in 0..nc {
                 let q = &qv[ci * dim..(ci + 1) * dim];
-                hit += s.search_sq4(q, k).iter().take(k)
+                hit += cal_run(p, &ids, ci, || s.search_sq4(q, k)).iter().take(k)
                     .filter(|x| l2(q, &base[x.0 as usize * dim..(x.0 as usize + 1) * dim]) <= thr[ci]).count();
             }
             let cm = CostModel::platform();
             let nv = crate::graph::vamana::novis_mode(); crate::graph::vamana::set_novis(0);
             let mut c = 0f64;
-            for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; let _ = s.search_sq4(q, k); c += cm.cost(&CostModel::feats(&s, k, dim, 0)); }
+            for ci in 0..nc { let q = &qv[ci * dim..(ci + 1) * dim]; let _ = cal_run(p, &ids, ci, || s.search_sq4(q, k)); c += cm.cost(&CostModel::feats(&s, k, dim, 0)); }
             crate::graph::vamana::set_novis(nv);
             return (hit as f64 / (nc * k) as f64, c * 1e-9);
         }
@@ -838,7 +1011,7 @@ fn calibrate_inner(p: &Prepared, dim: usize, o: &PipelineOpts, do_po: bool) -> (
             let mut h = 0usize;
             for ci in 0..nc {
                 let q = &qv[ci * dim..(ci + 1) * dim];
-                h += s.search_sq4(q, k).iter().take(k)
+                h += cal_run(p, &ids, ci, || s.search_sq4(q, k)).iter().take(k)
                     .filter(|x| l2(q, &base[x.0 as usize * dim..(x.0 as usize + 1) * dim]) <= thr[ci]).count();
             }
             best = best.min(t.elapsed().as_secs_f64());

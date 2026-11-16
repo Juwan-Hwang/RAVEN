@@ -3169,7 +3169,7 @@ impl<'a> GraphSearcher<'a> {
             let nv = novis_on() && t.len() <= opts.carry && ORACLE_SEEDS.with(|o| o.borrow().is_empty());
             t.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
             t.truncate(opts.carry);
-            // H39 oracle 上界实验：注入查询专属种子（eval harness RAVEN_ORACLE），默认空
+            // H39 oracle 上界实验：注入查询专属种子（raven_eval RAVEN_ORACLE），默认空
             ORACLE_SEEDS.with(|o| {
                 for &v in o.borrow().iter() {
                     if self.visited.visit(v) { t.push((v, sq4.distance_raw(code, v as usize))); }
@@ -3286,7 +3286,7 @@ impl<'a> GraphSearcher<'a> {
     pub fn hr_active(&self) -> bool { self.cc.is_some() }
 
     /// R33 统一入口：挂了 HR（ef ≥ gate）走"图段 E + 单元确认"，否则就是 [`Self::search_sq4`]（原路径，代码未改）。
-    /// 由 Prepared::searcher 得到的 searcher 一律用本入口（Python 绑定、eval harness 主循环）。
+    /// 由 Prepared::searcher 得到的 searcher 一律用本入口（Python 绑定、raven_eval 主循环）。
     #[inline]
     pub fn search_auto(&mut self, query: &[f32], k: usize) -> Vec<(u32, f32)> {
         match self.cc { Some(act) => self.search_sq4_hr(query, k, act), None => self.search_sq4(query, k) }
@@ -4381,10 +4381,10 @@ pub fn set_novis(mode: u8) { NOVIS.store(mode.min(2), std::sync::atomic::Orderin
 /// R28 组合 1：建图后饱和填充的默认（度数, ef）。RAVEN_FILL=D,ef 覆盖，RAVEN_FILL=0 关。各平台默认按合并门槛判定后设置。
 /// aarch64：R28 C（c1j48，SIFT R48→64 填充 + novis2 + vh148，ef 40→25 / 45→28 等召回，3 轮 6/6：+16.0/+22.1/+25.0%、+21.7/+19.8/+18.3%；
 /// GloVe 组合 1 c1j +16.6/+10.7%）→ (64, 128)。x86：组合 1 SIFT 噪声大（c1j48 第 3 轮 −20%），待 R29 低噪声复测 → 关。
-/// R29（2026-11-02）：单图进程 ABAB 公平复测（internal runs，4 轮正反序，等召回插值）：SIFT@0.95 +20.6/+12.1/+14.7/+12.4%（中位 +13.5%），
+/// R29（2026-11-02）：单图进程 ABAB 公平复测（4 轮正反序，等召回插值）：SIFT@0.95 +20.6/+12.1/+14.7/+12.4%（中位 +13.5%），
 /// GloVe@0.8785 +3.3/−15.2/+4.3/+17.2%、@0.9083 +3.6/−3.0/+9.4/+5.9%（不同向）→ 按合并规则 aarch64 改回 None（两平台都关；RAVEN_FILL=64,128 可开）。
 /// R28 的 +16～25% 来自双图同进程 A/B（先载入的 A 图被拖慢），见 CHARTER 测量规则。
-/// R31（2026-11-02）x86：单图进程 ABAB 4 轮全档位合并测试（internal runs）：SIFT@0.95 +10.7/+0.6/+7.3/−9.8%（中位 +3.9%，3/4 正），
+/// R31（2026-11-02）x86：单图进程 ABAB 4 轮全档位合并测试：SIFT@0.95 +10.7/+0.6/+7.3/−9.8%（中位 +3.9%，3/4 正），
 /// GloVe@0.8785 +14.2/+3.3/+8.9/−16.1%（中位 +6.1%，3/4 正）、@0.9083 +15.4/+4.2/+10.8/+11.5%（+11.1%，4/4）、@0.95 +5.6/+11.9/+6.4/+15.8%（+9.1%，4/4）；
 /// 同会话另一组 4 轮（q_table.txt）SIFT +13.7%（4/4）、GloVe@0.95 +3.2%（4/4）→ x86 改为 (64, 128)；aarch64 保持 None（R29 不同向）。
 #[cfg(target_arch = "x86_64")]
@@ -5442,7 +5442,7 @@ pub fn h144_rewire(storage: &mut HybridBlockedCsr, vecs: &[f32], dim: usize, sd:
 /// rec=true：记录轮，记下本查询中 pool.insert 成功的节点（acc）；rec=false：只取 set 中的节点 + 被拒者中 cm_mix(v^seed) <= keep_thr 的比例，
 /// 被跳过者全是"会被池拒绝"的点，故池/轨迹/结果与基线逐位一致（= 完美准入；keep_thr 线性扫取码数，跳数不变）。
 /// chain = 每跳串行插入的依赖随机访存次数（表 CM_TAB，掩码 CM_MASK）；extra = 每跳额外独立取码数。
-/// R26 段归因（warm 掩码，见 eval harness cm 第 5 字段）：记录轮另记每查询的 r_adj（邻接行绝对行地址）、r_vis（做 visited 检查的节点）、
+/// R26 段归因（warm 掩码，见 raven_eval cm 第 5 字段）：记录轮另记每查询的 r_adj（邻接行绝对行地址）、r_vis（做 visited 检查的节点）、
 /// r_new（visited 过滤后的新邻居 = 取码者）、r_nav（导航层算过 f32 距离的节点）、r_rr（rerank 候选）。
 pub struct CmState { pub rec: bool, pub keep_thr: u32, pub chain: u32, pub extra: u32, pub block: u32, pub seed: u32,
     pub set: Vec<u32>, pub used: Vec<usize>, pub acc: Vec<u32>, pub n_new: u64, pub n_kept: u64, pub hops: u64, pub sink: f32,

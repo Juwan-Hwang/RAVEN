@@ -377,6 +377,9 @@ impl PySearcher {
     }
 
     /// R28 D：searcher 复用开关（默认开；关 = 旧行为，每次查询新建 searcher，仅供前后对比）
+    /// R55：batch_search 线程数（0 = 当前线程串行，复用缓存 searcher；用于测 Python 逐条调用开销）
+    fn set_threads(&mut self, threads: usize) { self.threads = threads; }
+
     fn set_searcher_reuse(&mut self, on: bool) {
         self.reuse = on;
         if !on { self.cache.lock().map(|mut c| c.clear()).ok(); }

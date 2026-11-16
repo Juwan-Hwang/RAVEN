@@ -3,13 +3,13 @@
 //! 一次 hop 只取当前节点的一个连续块（硬件/软件流式预取友好），用 NEON `vqtbl1q_u8` 查表一次算 32 个邻居的
 //! RaBitQ 式 1-bit 估计距离，弹出节点时用块内向量算精确距离（无需末尾 rerank）。
 //!
-//! 与 SymphonyQG 的区别（原创部分）：
+//! 与 SymphonyQG 的区别（本项目原创部分）：
 //! - **查询全局 LUT + 每边中心校正**：邻居码是相对所在节点 u 的残差符号码，但估计式
 //!   `‖o−q‖² ≈ ‖q−u‖² + k1 − k2·⟨x̄, Pq⟩` 中 ‖q−u‖ 被消去，`⟨x̄,Pu⟩` 在构建期折进 k1，
 //!   因此 LUT 只依赖 Pq：**每个查询建一次 LUT，hop 时零 LUT 构建**（SymphonyQG 每 hop 重建残差 LUT）。
 //! - 误差界（RaBitQ）用作可调乐观键：key = est − eps·‖q−u‖·e（eps=0 即纯估计）。
 //!
-//! 开关：仅 `eval harness --qg 1` 使用；默认路径不变。
+//! 开关：仅 `raven_eval --qg 1` 使用；默认路径不变。
 
 use crate::build::ChaCha8Rng;
 use crate::graph::linear_pool::LinearPool;
