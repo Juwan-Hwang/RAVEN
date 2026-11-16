@@ -13,41 +13,28 @@ RAVEN implements a Vamana/DiskANN-style graph index with a unified, battle-teste
 
 ### Performance
 
-SIFT-1M benchmark (1M vectors, dim=128, SQ4, single thread, 2026-11-05):
+Single-thread QPS ratios at matched recall (RAVEN ÷ baseline, equal-recall interpolated, measured in alternating runs on one machine), updated 2026-11-16.
 
-| ef | recall@10 | QPS |
-|---:|---:|---:|
-| 40 | 0.9746 | 30,540 |
-| 45 | 0.9789 | 28,804 |
-| 50 | 0.9827 | 26,464 |
-| 55 | 0.9855 | 24,026 |
-| 65 | 0.9892 | 21,408 |
-| 70 | 0.9905 | 20,141 |
-| 80 | 0.9926 | 18,008 |
-| 100 | 0.9952 | 14,640 |
+ann-benchmarks (k=10), vs Descartes:
 
-**Working point**: ef=50, recall=0.9827, QPS=26,464. Index size: 1.5 MB (64 B/vector).
+| Dataset | recall 0.95 | recall 0.99 |
+|---|---:|---:|
+| sift-128-euclidean | 1.14–1.34× | 1.14–1.27× |
+| nytimes-256-angular | 1.18–1.20× | 1.37–1.43× at 0.97 |
+| fashion-mnist-784-euclidean | 1.50–2.08× | ahead at every measured tier |
+| mnist-784-euclidean | 1.50–1.82× across 0.95–0.99 | — |
+| glove-25-angular | 1.09–1.13× | 1.22–1.29× |
 
-**Multi-threaded**: ef=50, recall=0.9827, QPS=153,369 (5.8× single-thread, 16 threads, `batch_search`).
+VIBE (k=100), vs GINGER unless noted:
 
-### Comparison (same machine, same day)
+| Dataset | Ratio |
+|---|---:|
+| imagenet-clip-512 @0.95 | 1.43–1.62× |
+| landmark-nomic-768 @0.95 / @0.99 | 1.15–1.20× / 1.10–1.15× |
+| ccnews-nomic-768 @0.95 | 1.18–1.27× (≈2.0× vs PAG) |
+| glove-200 @0.95 | 1.36–1.56× vs PAG, ≈2.0–2.8× vs Glass |
 
-ann-benchmarks, sift-128-euclidean (1M × 128-dim), single-threaded QPS at matched recall levels:
-
-| Algorithm | @0.95 | @0.97 | @0.98 | @0.99 | Index size |
-|---|---:|---:|---:|---:|---:|
-| qsgngt | 34,841 | 29,920 | **29,920** | **22,425** | 5.4 MB |
-| descartes | **37,722** | **33,156** | 26,616 | 23,957 | 7.1 MB |
-| kgn | 32,185 | 24,161 | 22,225 | 16,484 | 3.3 MB |
-| RAVEN | 30,540¹ | 30,540 | 28,804 | 20,141 | **1.5 MB** |
-| RAVEN MT16 | — | — | 153,369 (recall 0.983) | — | **1.5 MB** |
-
-¹ RAVEN's pipeline curve starts at recall 0.9746 (ef=40); lower-recall operating points are not part of the tuned envelope.
-
-Notes:
-
-- RAVEN is the smallest index by 2.2–4.7× (SQ4, 64 B/vector) and the only one with a parallel batch path (`batch_query`).
-- At recall 0.98, RAVEN single-thread leads descartes by +8.2%; MT16 reaches 153K QPS.
+On ann-benchmarks SIFT-128 at recall 0.95 the current engine also measures 1.55–1.75× vs GINGER and 1.45–1.94× vs Glass on the same machine.
 
 ### Architecture
 
