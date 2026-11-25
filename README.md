@@ -10,31 +10,42 @@ RAVEN implements a Vamana/DiskANN-style graph index with a unified, battle-teste
 2. **Unified Query Pipeline** (`src/pipeline.rs`) — Single accepted search stack shared by the eval harness and the Python binding, so production gets exactly what was measured: nav dedup + SQ4 upper-layer navigation, SQ4 per-dim MSE-adaptive range (H17), dimension permutation by neighbour-pair energy with segmented early abandon (H07a), BFS node reorder (H02), and build-time search-degree calibration (H20v2)
 3. **Cell-Confirm HR** (`src/graph/cellconfirm.rs`) — High-recall mode: graph-located candidates confirmed via sort-free 1-bit cell fastscan with a distance-margin gate, gated by ef threshold
 4. **AdaptiveEf** — Dynamic ef prediction from query→entry-point distance distribution, filling Pareto gaps between fixed-ef points
+5. **Fast default graph build** (`src/build/pipnn.rs`, `pipg.rs`) — Partition-based leaf top-k build with VNNI panel kernels and in-leaf occlusion pre-pruning, replacing iterative Vamana insertion as the default (orders of magnitude faster on large sets); NN-Descent and learned bridge edges for out-of-distribution queries are available
+6. **Asymmetric int8 navigation** (`src/graph/vamana/adq.rs`) — Query-side int8 against SQ4 codes with AVX-512 VNNI batch scoring, exact-bitmap visited set, and low-dimension projected navigation codes for high-dimensional data, enabled automatically for unit-norm data
+7. **Deterministic plan calibration** — Search plans (high-recall gate, truncation and projection switch points) are chosen by count models and leave-one-out calibration rather than wall-clock timing, with an OOD guard that falls back to full-dimension codes when query traffic drifts from the build set
 
 ### Performance
 
-Single-thread QPS ratios at matched recall (RAVEN ÷ baseline, equal-recall interpolated, measured in alternating runs on one machine), updated 2026-11-16.
+Single-thread QPS ratios at matched recall (RAVEN ÷ baseline, equal-recall interpolated, competitors built and measured in alternating runs on the same machine, RAVEN with its code defaults), updated 2026-11-25.
 
-ann-benchmarks (k=10), vs Descartes:
+ann-benchmarks (k=10), vs Descartes (the ann-benchmarks leader):
 
 | Dataset | recall 0.95 | recall 0.99 |
 |---|---:|---:|
-| sift-128-euclidean | 1.14–1.34× | 1.14–1.27× |
-| nytimes-256-angular | 1.18–1.20× | 1.37–1.43× at 0.97 |
-| fashion-mnist-784-euclidean | 1.50–2.08× | ahead at every measured tier |
-| mnist-784-euclidean | 1.50–1.82× across 0.95–0.99 | — |
+| sift-128-euclidean | 1.18× | 1.13–1.15× |
+| nytimes-256-angular | 1.08–1.21× | 1.49–1.61× |
+| fashion-mnist-784-euclidean | 1.40–1.41× | 1.22–1.23× |
+| mnist-784-euclidean | 1.50–1.57× | 1.45–1.50× |
 | glove-25-angular | 1.09–1.13× | 1.22–1.29× |
 
-VIBE (k=100), vs GINGER unless noted:
+On sift-128 the engine also measures 1.55–2.58× vs GINGER across 0.95–0.99 (AMD Zen 4 and Zen 5).
 
-| Dataset | Ratio |
-|---|---:|
-| imagenet-clip-512 @0.95 | 1.43–1.62× |
-| landmark-nomic-768 @0.95 / @0.99 | 1.15–1.20× / 1.10–1.15× |
-| ccnews-nomic-768 @0.95 | 1.18–1.27× (≈2.0× vs PAG) |
-| glove-200 @0.95 | 1.36–1.56× vs PAG, ≈2.0–2.8× vs Glass |
+VIBE (k=100):
 
-On ann-benchmarks SIFT-128 at recall 0.95 the current engine also measures 1.55–1.75× vs GINGER and 1.45–1.94× vs Glass on the same machine.
+| Dataset | Baseline | Ratio |
+|---|---|---:|
+| imagenet-clip-512 | GINGER | 1.43–1.68× @0.95 |
+| imagenet-clip-512 | Glass | 1.66–1.75× @0.99, on par @0.97–0.98 |
+| landmark-nomic-768 | GINGER | 1.46–1.54× @0.99 |
+| yahoo-minilm-384 | GINGER | 1.11× @0.95, 1.19–1.20× @0.99 |
+| yahoo-minilm-384 | Glass | 1.29–1.33× @0.99, 1.53–1.61× @0.995 |
+| yandex-deep-200 (OOD) | GINGER | 1.04–1.06× @0.95, 1.08–1.10× @0.99 |
+| yandex-deep-200 (OOD) | Glass | 1.27× @0.95, 1.32× @0.97 |
+| laion-clip-512 (OOD) | GINGER | 1.21–1.23× @0.98, 1.12–1.16× @0.99 |
+| ccnews-nomic-768 | GINGER | 1.18–1.27× @0.95 |
+| deep-96 (1M) | Glass | 1.20–1.27× @0.95, 1.43–1.49× @0.99 |
+
+Known gaps: gist-960 still trails at recall 0.90–0.97 (about 0.69–0.84× of the leader), and index memory is not yet below the leaders'.
 
 ### Architecture
 
@@ -43,7 +54,7 @@ On ann-benchmarks SIFT-128 at recall 0.95 the current engine also measures 1.55�
 | L1 | `src/distance/` | SIMD distance kernels (AVX-512, AVX2, NEON, F16C, scalar) |
 | L2 | `src/memory/` | Hybrid Blocked-CSR graph storage, aligned allocator, visited tracker, CRC32 serialization |
 | L3 | `src/graph/` | Vamana build, DirectionalPrune, cell-confirm HR, layered navigation, AdaptiveEf, stop-trace |
-| L4 | `src/build/` | Rayon parallel build pipeline, delayed prune, configurable α / R_max / L_build |
+| L4 | `src/build/` | Partition-based default build, NN-Descent, Rayon parallel Vamana build, delayed prune, configurable α / R_max / L_build |
 | L5 | `src/quant/` | SQ4/SQ8 scalar quantization (SQ8 asymmetric distance), BitCells 1-bit cells |
 | L6 | `src/pipeline.rs` + `src/bench/` | Unified query pipeline and benchmark harness |
 
@@ -190,7 +201,8 @@ RAVEN/
 - x86_64 with AVX2 + F16C (minimum)
 - AVX-512 recommended for best performance
 - ARM64 NEON supported
-- Tested on AMD Zen 4 (AVX-512 path)
+- AVX-512 VNNI used when present
+- Tested on AMD Zen 4 and Zen 5 (AVX-512 path) and Intel Skylake-SP
 
 ## License
 
