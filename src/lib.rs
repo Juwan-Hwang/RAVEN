@@ -29,6 +29,7 @@ pub mod quant;
 pub mod config;
 pub mod bench;
 pub mod pipeline;
+pub mod abtime;
 
 #[cfg(feature = "python")]
 pub mod python;

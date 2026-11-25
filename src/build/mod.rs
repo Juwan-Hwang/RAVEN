@@ -10,6 +10,10 @@ pub mod rng;
 pub mod metadata;
 pub mod pipeline;
 pub mod delayed_prune;
+pub mod nnd;
+pub mod pipnn;
+pub mod pipg;
+pub mod mdb;
 
 pub use rng::ChaCha8Rng;
 pub use metadata::{BuildMetadata, BuildConfig};

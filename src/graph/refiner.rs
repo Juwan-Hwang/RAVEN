@@ -159,6 +159,7 @@ pub fn rerank_f32(
     k: usize,
     rerank_factor: usize,
 ) -> Vec<(u32, f32)> {
+    if let Some(r) = rrq_get(vectors.as_ptr() as usize) { return rerank_rrq(r, vectors, dim, query, candidates, k, rerank_factor); }
     F32Refiner::new(vectors, dim).rerank(query, candidates, k, rerank_factor)
 }
 
@@ -295,5 +296,153 @@ mod r48_tests {
         b.sort_by(|x, y| x.1.total_cmp(&y.1).then(x.0.cmp(&y.0)));
         let _ = vf;
         assert_eq!(a.iter().map(|x| x.1 as u64).collect::<Vec<_>>(), b[..10].iter().map(|x| x.1 as u64).collect::<Vec<_>>());
+    }
+}
+
+// ───────────────────────────── R97 H173 RRQ ─────────────────────────────
+/// R97 H173 RRQ（紧凑 rerank 码）：RAVEN_RRQ=8 → 每维仿射 u8 码（dim B/向量），=12 → 每维仿射 12 bit 级（存 u16，2·dim B）。
+/// 距离 = Σ(q−lo)² − 2·Σ a_i·c_i + nx，其中 a_i = s_i·(q_i−lo_i)，nx = Σ s_i²c_i²（每向量预存）。即 Σ(q_i − lo_i − s_i c_i)² 的展开。
+/// RAVEN_RRQ_F32TOP=N：量化 rerank 后对名次 [k−N, k+N) 用 f32 精确距离重排（边界修正）。缺省（未设 RAVEN_RRQ）不安装，rerank_f32 行为不变。
+pub struct Rrq {
+    pub bits: u32,
+    pub dim: usize,
+    pub lo: Vec<f32>,
+    pub s: Vec<f32>,
+    pub c8: crate::memory::aligned::AlignedBuf<u8>,
+    pub c16: crate::memory::aligned::AlignedBuf<u16>,
+    pub nx: Vec<f32>,
+    pub base: usize,
+    pub f32top: usize,
+}
+
+static RRQ_PTR: std::sync::atomic::AtomicPtr<Rrq> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+impl Rrq {
+    pub fn build(vectors: &[f32], dim: usize, bits: u32, f32top: usize) -> Self {
+        let n = vectors.len() / dim;
+        let mut lo = vec![f32::MAX; dim];
+        let mut hi = vec![f32::MIN; dim];
+        for i in 0..n { let v = &vectors[i * dim..(i + 1) * dim]; for j in 0..dim { lo[j] = lo[j].min(v[j]); hi[j] = hi[j].max(v[j]); } }
+        let levels: f32 = if bits == 8 { 255.0 } else { 4095.0 };
+        let s: Vec<f32> = (0..dim).map(|j| { let r = hi[j] - lo[j]; if r > 0.0 { r / levels } else { 1.0 } }).collect();
+        let mut nx = vec![0f32; n];
+        let mut c8v: Vec<u8> = Vec::new();
+        let mut c16v: Vec<u16> = Vec::new();
+        if bits == 8 { c8v = vec![0u8; n * dim]; } else { c16v = vec![0u16; n * dim]; }
+        for i in 0..n {
+            let v = &vectors[i * dim..(i + 1) * dim];
+            let mut acc = 0f64;
+            for j in 0..dim {
+                let c = ((v[j] - lo[j]) / s[j]).round().clamp(0.0, levels);
+                let r = s[j] * c; acc += (r as f64) * (r as f64);
+                if bits == 8 { c8v[i * dim + j] = c as u8; } else { c16v[i * dim + j] = c as u16; }
+            }
+            nx[i] = acc as f32;
+        }
+        let c8 = crate::memory::aligned::AlignedBuf::from_slice(&c8v);
+        let c16 = crate::memory::aligned::AlignedBuf::from_slice(&c16v);
+        Rrq { bits, dim, lo, s, c8, c16, nx, base: vectors.as_ptr() as usize, f32top }
+    }
+    pub fn bytes(&self) -> usize { self.c8.len() + self.c16.len() * 2 + self.nx.len() * 4 + self.dim * 8 }
+}
+
+/// 安装进程全局 RRQ（rerank_f32 在 vectors 基址匹配时改走量化 rerank）
+pub fn rrq_install(r: Rrq) {
+    let b = Box::into_raw(Box::new(r));
+    let _old = RRQ_PTR.swap(b, std::sync::atomic::Ordering::AcqRel); // 旧的有意泄漏（实验开关；可能仍被其它 searcher 引用）
+}
+
+#[inline(always)]
+fn rrq_get(base: usize) -> Option<&'static Rrq> {
+    let p = RRQ_PTR.load(std::sync::atomic::Ordering::Relaxed);
+    if p.is_null() { return None; }
+    let r = unsafe { &*p };
+    if r.base == base { Some(r) } else { None }
+}
+
+thread_local! { static RRQ_A: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new()); }
+
+#[inline(always)]
+fn dot_u8(a: &[f32], c: &[u8]) -> f32 {
+    let n = a.len().min(c.len());
+    let mut acc = [0f32; 16];
+    let mut ca = a[..n].chunks_exact(16); let mut cc = c[..n].chunks_exact(16);
+    for (x, y) in (&mut ca).zip(&mut cc) { for j in 0..16 { acc[j] += x[j] * y[j] as f32; } }
+    let mut s: f32 = acc.iter().sum();
+    for (x, y) in ca.remainder().iter().zip(cc.remainder()) { s += x * *y as f32; }
+    s
+}
+#[inline(always)]
+fn dot_u16(a: &[f32], c: &[u16]) -> f32 {
+    let n = a.len().min(c.len());
+    let mut acc = [0f32; 16];
+    let mut ca = a[..n].chunks_exact(16); let mut cc = c[..n].chunks_exact(16);
+    for (x, y) in (&mut ca).zip(&mut cc) { for j in 0..16 { acc[j] += x[j] * y[j] as f32; } }
+    let mut s: f32 = acc.iter().sum();
+    for (x, y) in ca.remainder().iter().zip(cc.remainder()) { s += x * *y as f32; }
+    s
+}
+
+pub fn rerank_rrq(r: &Rrq, vectors: &[f32], dim: usize, query: &[f32], candidates: Vec<(u32, f32)>, k: usize, rerank_factor: usize) -> Vec<(u32, f32)> {
+    let rerank_n = (k * rerank_factor).max(k).min(candidates.len());
+    let esz = if r.bits == 8 { dim } else { dim * 2 };
+    let cbase: *const i8 = if r.bits == 8 { r.c8.as_ptr() as *const i8 } else { r.c16.as_ptr() as *const i8 };
+    let l2n = RR_L2.load(std::sync::atomic::Ordering::Relaxed).min(rerank_n);
+    for c in candidates.iter().take(l2n) {
+        let b = cbase.wrapping_add(c.0 as usize * esz);
+        let mut off = 0usize;
+        while off < esz { unsafe { crate::arch::prefetch_l2(b.wrapping_add(off)); } off += 64; }
+    }
+    let mut results: Vec<(u32, f32)> = RRQ_A.with(|ab| {
+        let mut a = ab.borrow_mut(); a.clear();
+        let mut q0 = 0f32;
+        for j in 0..dim { let d = query[j] - r.lo[j]; q0 += d * d; a.push(r.s[j] * d); }
+        let mut out = Vec::with_capacity(rerank_n);
+        for i in 0..rerank_n {
+            let id = candidates[i].0 as usize;
+            let dt = if r.bits == 8 { dot_u8(&a, &r.c8[id * dim..(id + 1) * dim]) } else { dot_u16(&a, &r.c16[id * dim..(id + 1) * dim]) };
+            out.push((id as u32, q0 - 2.0 * dt + r.nx[id]));
+        }
+        out
+    });
+    let t = r.f32top;
+    if t > 0 && results.len() > k.saturating_sub(t) {
+        let lo = k.saturating_sub(t);
+        let hi = (k + t).min(results.len());
+        if hi < results.len() { results.select_nth_unstable_by(hi, |a, b| a.1.total_cmp(&b.1)); }
+        results.truncate(hi);
+        if lo > 0 { results.select_nth_unstable_by(lo, |a, b| a.1.total_cmp(&b.1)); }
+        for x in results[lo..].iter_mut() { let id = x.0 as usize; x.1 = l2_simd(query, &vectors[id * dim..(id + 1) * dim]); }
+        results[lo..].sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        results.truncate(k);
+        results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+        return results;
+    }
+    results.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    results.truncate(k);
+    results
+}
+
+#[cfg(test)]
+mod rrq_tests {
+    use super::*;
+    #[test]
+    fn rrq_close_to_f32() {
+        let dim = 384; let n = 500;
+        let mut st = 777u64; let mut nx = || { st ^= st << 13; st ^= st >> 7; st ^= st << 17; ((st % 20001) as f32 / 10000.0) - 1.0 };
+        let v: Vec<f32> = (0..n * dim).map(|_| nx() * 0.05).collect();
+        let q: Vec<f32> = (0..dim).map(|_| nx() * 0.05).collect();
+        for bits in [8u32, 12] {
+            let r = Rrq::build(&v, dim, bits, 0);
+            let cands: Vec<(u32, f32)> = (0..n as u32).map(|i| (i, 0.0)).collect();
+            let a = rerank_rrq(&r, &v, dim, &q, cands.clone(), 50, 20);
+            let b = F32Refiner::new(&v, dim).rerank(&q, cands.clone(), 50, 20);
+            let sa: std::collections::HashSet<u32> = a.iter().map(|x| x.0).collect();
+            let hit = b.iter().filter(|x| sa.contains(&x.0)).count();
+            assert!(hit >= 45, "bits {bits} hit {hit}");
+            let r2 = Rrq::build(&v, dim, bits, 10);
+            let a2 = rerank_rrq(&r2, &v, dim, &q, cands, 50, 20);
+            assert_eq!(a2.len(), 50);
+        }
     }
 }

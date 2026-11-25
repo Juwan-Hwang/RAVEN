@@ -220,7 +220,7 @@ fn main() {
             let s: f32 = base[i * dim..(i + 1) * dim].iter().map(|x| x * x).sum();
             s > 0.0 && (s - 1.0).abs() > 1e-3 && (s - 9.0).abs() > 1e-2 // 9 = 零向量哨兵（范数 3，见 prep_dataset.py）
         }).count();
-        assert_eq!(bad, 0, "angular dataset must be L2-normalised (prep_dataset.py)");
+        assert_eq!(bad, 0, "angular dataset must be L2-normalised");
     }
 
     // ── 图：缓存或建图 ──
@@ -307,58 +307,6 @@ fn main() {
         let t = Instant::now();
         let mut p = raven::pipeline::prepare(graph, base.clone(), dim, &po_);
         eprintln!("pipeline prepared in {:.1}s sd={}", t.elapsed().as_secs_f64(), p.sd);
-        if let Ok(spec) = std::env::var("RAVEN_REPAIR") {
-            // R55b oracle：漏检驱动加边（原创"伪查询修图"）。spec = src,ntrain,ef[,passes]；src = test（作弊上界：用测试查询本身修）| mid（中点伪查询）。
-            // 每个训练查询在 ef 下搜索，真 top-k 中漏检的 g：在返回结果里找离 g 最近的 r，把 g 插进 r 的邻表（按到 r 的距离有序，满则挤掉最远）。
-            use rayon::prelude::*;
-            let parts: Vec<&str> = spec.split(',').collect();
-            let src = parts[0]; let ntr: usize = parts[1].parse().unwrap(); let efr: usize = parts[2].parse().unwrap();
-            let passes: usize = parts.get(3).map(|x| x.parse().unwrap()).unwrap_or(1);
-            let kk = 10usize; let pn = p.graph.len();
-            let mut mids: Vec<usize> = Vec::new();
-            let tq: Vec<f32> = if src == "test" { queries[..ntr.min(nq) * dim].to_vec() }
-            else if let Some(fp) = src.strip_prefix("file:") { let (v, d2) = read_vecs_f32(fp); assert_eq!(d2, dim); v[..ntr.min(v.len() / dim) * dim].to_vec() }
-            else if src == "mloo" { let (v, _t, ids) = raven::pipeline::mloo_queries(&p.vectors, dim, pn, ntr, 10, 555); mids = ids; v }
-            else {
-                use rand::{RngCore, SeedableRng}; let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(555);
-                let mut v = Vec::with_capacity(ntr * dim);
-                for _ in 0..ntr { let qi = (rng.next_u64() % pn as u64) as usize; let nb = p.graph.neighbors(qi as u32);
-                    let j = if nb.is_empty() { qi } else { nb[(rng.next_u64() as usize) % nb.len()] as usize };
-                    v.extend((0..dim).map(|d| 0.5 * (p.vectors[qi * dim + d] + p.vectors[j * dim + d]))); }
-                v };
-            let m = tq.len() / dim;
-            let t = Instant::now();
-            let gt: Vec<Vec<u32>> = (0..m).into_par_iter().map(|i| {
-                let q = &tq[i * dim..(i + 1) * dim]; let mut top: Vec<(f32, u32)> = Vec::with_capacity(kk + 1);
-                for j in 0..pn { if !mids.is_empty() && mids[i] == j { continue; } let d = raven::distance::l2_simd(q, &p.vectors[j * dim..(j + 1) * dim]);
-                    if top.len() < kk { top.push((d, j as u32)); if top.len() == kk { top.sort_by(|a, b| a.0.total_cmp(&b.0)); } }
-                    else if d < top[kk - 1].0 { top[kk - 1] = (d, j as u32); top.sort_by(|a, b| a.0.total_cmp(&b.0)); } }
-                top.iter().map(|x| x.1).collect() }).collect();
-            eprintln!("R55b repair: {m} {src} train q, GT {:.1}s", t.elapsed().as_secs_f64());
-            for pass in 0..passes {
-                let (mut miss, mut adds): (usize, Vec<(u32, u32)>) = (0, Vec::new());
-                { let mut s = p.searcher(efr);
-                  for i in 0..m { let q = &tq[i * dim..(i + 1) * dim]; let r: Vec<u32> = raven::pipeline::cal_run(&p, &mids, i, || s.search_auto(q, kk)).iter().map(|x| x.0).collect();
-                    for &g in &gt[i] { if r.contains(&g) { continue; } miss += 1;
-                        let vg = &p.vectors[g as usize * dim..(g as usize + 1) * dim];
-                        let best = r.iter().copied().min_by(|a, b| raven::distance::l2_simd(vg, &p.vectors[*a as usize * dim..(*a as usize + 1) * dim]).total_cmp(&raven::distance::l2_simd(vg, &p.vectors[*b as usize * dim..(*b as usize + 1) * dim])));
-                        if let Some(b) = best { adds.push((b, g)); } } } }
-                let rm = p.graph.storage().r_max(); let mut added = 0usize;
-                for (r, g) in adds { let mut nb: Vec<u32> = p.graph.neighbors(r).to_vec(); if nb.contains(&g) || r == g { continue; }
-                    let vr = p.vectors[r as usize * dim..(r as usize + 1) * dim].to_vec();
-                    nb.push(g); nb.sort_by(|a, b| raven::distance::l2_simd(&vr, &p.vectors[*a as usize * dim..(*a as usize + 1) * dim]).total_cmp(&raven::distance::l2_simd(&vr, &p.vectors[*b as usize * dim..(*b as usize + 1) * dim])));
-                    nb.truncate(rm); if nb.contains(&g) { added += 1; } p.graph.storage_mut().set_neighbors(r, &nb); }
-                eprintln!("R55b repair pass {pass}: ef{efr} train recall {:.4}, edges added {added}", 1.0 - miss as f64 / (m * kk) as f64);
-            }
-        }
-        if std::env::var("RAVEN_CALFID").map(|v| v == "1").unwrap_or(false) {
-            // R55：标定保真度（测试查询前 2000 条，真值 = gt_dist 第 k 名，与 rival_bench 同 eps）
-            let kk: usize = std::env::var("RAVEN_K").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-            let m = nq.min(2000);
-            let tthr: Vec<f32> = (0..m).map(|qi| { let g = gt_dist[qi * gtk + kk - 1]; if angular { let c = g + 1e-3; c * 2.0 } else { (g + 1e-3) * (g + 1e-3) } }).collect();
-            raven::pipeline::cal_fidelity(&p, dim, kk, &queries[..m * dim], &tthr);
-            std::process::exit(0);
-        }
         if let Ok(v) = std::env::var("RAVEN_HSEL") {
             // R23：跳内排序选择 k[/epf]（0 = 关）；表在此构建（只读、进程级）
             let mut it = v.split('/'); let k: usize = it.next().unwrap().parse().unwrap();
@@ -1132,6 +1080,12 @@ fn main() {
             h61_run(&mut p, &spec, &queries, nq, dim, &base, &gt_dist, gtk, angular, &efs, &out);
             return;
         }
+        // R66：进程内块交替 A/B 计时（RAVEN_ABX=aa | pad16 | pad:N）：A = 本进程已建管线（缺省 = 主线 行为），
+        //   B = 同图重载后另建一条管线（aa：同参数；pad:N：sq4_pad_small=Some(N) 程序化设置），计划（sd/HR 门槛/SDX/LPX）从 A 复制。
+        if let Ok(spec) = std::env::var("RAVEN_ABX") {
+            abx_run(p, &po_, &gpath, &spec, &base, dim, &queries, nq, &gt_dist, gtk, angular, &efs, repeats, kk, &out);
+            return;
+        }
         // 进程内 A/B（审计/H42 起）：RAVEN_AB=knob:a:b，按 1000 查询块交替 A/B（先后轮换），报告块配对比值中位数与召回。
         //   运行时开关：la、rrpf、h37（1/0）、carry、mis（SQ4 码错位字节）
         //   需第二份 Prepared：reorder（1/0）、clip（SQ4 clip，-1 = MSE，0 = min/max）
@@ -1730,8 +1684,8 @@ fn main() {
                 for qi in 0..nq { let q = &queries[qi * dim..(qi + 1) * dim];
                     raven::graph::vamana::YT.with(|t| t.borrow_mut().qid = qi as u32);
                     if oracle_k > 0 { let sd: Vec<u32> = gt_u[qi * gtk + oracle_off..qi * gtk + oracle_off + oracle_k].iter().map(|&g| o2n_or[g as usize]).collect(); raven::graph::vamana::set_oracle_seeds(&sd); }
-                    if warm { let _ = s.search_auto(q, kk); let t1 = Instant::now(); res[qi] = s.search_auto(q, kk).iter().map(|x| p.orig_id(x.0)).collect(); tw += t1.elapsed().as_secs_f64(); }
-                    else { res[qi] = s.search_auto(q, kk).iter().map(|x| p.orig_id(x.0)).collect(); } }
+                    if warm { let _ = p.run_auto(&mut s, q, kk); let t1 = Instant::now(); res[qi] = p.run_auto(&mut s, q, kk).iter().map(|x| p.orig_id(x.0)).collect(); tw += t1.elapsed().as_secs_f64(); }
+                    else { res[qi] = p.run_auto(&mut s, q, kk).iter().map(|x| p.orig_id(x.0)).collect(); } }
                 runs.push(nq as f64 / if warm { tw } else { t.elapsed().as_secs_f64() });
             }
             let mut tot = 0usize;
@@ -3053,7 +3007,7 @@ fn sv3_run(p: &raven::pipeline::Prepared, base: &[f32], queries: &[f32], dim: us
 
 // ───────────────────────── R33-2 逐查询 ef 需求 oracle（RAVEN_PQEF=前缀） ─────────────────────────
 // 对 --ef 网格逐个 ef 跑全部查询（searcher_plain，原路径），记录每查询命中数（带并列容差）与每 ef 平均耗时（repeats 取中位）。
-// 输出 {pfx}.hits（nq×nef u8，行主序）与 {pfx}.cost.csv（ef,us_per_query,recall）。oracle 分配见 r33_pqef_oracle.py。
+// 输出 {pfx}.hits（nq×nef u8，行主序）与 {pfx}.cost.csv（ef,us_per_query,recall）。oracle 分配由离线脚本完成。
 #[allow(clippy::too_many_arguments)]
 fn pqef_run(p: &raven::pipeline::Prepared, base: &[f32], queries: &[f32], dim: usize, nq: usize, gt_dist: &[f32], gtk: usize,
             angular: bool, repeats: usize, efs: &[usize], kk: usize, pfx: &str) {
@@ -3099,23 +3053,11 @@ fn pqef_run(p: &raven::pipeline::Prepared, base: &[f32], queries: &[f32], dim: u
             out[qi] = s.search_auto(&queries[qi * dim..(qi + 1) * dim], kk).iter().map(|x| p.orig_id(x.0)).collect(); }
         t.elapsed().as_secs_f64()
     };
-    // R64 热缓存重放 oracle（RAVEN_PQEF_WARM=1）：每查询先跑一次（不计时，把该查询触及的邻接/码/向量行拉进 L1/L2），
-    // 紧接着同一查询再跑一次并只计第二次。冷/热耗时比 = 任何"每跳访存"改进（布局、预取、内联码、邻接压缩）的诚实上界。
-    let warm = std::env::var("RAVEN_PQEF_WARM").map(|v| v == "1").unwrap_or(false);
-    let run_warm = |s: &mut raven::graph::vamana::GraphSearcher<'_>| -> f64 {
-        let mut tot = 0.0f64;
-        for qi in 0..nq {
-            let q = &queries[qi * dim..(qi + 1) * dim];
-            std::hint::black_box(s.search_auto(q, kk));
-            let t = Instant::now(); std::hint::black_box(s.search_auto(q, kk)); tot += t.elapsed().as_secs_f64(); }
-        tot
-    };
-    let mut tw = vec![Vec::new(); ne];
     for r in 0..repeats.max(1) {
         // 交替：网格点 i 之后跑一个基线点（循环），偶数轮正序、奇数轮反序
         let order: Vec<usize> = if r % 2 == 0 { (0..ne.max(nb)).collect() } else { (0..ne.max(nb)).rev().collect() };
         for &i in &order {
-            if i < ne { let mut s = mk(efs[i]); ts[i].push(run(&mut s, &mut res[i], true)); if warm { tw[i].push(run_warm(&mut s)); } }
+            if i < ne { let mut s = mk(efs[i]); ts[i].push(run(&mut s, &mut res[i], true)); }
             if i < nb { let mut s = mk_base(base_efs[i]); s.set_cc_rh(0, 1.0); tsb[i].push(run(&mut s, &mut resb[i], false)); }
         }
     }
@@ -3143,16 +3085,6 @@ fn pqef_run(p: &raven::pipeline::Prepared, base: &[f32], queries: &[f32], dim: u
             bc += &format!("{},{us:.3},{rec:.5}\n", base_efs[bi]);
         }
         std::fs::write(format!("{pfx}.base.csv"), bc).unwrap();
-    }
-    if warm {
-        let mut wc = String::from("ef,us_cold,us_warm,cold_over_warm\n");
-        for ei in 0..ne {
-            let mut a = ts[ei].clone(); a.sort_by(|x, y| x.total_cmp(y)); let mut b = tw[ei].clone(); b.sort_by(|x, y| x.total_cmp(y));
-            let (uc, uw) = (a[a.len() / 2] * 1e6 / nq as f64, b[b.len() / 2] * 1e6 / nq as f64);
-            eprintln!("PQEF warm ef={} us_cold={uc:.2} us_warm={uw:.2} ratio={:.3}", efs[ei], uc / uw);
-            wc += &format!("{},{uc:.3},{uw:.3},{:.4}\n", efs[ei], uc / uw);
-        }
-        std::fs::write(format!("{pfx}.warm.csv"), wc).unwrap();
     }
     std::fs::write(format!("{pfx}.hits"), &hits).unwrap();
     std::fs::write(format!("{pfx}.cost.csv"), cost).unwrap();
@@ -3593,4 +3525,178 @@ unsafe fn sv3_scan_thr_avx2(codes: &[u8], cb: usize, n: usize, norms: &[i32], th
         for i in 0..cb.min(64) { acc += (c[i] & 15) as i32 * qlo[i] as i32 + (c[i] >> 4) as i32 * qhi[i] as i32; }
         let sv = norms[j] - 2 * acc; if sv < thr { out[2 * ns] = sv; out[2 * ns + 1] = j as i32; ns += 1; } j += 1; }
     ns
+}
+
+
+/// R75：打印一侧管线大块缓冲区的地址（mod 2 MB）与所在 VMA 的 Rss / AnonHugePages（/proc/self/smaps），用于诊断侧别偏差。
+fn abx_map(tag: &str, p: &raven::pipeline::Prepared) {
+    let sm = std::fs::read_to_string("/proc/self/smaps").unwrap_or_default();
+    let mut parts: Vec<(&str, usize, usize)> = vec![
+        ("vectors", p.vectors.as_ptr() as usize, p.vectors.len() * 4),
+        ("sq4", p.sq4.codes.as_ptr() as usize, p.sq4.codes.len()),
+    ];
+    if let Some(f) = p.sq4_full.as_ref() { parts.push(("sq4_full", f.codes.as_ptr() as usize, f.codes.len())); }
+    if let Some(u) = p.vec_u8.as_ref() { parts.push(("vec_u8", u.as_ptr() as usize, u.len())); }
+    let st = p.graph.storage();
+    parts.push(("adj", st.neighbors(0).as_ptr() as usize, st.len() * st.r_max() * 4));
+    let mut line = format!("ABX map {tag}:");
+    for (name, a, len) in parts {
+        let (rss, huge) = raven::abtime::smaps_huge(&sm, a, a + len.max(1));
+        line.push_str(&format!(" {name}@{:#x}(mod2M={:#x},{}MB,rss={}MB,thp={}MB)", a, a % (2 << 20), len >> 20, rss >> 10, huge >> 10));
+    }
+    eprintln!("{line}");
+}
+
+/// R66：进程内 A/B 计时工具（见 `raven::abtime`）。
+/// RAVEN_ABX=aa | pad16 | pad:N；RAVEN_ABX_BLOCK（缺省 500 查询/块）、RAVEN_ABX_REPS（缺省 --repeats）、RAVEN_ABX_BOOT（缺省 2000）。
+/// 流程：A = 已建管线；B = 重载同一图文件 + prepare（search_degree 固定为 A.sd，HR 门槛经 RAVEN_HR_GATE 固定为 A 的值或 RAVEN_HR=0，
+/// SDX/LPX/po 从 A 复制）→ 两侧各全量跑一遍（不计时，取结果做召回与逐位比对）→ rep 外层、ef 中层、块内层，每块 A、B 各跑一次（先后轮换）。
+/// 输出（--out 为 csv 路径，空则只打 stderr）：逐 ef 中位 Δt/q（B/A−1）、95% CI（按 rep 整簇 bootstrap）、合并比、µs/q、召回与 ids 是否逐位一致；
+/// 另写 <out>.pairs.csv（每对原始耗时，供离线复核）。
+#[allow(clippy::too_many_arguments)]
+fn abx_run(pa: raven::pipeline::Prepared, po_: &raven::pipeline::PipelineOpts, gpath: &str, spec: &str, base: &[f32], dim: usize, queries: &[f32], nq: usize,
+           gt_dist: &[f32], gtk: usize, angular: bool, efs: &[usize], repeats: usize, kk: usize, out: &str) {
+    use raven::abtime::{ab_stats, first_side, Pair};
+    let envu = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
+    let block = envu("RAVEN_ABX_BLOCK", 500).max(1);
+    let reps = envu("RAVEN_ABX_REPS", repeats).max(1);
+    let n_boot = envu("RAVEN_ABX_BOOT", 2000);
+    // R67b/R68：adc = B 侧打开 ADC16（PipelineOpts.sq4_adc = Some(true)），A 侧必须关（RAVEN_SQ4_ADC=0）
+    let adc_b = spec == "adc";
+    // R75：pfl:N = B 侧把 L0 邻居码预取行数（进程全局 PF_LINES）设为 N，A 侧 = RAVEN_ABX_PFLA（缺省 = 进入时的进程值）；same = 同对象 A/A
+    let pfl_b: Option<usize> = spec.strip_prefix("pfl:").map(|v| v.parse().expect("RAVEN_ABX pfl:N"));
+    let pfl_a: usize = std::env::var("RAVEN_ABX_PFLA").ok().and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| raven::graph::vamana::PF_LINES.load(std::sync::atomic::Ordering::Relaxed));
+    let pad_b: Option<usize> = match spec {
+        _ if raven::abtime::runtime_only_spec(spec) => None,
+        "aa" | "adc" => None,
+        "pad16" => Some(16),
+        x => Some(x.strip_prefix("pad:").and_then(|v| v.parse().ok()).expect("RAVEN_ABX must be aa | same | adc | pad16 | pad:N | pfl:N")),
+    };
+    assert!(std::env::var("RAVEN_SQ4_PAD").is_err(), "RAVEN_ABX: unset RAVEN_SQ4_PAD (it overrides both arms)");
+    // R75 侧别偏差修正：构造方式见 raven::abtime::BuildMode（缺省 Same / Sym；RAVEN_ABX_LEGACY=1 = R66–R74 旧行为）
+    let mode = raven::abtime::build_mode(spec, std::env::var("RAVEN_ABX_LEGACY").map(|v| v == "1").unwrap_or(false),
+        std::env::var("RAVEN_ABX_ORDER").map(|v| v == "ba").unwrap_or(false));
+    // 重载同图文件（与 A 同一路径；若启用填充图则用同一填充缓存）
+    let gfile = match raven::graph::vamana::fill_default() {
+        Some((fd, fe)) => { let f = gpath.replace(".bin", &format!(".f{fd}e{fe}.bin")); if std::path::Path::new(&f).exists() { f } else { gpath.to_string() } }
+        None => gpath.to_string(),
+    };
+    let mut oa = po_.clone();
+    oa.search_degree = Some(pa.sd);
+    let mut ob = oa.clone();
+    // aa：B 与 A 同一解析（po_ 原样 → 同读 RAVEN_SQ4_PAD_SMALL / 缺省）；pad:N：B 程序化设为 N
+    if let Some(nb) = pad_b { ob.sq4_pad_small = Some(nb); }
+    if adc_b { ob.sq4_adc = Some(true); }
+    assert!(!(adc_b && pa.adc16), "ABX adc: A side must have ADC16 off (set RAVEN_SQ4_ADC=0)");
+    // 计划（sd/HR 门槛/SDX/LPX/po/rerank）取自进程原管线，复制到每一份新建管线
+    let plan = (pa.sdx.clone(), pa.lpx.clone(), pa.lpx_sdx.clone(), pa.po, pa.rerank, pa.hr.as_ref().map(|c| c.params));
+    let mk = |o: &raven::pipeline::PipelineOpts| -> raven::pipeline::Prepared {
+        let g2 = VamanaGraph::load(std::path::Path::new(&gfile)).expect("ABX: reload graph");
+        let (old_gate, old_hr) = (std::env::var("RAVEN_HR_GATE").ok(), std::env::var("RAVEN_HR").ok());
+        match plan.5.as_ref() {
+            Some(hp) => { std::env::set_var("RAVEN_HR_GATE", hp.gate.to_string()); }
+            None => { std::env::set_var("RAVEN_HR", "0"); }
+        }
+        let mut p = raven::pipeline::prepare(g2, base.to_vec(), dim, o);
+        match old_gate { Some(v) => std::env::set_var("RAVEN_HR_GATE", v), None => std::env::remove_var("RAVEN_HR_GATE") }
+        match old_hr { Some(v) => std::env::set_var("RAVEN_HR", v), None => std::env::remove_var("RAVEN_HR") }
+        p.sdx = plan.0.clone(); p.lpx = plan.1.clone(); p.lpx_sdx = plan.2.clone(); p.po = plan.3; p.rerank = plan.4;
+        if let (Some(a), Some(b)) = (plan.5.as_ref(), p.hr.as_mut()) { b.params = *a; }
+        p
+    };
+    let t = Instant::now();
+    let (side_a, side_b): (raven::pipeline::Prepared, Option<raven::pipeline::Prepared>) = match mode {
+        raven::abtime::BuildMode::Same => (pa, None),
+        raven::abtime::BuildMode::Legacy => { let pb = mk(&ob); (pa, Some(pb)) }
+        raven::abtime::BuildMode::Sym { b_first } => {
+            drop(pa);
+            if b_first { let pb = mk(&ob); let a2 = mk(&oa); (a2, Some(pb)) } else { let a2 = mk(&oa); let pb = mk(&ob); (a2, Some(pb)) }
+        }
+    };
+    let sides: [&raven::pipeline::Prepared; 2] = [&side_a, side_b.as_ref().unwrap_or(&side_a)];
+    let (pa, pb) = (sides[0], sides[1]);
+    // R75：RAVEN_ABX_AUTO=1 → 计时真缺省路径（searcher_k(ef, k) + run_auto：含 HR/k 感知；R72 工具同口径）；缺省 0 = R66 原口径（searcher(ef) + run_sq4）
+    let auto = std::env::var("RAVEN_ABX_AUTO").map(|v| v == "1").unwrap_or(false);
+    let set_side = |side: usize| { if let Some(nb) = pfl_b {
+        raven::graph::vamana::PF_LINES.store(if side == 1 { nb } else { pfl_a }, std::sync::atomic::Ordering::Relaxed); } };
+    let hr_s = |p: &raven::pipeline::Prepared| p.hr.as_ref().map(|c| c.params.gate.to_string()).unwrap_or_else(|| "off".into());
+    eprintln!("ABX spec={spec} mode={mode:?} auto={} block={block} reps={reps} boot={n_boot} adcA={} adcB={} pfl A={pfl_a} B={pfl_b:?} | A: cb={} sd={} hr_gate={} sdx={} | B: cb={} sd={} hr_gate={} sdx={} (sides prepared in {:.1}s, graph {gfile})",
+        auto, pa.adc16, pb.adc16, pa.sq4.code_bytes, pa.sd, hr_s(pa), pa.sdx.as_ref().map(|x| x.ef_max as i64).unwrap_or(-1),
+        pb.sq4.code_bytes, pb.sd, hr_s(pb), pb.sdx.as_ref().map(|x| x.ef_max as i64).unwrap_or(-1), t.elapsed().as_secs_f64());
+    abx_map("A", pa); if side_b.is_some() { abx_map("B", pb); }
+    let recall_of = |res: &Vec<Vec<u32>>| -> f64 {
+        let mut tot = 0usize;
+        for qi in 0..nq { let q = &queries[qi * dim..(qi + 1) * dim];
+            let thr = gt_dist[qi * gtk + kk - 1] as f64 + 1e-3;
+            tot += res[qi].iter().take(kk).filter(|&&id| { let x = &base[id as usize * dim..(id as usize + 1) * dim];
+                (if angular { angular_dist(q, x) } else { exact_dist(q, x) }) <= thr }).count(); }
+        tot as f64 / (nq * kk) as f64
+    };
+    // 不计时全量一遍：取结果（召回 + 逐位比对），兼作预热
+    let mut rec: Vec<(f64, f64, bool)> = Vec::new();
+    for &ef in efs {
+        let mut res: [Vec<Vec<u32>>; 2] = [Vec::with_capacity(nq), Vec::with_capacity(nq)];
+        for side in 0..2 { let pp = sides[side]; let mut s = if auto { pp.searcher_k(ef, kk) } else { pp.searcher(ef) }; set_side(side);
+            for qi in 0..nq { let q = &queries[qi * dim..(qi + 1) * dim]; let r = if auto { pp.run_auto(&mut s, q, kk) } else { pp.run_sq4(&mut s, q, kk) }; res[side].push(r.iter().take(kk).map(|x| pp.orig_id(x.0)).collect()); } }
+        let same = res[0] == res[1];
+        let (ra, rb) = (recall_of(&res[0]), recall_of(&res[1]));
+        eprintln!("ABX ef={ef} recall A={ra:.5} B={rb:.5} ids_identical={same}");
+        rec.push((ra, rb, same));
+    }
+    let nblk = nq.div_ceil(block);
+    let mut pairs: Vec<Vec<Pair>> = vec![Vec::new(); efs.len()];
+    let mut firsts: Vec<Vec<usize>> = vec![Vec::new(); efs.len()];
+    // R75：同对象模式（运行期旋钮 spec）两侧共用一个 searcher → 两侧内存与状态完全相同，只差旋钮
+    let shared = side_b.is_none();
+    let mut raw = String::from("ef,rep,block,first,ta_s,tb_s\n");
+    let t0 = Instant::now();
+    for rep in 0..reps {
+        for (ei, &ef) in efs.iter().enumerate() {
+            // R75：searcher（visited 等缓冲区）分配先后逐 rep 交换
+            let k_s = if auto { kk } else { 10 }; // searcher(ef) == searcher_k(ef, 10)
+            let (mut sa, mut sb) = if raven::abtime::searcher_first(rep) == 0 { let a = pa.searcher_k(ef, k_s); (a, pb.searcher_k(ef, k_s)) } else { let b = pb.searcher_k(ef, k_s); (pa.searcher_k(ef, k_s), b) };
+            for c in 0..nblk {
+                let (lo, hi) = (c * block, ((c + 1) * block).min(nq));
+                let f = first_side(rep, c, ei);
+                let mut tm = [0f64; 2];
+                for step in 0..2 {
+                    let side = f ^ step;
+                    let s = if side == 0 || shared { &mut sa } else { &mut sb };
+                    set_side(side);
+                    let t = Instant::now();
+                    let pp = sides[side];
+                    if auto { for qi in lo..hi { std::hint::black_box(pp.run_auto(s, &queries[qi * dim..(qi + 1) * dim], kk)); } }
+                    else { for qi in lo..hi { std::hint::black_box(pp.run_sq4(s, &queries[qi * dim..(qi + 1) * dim], kk)); } }
+                    tm[side] = t.elapsed().as_secs_f64() / (hi - lo) as f64;
+                }
+                pairs[ei].push(Pair { rep, ta: tm[0], tb: tm[1] }); firsts[ei].push(f);
+                raw.push_str(&format!("{ef},{rep},{c},{f},{:.9},{:.9}\n", tm[0], tm[1]));
+            }
+        }
+        eprintln!("ABX rep {}/{reps} done ({:.0}s)", rep + 1, t0.elapsed().as_secs_f64());
+    }
+    // R75：主统计 = 先后平衡对偶（raven::abtime::couples）；旧的逐块中位数作为 median_pair_delta 一并输出
+    let mut csv = String::from("spec,ef,recall_A,recall_B,ids_identical,us_q_A,us_q_B,median_delta,ci_lo,ci_hi,pooled_delta,frac_B_faster,n_pairs,reps,block,median_pair_delta,mode\n");
+    let mut all_med = Vec::new();
+    for (ei, &ef) in efs.iter().enumerate() {
+        let st = ab_stats(&raven::abtime::couples(&pairs[ei], &firsts[ei]), n_boot, 0xAB66 + ef as u64);
+        let st_pair = ab_stats(&pairs[ei], n_boot, 0xAB66 + ef as u64);
+        let mut ua: Vec<f64> = pairs[ei].iter().map(|p| p.ta * 1e6).collect();
+        let mut ub: Vec<f64> = pairs[ei].iter().map(|p| p.tb * 1e6).collect();
+        let (ma, mb) = (raven::abtime::median(&mut ua), raven::abtime::median(&mut ub));
+        let (ra, rb, same) = rec[ei];
+        eprintln!("ABX ef={ef} A {ma:.2}us/q B {mb:.2}us/q  median dt/q {:+.2}%  95%CI [{:+.2}%, {:+.2}%]  pooled {:+.2}%  B faster {:.0}%  (couples={} reps={}; per-block median {:+.2}%)  recall {ra:.5}/{rb:.5} ids_identical={same}",
+            st.median * 100.0, st.lo * 100.0, st.hi * 100.0, st.pooled * 100.0, st.frac_b_faster * 100.0, st.n_pairs, st.n_reps, st_pair.median * 100.0);
+        csv.push_str(&format!("{spec},{ef},{ra:.5},{rb:.5},{same},{ma:.3},{mb:.3},{:.5},{:.5},{:.5},{:.5},{:.3},{},{},{block},{:.5},{mode:?}\n", st.median, st.lo, st.hi, st.pooled, st.frac_b_faster, st.n_pairs, st.n_reps, st_pair.median));
+        all_med.push(st.median);
+    }
+    let mut am = all_med.clone();
+    if pfl_b.is_some() { raven::graph::vamana::PF_LINES.store(pfl_a, std::sync::atomic::Ordering::Relaxed); }
+    eprintln!("ABX summary spec={spec}: median over ef of per-ef median dt/q = {:+.2}%  all_ids_identical={}", raven::abtime::median(&mut am) * 100.0, rec.iter().all(|x| x.2));
+    if !out.is_empty() {
+        std::fs::write(out, &csv).expect("write ABX csv");
+        std::fs::write(format!("{out}.pairs.csv"), &raw).expect("write ABX pairs");
+    }
+    print!("{csv}");
 }

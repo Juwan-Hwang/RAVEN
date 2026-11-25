@@ -62,6 +62,10 @@ class Raven(BaseANN):
         )
         self.index.build(X)
         self.searcher = self.index.searcher()
+        # R80 N1：angular 单查询归一化下沉到原生 search()（省掉每查询 numpy norm+除法 ≈2 µs；零向量同样原样保留；召回逐位一致）
+        self._native_norm = self.metric == "angular" and hasattr(self.searcher, "set_normalize")
+        if self._native_norm:
+            self.searcher.set_normalize(True)
 
     def set_query_arguments(self, *args):
         if len(args) == 3:
@@ -83,7 +87,7 @@ class Raven(BaseANN):
             )
 
     def query(self, v, n):
-        if self.metric == "angular":
+        if self.metric == "angular" and not self._native_norm:
             nv = np.linalg.norm(v)
             if nv > 0:
                 v = v / nv

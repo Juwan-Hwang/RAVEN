@@ -1211,3 +1211,83 @@ mod tests {
     }
 
 }
+
+/// R68：ADC16 v3 独立搜索链专用的逐字拷贝（让上面 主线 的原函数保持单调用者、代码生成不变）
+impl LayeredNavigation {
+    #[inline]
+    pub fn initialize_with_upper_ef_r68(
+        &self,
+        vectors: &[f32],
+        dim: usize,
+        query: &[f32],
+        upper_ef: usize,
+        visited: &mut VisitedTracker,
+        pool: &mut LinearPool,
+    ) -> (u32, f32) {
+        if self.max_level == 0 || upper_ef <= 1 {
+            return self.initialize(vectors, dim, query);
+        }
+
+        // ── Step 1: ef=1 贪心下降 from max_level → Layer 2 ──
+        // 与 initialize() 逻辑完全相同，但只走到 Layer 2（跳过 Layer 1）
+        let mut u = self.entry_point;
+        let mut cur_dist =
+            l2_simd(query, &vectors[u as usize * dim..(u as usize + 1) * dim]);
+
+        for level in (2..=self.max_level).rev() {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                let edges = &self.upper_lists[u as usize];
+                let start = (level as usize - 1) * self.k;
+                if start >= edges.len() {
+                    break;
+                }
+                let end = (start + self.k).min(edges.len());
+                for &v in &edges[start..end] {
+                    if v == u {
+                        continue;
+                    }
+                    let d =
+                        l2_simd(query, &vectors[v as usize * dim..(v as usize + 1) * dim]);
+                    if d < cur_dist {
+                        cur_dist = d;
+                        u = v;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // ── Step 2: ef=upper_ef beam search on Layer 1 ──
+        // Layer 1 边在 upper_lists[node] 的 [0..k) 范围内
+        visited.reset();
+        pool.reset_for(upper_ef);
+
+        visited.visit(u);
+        pool.insert(u, cur_dist);
+
+        while let Some((node, _dist)) = pool.pop() {
+            let edges = &self.upper_lists[node as usize];
+            let end = self.k.min(edges.len());
+            for &v in &edges[..end] {
+                if v == node {
+                    continue;
+                }
+                if visited.visit(v) {
+                    let d =
+                        l2_simd(query, &vectors[v as usize * dim..(v as usize + 1) * dim]);
+                    pool.insert(v, d);
+                }
+            }
+        }
+
+        // 返回 beam search 结果中最近的节点作为 Layer 0 入口
+        let results = pool.to_sorted_vec();
+        if let Some(&(best, best_dist)) = results.first() {
+            (best, best_dist)
+        } else {
+            (u, cur_dist)
+        }
+    }
+}

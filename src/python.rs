@@ -4,7 +4,7 @@
 //! 编译：maturin develop --release --features python
 //!       cargo build --release --features python
 
-use numpy::{PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods, ToPyArray};
 use pyo3::prelude::*;
 
 use crate::build::ChaCha8Rng;
@@ -28,6 +28,8 @@ enum Quant {
 struct PyIndex {
     graph: Option<VamanaGraph>,
     vectors: Vec<f32>,
+    /// R98 H186：零拷贝建图时持有调用方 numpy 数组（C 连续 f32），`vectors` 推迟到 searcher() 才拷贝
+    src: Option<Py<PyAny>>,
     dim: usize,
     // 构建参数
     r: usize,
@@ -82,6 +84,7 @@ impl PyIndex {
         Ok(PyIndex {
             graph: None,
             vectors: Vec::new(),
+            src: None,
             dim,
             r,
             l,
@@ -108,7 +111,16 @@ impl PyIndex {
             )));
         }
 
-        self.vectors = array.as_standard_layout().to_owned().into_raw_vec();
+        // R98 H186（imagenet 建图峰值内存 ▼+17%）：C 连续 f32 输入直接借用建图，不再先私拷一份 n×d f32；
+        // 原始向量只在 searcher() 时才拷贝（build+save 路径从不需要）。RAVEN_BUILD_ZC=0 恢复旧行为。
+        let zc = std::env::var("RAVEN_BUILD_ZC").map(|v| v != "0").unwrap_or(true) && x.is_c_contiguous();
+        if zc {
+            self.vectors = Vec::new();
+            self.src = Some(x.as_any().clone().unbind());
+        } else {
+            self.vectors = array.as_standard_layout().to_owned().into_raw_vec();
+            self.src = None;
+        }
 
         // alpha_core 通过环境变量传入 robust_prune（第十三轮诊断发现 0.93 严格 Pareto 支配 1.0）
         std::env::set_var("RAVEN_ALPHA_CORE", self.alpha_core.to_string());
@@ -131,7 +143,12 @@ impl PyIndex {
         };
 
         let mut rng = ChaCha8Rng::seed_from(42);
-        let graph = VamanaGraph::build(&self.vectors, self.dim, &config, &mut rng);
+        let graph = if zc {
+            let xs = x.as_slice().map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            VamanaGraph::build(xs, self.dim, &config, &mut rng)
+        } else {
+            VamanaGraph::build(&self.vectors, self.dim, &config, &mut rng)
+        };
         self.graph = Some(graph);
         Ok(())
     }
@@ -139,7 +156,13 @@ impl PyIndex {
     /// 创建搜索器（移动 graph + vectors 到 Searcher，启用量化搜索）
     ///
     /// 根据 quantization 参数构建 SQ8 或 SQ4 数据集。
-    fn searcher(&mut self) -> PyResult<PySearcher> {
+    fn searcher(&mut self, py: Python<'_>) -> PyResult<PySearcher> {
+        if self.vectors.is_empty() {
+            if let Some(src) = self.src.take() {
+                let a: PyReadonlyArray2<f32> = src.bind(py).extract()?;
+                self.vectors = a.as_array().as_standard_layout().to_owned().into_raw_vec();
+            }
+        }
         let graph = self.graph.take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Index not built yet, call build() first")
         })?;
@@ -161,7 +184,7 @@ impl PyIndex {
                 vectors: Vec::new(), dim: self.dim, graph: None, sq8: None, sq4: None,
                 ef: 50, po: 16, rerank: self.rerank, threads: self.threads,
                 adaptive_config: None, use_adaptive: false, cur_gamma: 2.0, cur_min_ef: 30, cur_max_ef: 100,
-                cache: std::sync::Mutex::new(Vec::new()), reuse: true,
+                cache: std::sync::Mutex::new(Vec::new()), reuse: true, normalize: false,
                 pipe: Some(p),
             });
         }
@@ -209,6 +232,7 @@ impl PyIndex {
             cur_max_ef: 100,
             cache: std::sync::Mutex::new(Vec::new()),
             reuse: true,
+            normalize: false,
             pipe: None,
         })
     }
@@ -237,6 +261,7 @@ impl PyIndex {
         Ok(PyIndex {
             graph: Some(graph),
             vectors: array.as_standard_layout().to_owned().into_raw_vec(),
+            src: None,
             dim, r: 48, l: 200, alpha: 1.2, alpha_core: 1.0, nav_m: 32, directional: true,
             quant, rerank: rerank_factor, threads, adaptive_ef: false,
         })
@@ -250,6 +275,7 @@ impl PyIndex {
         Ok(PyIndex {
             graph: Some(graph),
             vectors: Vec::new(),
+            src: None,
             dim,
             r: 32,
             l: 200,
@@ -292,6 +318,8 @@ struct PySearcher {
     cache: std::sync::Mutex<Vec<((usize, usize), CachedSearcher)>>,
     /// R28 D：false = 旧行为（每次查询新建 searcher），仅用于前后对比；默认 true
     reuse: bool,
+    /// R80 N1：search() 内做 L2 行归一化（angular 数据集；替代 Python 侧 `v / np.linalg.norm(v)`，ann-b 每查询省 ≈2 µs）。默认 false。
+    normalize: bool,
     pipe: Option<crate::pipeline::Prepared>,
 }
 
@@ -376,10 +404,12 @@ impl PySearcher {
         self.po = po;
     }
 
-    /// R28 D：searcher 复用开关（默认开；关 = 旧行为，每次查询新建 searcher，仅供前后对比）
-    /// R55：batch_search 线程数（0 = 当前线程串行，复用缓存 searcher；用于测 Python 逐条调用开销）
-    fn set_threads(&mut self, threads: usize) { self.threads = threads; }
+    /// R80 N1：search() 内 L2 归一化开关（angular 数据集用；batch_search 不受影响）
+    fn set_normalize(&mut self, on: bool) {
+        self.normalize = on;
+    }
 
+    /// R28 D：searcher 复用开关（默认开；关 = 旧行为，每次查询新建 searcher，仅供前后对比）
     fn set_searcher_reuse(&mut self, on: bool) {
         self.reuse = on;
         if !on { self.cache.lock().map(|mut c| c.clear()).ok(); }
@@ -390,9 +420,24 @@ impl PySearcher {
     /// k: 返回的近邻数
     /// 返回: numpy array of int
     fn search(&self, q: PyReadonlyArray1<f32>, k: usize, py: Python) -> PyResult<PyObject> {
-        let query = q.as_slice()?;
+        let raw = q.as_slice()?;
+        let mut sbuf = [0f32; 1024];
+        let mut hbuf: Vec<f32>;
+        let query: &[f32] = if self.normalize {
+            let n2: f32 = raw.iter().map(|x| x * x).sum();
+            let inv = if n2 > 0.0 { 1.0 / n2.sqrt() } else { 1.0 };
+            let dst: &mut [f32] = if raw.len() <= sbuf.len() { &mut sbuf[..raw.len()] } else { hbuf = vec![0f32; raw.len()]; &mut hbuf[..] };
+            for (d, x) in dst.iter_mut().zip(raw) { *d = x * inv; }
+            dst
+        } else { raw };
         if let Some(p) = &self.pipe {
-            let ids: Vec<usize> = self.with_pipe_searcher(p, self.ef, k, |s| s.search_auto(query, k).iter().map(|x| p.orig_id(x.0) as usize).collect());
+            if p.ood_pending() {
+                let r = self.with_pipe_searcher(p, self.ef, k, |s| p.run_auto(s, query, k));
+                if p.ood_observe(query, &r) { self.cache.lock().map(|mut c| c.clear()).ok(); }
+                let ids: Vec<usize> = r.iter().map(|x| p.orig_id(x.0) as usize).collect();
+                return Ok(ids.to_pyarray_bound(py).into());
+            }
+            let ids: Vec<usize> = self.with_pipe_searcher(p, self.ef, k, |s| p.run_auto(s, query, k).iter().map(|x| p.orig_id(x.0) as usize).collect());
             return Ok(ids.to_pyarray_bound(py).into());
         }
         let mut searcher = self.make_searcher();
@@ -435,15 +480,15 @@ impl PySearcher {
             use rayon::prelude::*;
             let ef = self.ef;
             let run = || -> Vec<Vec<u32>> {
-                query_refs.par_iter().map_init(|| p.searcher(ef), |s, q| s.search_auto(q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()
+                query_refs.par_iter().map_init(|| p.searcher(ef), |s, q| p.run_auto(s, q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()
             };
             let res: Vec<Vec<u32>> = if self.threads > 0 {
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(self.threads).build()
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                 pool.install(run)
             } else {
-                if self.reuse { self.with_pipe_searcher(p, ef, k, |s| query_refs.iter().map(|q| s.search_auto(q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()) }
-                else { query_refs.iter().map(|q| { let mut s = p.searcher(ef); s.search_auto(q, k).iter().map(|x| p.orig_id(x.0)).collect() }).collect() }
+                if self.reuse { self.with_pipe_searcher(p, ef, k, |s| query_refs.iter().map(|q| p.run_auto(s, q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()) }
+                else { query_refs.iter().map(|q| { let mut s = p.searcher(ef); p.run_auto(&mut s, q, k).iter().map(|x| p.orig_id(x.0)).collect() }).collect() }
             };
             let mut ids = vec![0usize; nq * k];
             for (i, r) in res.iter().enumerate() { for (j, &id) in r.iter().enumerate().take(k) { ids[i * k + j] = id as usize; } }
@@ -471,10 +516,23 @@ impl PySearcher {
     }
 }
 
+/// H173b 诊断：返回 (enabled_counters, enabled_prof, [full, quant, hops, nav, partial, partial_dims, edges], prof[8])；未开 feature 时计数为 0
+#[pyfunction]
+fn _diag_stats() -> (bool, bool, Vec<u64>, Vec<u64>) {
+    let (f, q, h) = crate::counters::snapshot();
+    let (pc, pd) = crate::counters::partial_snapshot();
+    (crate::counters::ENABLED, cfg!(feature = "diag_prof"), vec![f, q, h, crate::counters::nav_snapshot(), pc, pd, crate::counters::EDGES.load(std::sync::atomic::Ordering::Relaxed)], crate::counters::prof::snapshot().to_vec())
+}
+/// H173b 诊断：清零计数器与分段计时
+#[pyfunction]
+fn _diag_reset() { crate::counters::reset(); crate::counters::prof::reset(); }
+
 /// Python 模块入口
 #[pymodule]
 fn raven(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIndex>()?;
     m.add_class::<PySearcher>()?;
+    m.add_function(wrap_pyfunction!(_diag_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(_diag_reset, m)?)?;
     Ok(())
 }

@@ -1,5 +1,5 @@
 //! A1（第 12 轮）：精简路径（sq4_expand）暖缓存分段剖析——轨迹回放法。
-//! diag 构建用 RAVEN_A1_DUMP=<file> 记录轨迹；release 构建用 RAVEN_A1_REPLAY=<file> 回放计时。
+//! diag 构建（diag）用 RAVEN_A1_DUMP=<file> 记录轨迹；release 构建用 RAVEN_A1_REPLAY=<file> 回放计时。
 //! 回放保持轨迹逐位相同（弹出序列、邻居集合、距离均与记录一致，全开模式会校验），
 //! 通过开关逐段去掉 visited 过滤 / SQ4 距离核 / 池插入弹出 / 预取，得到各段边际成本（暖缓存：每查询先回放一遍不计时）。
 use raven::graph::linear_pool::LinearPool;

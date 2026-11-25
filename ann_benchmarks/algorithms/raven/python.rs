@@ -151,12 +151,17 @@ impl PyIndex {
         if use_pipe {
             let mut o = crate::pipeline::PipelineOpts::default();
             o.rerank = self.rerank;
+            // R43-3：评测 k（VIBE k=100）告知构建期（KL 大 k 计划、HR/LPX 标定）；RAVEN_K 覆盖，默认 10
+            if let Some(k) = std::env::var("RAVEN_K").ok().and_then(|v| v.parse().ok()) { o.k = k; }
             if let Some(sd) = std::env::var("RAVEN_SD").ok().and_then(|v| v.parse().ok()) { o.search_degree = Some(sd); }
+            // R28 组合 1：平台默认的建图后饱和填充（RAVEN_FILL 覆盖，=0 关）
+            let graph = match crate::graph::vamana::fill_default() { Some((d, ef)) => graph.saturate_fill(&vectors, self.dim, d, ef), None => graph };
             let p = crate::pipeline::prepare(graph, vectors, self.dim, &o);
             return Ok(PySearcher {
                 vectors: Vec::new(), dim: self.dim, graph: None, sq8: None, sq4: None,
                 ef: 50, po: 16, rerank: self.rerank, threads: self.threads,
                 adaptive_config: None, use_adaptive: false, cur_gamma: 2.0, cur_min_ef: 30, cur_max_ef: 100,
+                cache: std::sync::Mutex::new(Vec::new()), reuse: true, normalize: false,
                 pipe: Some(p),
             });
         }
@@ -202,6 +207,9 @@ impl PyIndex {
             cur_gamma: 2.0,
             cur_min_ef: 30,
             cur_max_ef: 100,
+            cache: std::sync::Mutex::new(Vec::new()),
+            reuse: true,
+            normalize: false,
             pipe: None,
         })
     }
@@ -216,6 +224,23 @@ impl PyIndex {
             .save(std::path::Path::new(path))
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         Ok(())
+    }
+
+    /// R28 D：从图文件 + 原始向量加载（可直接走 SQ4 流水线；用于复用已缓存的图，无需重建）
+    #[staticmethod]
+    #[pyo3(signature = (path, x, quantization="sq4", rerank_factor=10, threads=0))]
+    fn load_with_vectors(path: &str, x: PyReadonlyArray2<f32>, quantization: &str, rerank_factor: usize, threads: usize) -> PyResult<Self> {
+        let graph = VamanaGraph::load(std::path::Path::new(path))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let array = x.as_array();
+        let dim = array.shape()[1];
+        let quant = if quantization.eq_ignore_ascii_case("sq8") { Quant::Sq8 } else { Quant::Sq4 };
+        Ok(PyIndex {
+            graph: Some(graph),
+            vectors: array.as_standard_layout().to_owned().into_raw_vec(),
+            dim, r: 48, l: 200, alpha: 1.2, alpha_core: 1.0, nav_m: 32, directional: true,
+            quant, rerank: rerank_factor, threads, adaptive_ef: false,
+        })
     }
 
     /// 从文件加载索引
@@ -262,10 +287,48 @@ struct PySearcher {
     cur_gamma: f32,
     cur_min_ef: usize,
     cur_max_ef: usize,
+    /// R28 D：按 ef 缓存的流水线 searcher（visited 位图 / 池 / history 等每查询复用，不再每次查询重新分配）。
+    /// 必须声明在 `pipe` 之前：字段按声明顺序析构，缓存的 searcher 借用 `pipe` 的数据，须先于它释放。
+    /// try_lock 失败（另一线程正持有）时退回临时 searcher，语义不变。
+    cache: std::sync::Mutex<Vec<((usize, usize), CachedSearcher)>>,
+    /// R28 D：false = 旧行为（每次查询新建 searcher），仅用于前后对比；默认 true
+    reuse: bool,
+    /// R80 N1：search() 内做 L2 行归一化（angular 数据集；替代 Python 侧 `v / np.linalg.norm(v)`，ann-b 每查询省 ≈2 µs）。默认 false。
+    normalize: bool,
     pipe: Option<crate::pipeline::Prepared>,
 }
 
+/// R28 D：缓存的 searcher。生命周期擦除为 'static：它只借用同一 PySearcher 的 `pipe`（pyclass 对象在 Python 堆上不移动，
+/// `pipe` 构造后不再替换，且缓存先于 `pipe` 析构），故借用在缓存存活期间始终有效。
+struct CachedSearcher(GraphSearcher<'static>);
+// SAFETY：GraphSearcher 只含对只读索引数据的引用与本 searcher 独占的缓冲区；访问由 Mutex 串行化。
+unsafe impl Send for CachedSearcher {}
+
+/// 每个 PySearcher 最多缓存的不同 ef 个数
+const SEARCHER_CACHE_MAX: usize = 4;
+
 impl PySearcher {
+    /// R28 D：用按 ef 缓存的 searcher 执行 `f`（仅流水线路径）
+    fn with_pipe_searcher<R>(&self, p: &crate::pipeline::Prepared, ef: usize, k: usize, f: impl FnOnce(&mut GraphSearcher<'_>) -> R) -> R {
+        if self.reuse {
+            if let Ok(mut c) = self.cache.try_lock() {
+                let idx = match c.iter().position(|e| e.0 == (ef, k.max(10))) {
+                    Some(i) => i,
+                    None => {
+                        if c.len() >= SEARCHER_CACHE_MAX { c.remove(0); }
+                        // SAFETY：见 CachedSearcher
+                        let s: GraphSearcher<'static> = unsafe { std::mem::transmute::<GraphSearcher<'_>, GraphSearcher<'static>>(p.searcher_k(ef, k)) };
+                        c.push(((ef, k.max(10)), CachedSearcher(s)));
+                        c.len() - 1
+                    }
+                };
+                return f(&mut c[idx].1 .0);
+            }
+        }
+        let mut s = p.searcher_k(ef, k);
+        f(&mut s)
+    }
+
     /// 统一构建 GraphSearcher（根治配置遗漏：search 与 batch_search 共用此入口）
     ///
     /// 之前 batch_search 缺 with_prefetch_offset/with_rerank_factor 导致 recall 掉 0.6pp，
@@ -316,15 +379,34 @@ impl PySearcher {
         self.po = po;
     }
 
+    /// R80 N1：search() 内 L2 归一化开关（angular 数据集用；batch_search 不受影响）
+    fn set_normalize(&mut self, on: bool) {
+        self.normalize = on;
+    }
+
+    /// R28 D：searcher 复用开关（默认开；关 = 旧行为，每次查询新建 searcher，仅供前后对比）
+    fn set_searcher_reuse(&mut self, on: bool) {
+        self.reuse = on;
+        if !on { self.cache.lock().map(|mut c| c.clear()).ok(); }
+    }
+
     /// 搜索最近邻
     /// q: numpy array (dim,) float32
     /// k: 返回的近邻数
     /// 返回: numpy array of int
     fn search(&self, q: PyReadonlyArray1<f32>, k: usize, py: Python) -> PyResult<PyObject> {
-        let query = q.as_slice()?;
+        let raw = q.as_slice()?;
+        let mut sbuf = [0f32; 1024];
+        let mut hbuf: Vec<f32>;
+        let query: &[f32] = if self.normalize {
+            let n2: f32 = raw.iter().map(|x| x * x).sum();
+            let inv = if n2 > 0.0 { 1.0 / n2.sqrt() } else { 1.0 };
+            let dst: &mut [f32] = if raw.len() <= sbuf.len() { &mut sbuf[..raw.len()] } else { hbuf = vec![0f32; raw.len()]; &mut hbuf[..] };
+            for (d, x) in dst.iter_mut().zip(raw) { *d = x * inv; }
+            dst
+        } else { raw };
         if let Some(p) = &self.pipe {
-            let mut s = p.searcher(self.ef);
-            let ids: Vec<usize> = s.search_sq4(query, k).iter().map(|x| p.orig_id(x.0) as usize).collect();
+            let ids: Vec<usize> = self.with_pipe_searcher(p, self.ef, k, |s| p.run_auto(s, query, k).iter().map(|x| p.orig_id(x.0) as usize).collect());
             return Ok(ids.to_pyarray_bound(py).into());
         }
         let mut searcher = self.make_searcher();
@@ -367,14 +449,15 @@ impl PySearcher {
             use rayon::prelude::*;
             let ef = self.ef;
             let run = || -> Vec<Vec<u32>> {
-                query_refs.par_iter().map_init(|| p.searcher(ef), |s, q| s.search_sq4(q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()
+                query_refs.par_iter().map_init(|| p.searcher(ef), |s, q| p.run_auto(s, q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()
             };
             let res: Vec<Vec<u32>> = if self.threads > 0 {
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(self.threads).build()
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                 pool.install(run)
             } else {
-                query_refs.iter().map(|q| { let mut s = p.searcher(ef); s.search_sq4(q, k).iter().map(|x| p.orig_id(x.0)).collect() }).collect()
+                if self.reuse { self.with_pipe_searcher(p, ef, k, |s| query_refs.iter().map(|q| p.run_auto(s, q, k).iter().map(|x| p.orig_id(x.0)).collect()).collect()) }
+                else { query_refs.iter().map(|q| { let mut s = p.searcher(ef); p.run_auto(&mut s, q, k).iter().map(|x| p.orig_id(x.0)).collect() }).collect() }
             };
             let mut ids = vec![0usize; nq * k];
             for (i, r) in res.iter().enumerate() { for (j, &id) in r.iter().enumerate().take(k) { ids[i * k + j] = id as usize; } }

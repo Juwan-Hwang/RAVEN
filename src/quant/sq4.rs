@@ -41,7 +41,7 @@ pub struct SQ4Params {
     /// 维度
     pub dim: usize,
     /// R42c LP：投影矩阵（m×原维 行主序；空 = 不投影）。放在量化参数里而不是 GraphSearcher 上，
-    /// 使原路径 GraphSearcher 布局与主线完全相同（ARM 上多一个 24 B 字段即 −4%）。
+    /// 使原路径 GraphSearcher 布局与 主线 完全相同（R43 接力-2：ARM 上 r42b 多一个 24 B 字段即 −4%）。
     pub proj: Vec<f32>,
 }
 
@@ -522,7 +522,7 @@ pub unsafe fn l2_sq4_raw_avx2(qa: &[u8], qb: &[u8]) -> f32 {
 //   t<0 ：2|t|·c + t^2            t>15：2(t-15)·(15-c) + (t-15)^2
 // 修正恒 ≥0，故分段提前放弃（部分和为下界）仍无损。只对越界维（稀疏）逐维加；
 // 同分布数据集无越界维 → 全局开关恒 false，热路径只多一次 relaxed 读。
-// R56：QOOR 默认关（RAVEN_QOOR=1 开），保证未启用档召回与主线逐位一致（门控 a）。
+// R56：QOOR 默认关（RAVEN_QOOR=1 开），保证未启用档召回与 主线 逐位一致（门控 a）。
 pub static QOOR_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub const QOOR_MAX: usize = 256;
 pub static QD_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -536,7 +536,7 @@ pub fn qoor_enabled() -> bool { static E: std::sync::OnceLock<bool> = std::sync:
 /// 若 qa 是当前线程登记的查询码，返回对 qb 的越界修正；否则 0。
 #[inline(always)]
 pub fn qoor_corr(qa: &[u8], qb: &[u8]) -> f32 {
-    // R59：QOOR 编译期隔离（cargo feature "qoor"，缺省关）→ 缺省构建热路径与主线指令级相同（R58a x86 (a) 测得运行期开关 −2.6%/−4.4%）
+    // R59：QOOR 编译期隔离（cargo feature "qoor"，缺省关）→ 缺省构建热路径与 主线 指令级相同（R58a x86 (a) 测得运行期开关 −2.6%/−4.4%）
     #[cfg(not(feature = "qoor"))]
     { let _ = (qa, qb); return 0.0; }
     #[cfg(feature = "qoor")]
@@ -954,6 +954,12 @@ impl SQ4Dataset {
 
     /// H34：把每向量码长补零到 `mult` 字节的整数倍（补位 nibble 恒为 0，查询侧同样补 0，
     /// 故距离逐位一致；消除 NEON 核的标量尾循环，如 GloVe-100 50B → 64B）。
+    /// R65：码长补零倍数选择。`small>0` 且原码长 `cb<=small` 时补到 `small`（低维集，如 glove-25 13B→16B），
+    /// 否则用 `default`（x86/ARM 缺省 32，H87b/H89/H91）。`small=0` 时恒等于旧行为。
+    pub fn pad_mult_for(cb: usize, default: usize, small: usize) -> usize {
+        if small > 0 && cb <= small { small } else { default }
+    }
+
     pub fn pad_codes(&mut self, mult: usize) {
         if mult <= 1 { return; }
         let cb = self.code_bytes;
@@ -995,6 +1001,94 @@ impl SQ4Dataset {
     #[inline(always)]
     pub unsafe fn distance_raw_unchecked(&self, query_code: &[u8], idx: usize) -> f32 {
         l2_sq4_raw(query_code, self.code_unchecked(idx))
+    }
+}
+
+// ─── R67b/R68 ADC16（低维非对称导航；新增函数，不改动上面任何已有函数/属性）──────────────
+// 注：R67 v1/v2 把这些函数插在 `#[inline(always)]` 与 `fn l2_sq4_raw_k` 之间，使对称核 `l2_sq4_raw_k` 丢了 inline(always)
+// （属性挪给了 adc16_dist）——这是 v2 缺省路径代码生成变化的一个具体来源。R68 把它们放到这里。
+
+impl SQ4Params {
+    /// R67b ADC16：把（码维序的）f32 查询写成 64×f32 = p[32] | r[32]（p_j = q_j − min_j，r_j = scale_j；j ≥ dim 补 0），
+    /// 供 [`adc16_dist`]：Σ (r_j·c_j − p_j)² = Σ (min_j + scale_j·c_j − q_j)²（非对称：数据 4 bit 码，查询不量化）。
+    pub fn encode_adc16_into(&self, v: &[f32], buf: &mut Vec<u8>) {
+        assert!(self.dim <= 32 && v.len() == self.dim);
+        buf.clear(); buf.resize(256, 0);
+        let f = buf.as_mut_ptr() as *mut f32;
+        for j in 0..self.dim { unsafe { f.add(j).write_unaligned(v[j] - self.min[j]); f.add(32 + j).write_unaligned(self.scale[j]); } }
+    }
+}
+
+/// R67b ADC16 距离：`qa` = [`SQ4Params::encode_adc16_into`] 的 256 B 查询，`qb` = 16 B 码（32 个 nibble，补位 nibble 为 0 且 r = 0）。
+#[inline(always)]
+pub fn adc16_dist(qa: &[u8], qb: &[u8]) -> f32 {
+    crate::diag_count!(QUANT_DIST);
+    debug_assert!(qa.len() >= 256 && qb.len() >= 16);
+    #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+    { unsafe { adc16_avx2(qa.as_ptr() as *const f32, qb.as_ptr()) } }
+    #[cfg(all(target_arch = "x86_64", not(all(target_feature = "avx2", target_feature = "fma"))))]
+    { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { unsafe { adc16_avx2(qa.as_ptr() as *const f32, qb.as_ptr()) } } else { adc16_scalar(qa, qb) } }
+    #[cfg(not(target_arch = "x86_64"))]
+    { adc16_scalar(qa, qb) }
+}
+
+/// ADC16 标量参考核
+pub fn adc16_scalar(qa: &[u8], qb: &[u8]) -> f32 {
+    let f = qa.as_ptr() as *const f32;
+    let mut acc = 0f32;
+    for j in 0..32 {
+        let c = ((qb[j / 2] >> ((j % 2) * 4)) & 0x0F) as f32;
+        let (p, r) = unsafe { (f.add(j).read_unaligned(), f.add(32 + j).read_unaligned()) };
+        let t = r * c - p; acc += t * t;
+    }
+    acc
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+unsafe fn adc16_avx2(q: *const f32, code: *const u8) -> f32 {
+    use std::arch::x86_64::*;
+    let b = _mm_loadu_si128(code as *const __m128i);
+    let m = _mm_set1_epi8(0x0F);
+    let lo = _mm_and_si128(b, m);
+    let hi = _mm_and_si128(_mm_srli_epi16(b, 4), m);
+    let d0 = _mm_unpacklo_epi8(lo, hi); // 维 0..15
+    let d1 = _mm_unpackhi_epi8(lo, hi); // 维 16..31
+    let c0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(d0));
+    let c1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128(d0, 8)));
+    let c2 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(d1));
+    let c3 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128(d1, 8)));
+    let t0 = _mm256_fmsub_ps(c0, _mm256_loadu_ps(q.add(32)), _mm256_loadu_ps(q));
+    let t1 = _mm256_fmsub_ps(c1, _mm256_loadu_ps(q.add(40)), _mm256_loadu_ps(q.add(8)));
+    let t2 = _mm256_fmsub_ps(c2, _mm256_loadu_ps(q.add(48)), _mm256_loadu_ps(q.add(16)));
+    let t3 = _mm256_fmsub_ps(c3, _mm256_loadu_ps(q.add(56)), _mm256_loadu_ps(q.add(24)));
+    let a = _mm256_fmadd_ps(t1, t1, _mm256_mul_ps(t0, t0));
+    let b2 = _mm256_fmadd_ps(t3, t3, _mm256_mul_ps(t2, t2));
+    let v = _mm256_add_ps(a, b2);
+    let x = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    let x = _mm_add_ps(x, _mm_movehl_ps(x, x));
+    let x = _mm_add_ss(x, _mm_shuffle_ps(x, x, 1));
+    _mm_cvtss_f32(x)
+}
+
+#[cfg(test)]
+mod adc16_tests {
+    use super::*;
+    #[test]
+    fn adc16_matches_decode() {
+        let dim = 25; let n = 200;
+        let data: Vec<f32> = (0..n * dim).map(|i| ((i * 7919 % 1000) as f32 / 500.0 - 1.0) * (1.0 + (i % dim) as f32 * 0.1)).collect();
+        let mut ds = SQ4Dataset::build(&data, dim); ds.pad_codes(16); assert_eq!(ds.code_bytes, 16);
+        let q: Vec<f32> = (0..dim).map(|j| (j as f32 * 0.37).sin() * 1.3).collect();
+        let mut qb = Vec::new(); ds.params.encode_adc16_into(&q, &mut qb);
+        for i in 0..n {
+            let dec = ds.params.decode(&ds.code(i)[..13]);
+            let r: f32 = dec.iter().zip(&q).map(|(a, b)| (a - b) * (a - b)).sum();
+            let a = adc16_dist(&qb, ds.code(i)); let s = adc16_scalar(&qb, ds.code(i));
+            assert!((a - r).abs() <= 1e-3 * r.max(1.0), "i={i} adc={a} ref={r}");
+            assert!((s - r).abs() <= 1e-3 * r.max(1.0), "i={i} scalar={s} ref={r}");
+        }
     }
 }
 
@@ -1298,6 +1392,562 @@ mod tests {
         let (c1, c2) = (p1.params.encode(&q), p2.params.encode(&qp));
         for i in 0..200 {
             assert_eq!(p1.distance_raw(&c1, i), p2.distance_raw(&c2, i));
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod r65_pad_tests {
+    use super::*;
+    #[test]
+    fn pad_mult_for_default_unchanged() {
+        for cb in [13usize, 16, 25, 48, 50, 64, 128, 196, 384, 392, 480] {
+            assert_eq!(SQ4Dataset::pad_mult_for(cb, 32, 0), 32);
+        }
+        assert_eq!(SQ4Dataset::pad_mult_for(13, 32, 16), 16);
+        assert_eq!(SQ4Dataset::pad_mult_for(16, 32, 16), 16);
+        assert_eq!(SQ4Dataset::pad_mult_for(17, 32, 16), 32);
+        assert_eq!(SQ4Dataset::pad_mult_for(392, 32, 16), 32);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// R84 H85 ADQ：任意码长的非对称 SQ4 内积导航（数据 4 bit 码、查询 int8 权重 w_d = q_d·scale_d）。
+// 单位范数数据上 q·x̂ = q·min + Σ w_d c_d，−Σ w_d c_d 即无偏的内积估计（对称 4 bit 码空间 L2 会把查询也量化到 16 级、
+// 且不按逐维步长加权）。oracle（yandex-200，难负例排序保真度 top100）：对称 0.751 → ADQ 0.814。
+// 查询缓冲布局：[0..4) f32 sc，[4..8) i32 big = 15·Σ|wq|，[32..32+cb) 偶数维权重 wlo，[32+cb..32+2cb) 奇数维权重 whi（i8）。
+// 距离 = big − Σ wq·c（≥0，越小越近；只在同一查询内比较）。
+impl SQ4Params {
+    pub fn encode_adq_into(&self, v: &[f32], cb: usize, buf: &mut Vec<u8>) {
+        assert!(v.len() == self.dim && cb * 2 >= self.dim);
+        buf.clear(); buf.resize(32 + 2 * cb, 0);
+        let mut mx = 0f32;
+        for d in 0..self.dim { mx = mx.max((v[d] * self.scale[d]).abs()); }
+        let sc = if mx > 0.0 { mx / 127.0 } else { 1.0 };
+        let inv = 1.0 / sc; let mut big: i32 = 0;
+        for d in 0..self.dim {
+            let w = (v[d] * self.scale[d] * inv).round().clamp(-127.0, 127.0) as i32;
+            big += 15 * w.abs();
+            let off = 32 + if d % 2 == 0 { d / 2 } else { cb + d / 2 };
+            buf[off] = w as i8 as u8;
+        }
+        buf[0..4].copy_from_slice(&sc.to_le_bytes()); buf[4..8].copy_from_slice(&big.to_le_bytes());
+        // R84 H85c NU：码是共享非均匀级（数据已按 nu_reencode 重编码）时，头部 [8] = 1，[16..32) = 级表 T[j]∈[1,127]，
+        // big' = 63·Σ|w| + 64·Σw，距离 = big' − Σ w·T[c]（= 63Σ|w| − Σ w·(T−64) ≥ 0）。
+        if let Some(pn) = PNR.get().filter(|p| p.dim == self.dim && p.proj_len == self.proj.len()) {
+            // R84 H86 PNR 头：[4..8) big8 = 255·Σ|w|，[9] = 1，[12..16) Σw，[16..20) z·σ（σ = 4.61·‖w‖，低 nibble 近似均匀 0..15）
+            let (mut sa, mut sw, mut ss) = (0i64, 0i64, 0f64);
+            for d in 0..self.dim { let off = 32 + if d % 2 == 0 { d / 2 } else { cb + d / 2 }; let w = buf[off] as i8 as i64; sa += w.abs(); sw += w; ss += (w * w) as f64; }
+            buf[4..8].copy_from_slice(&((255 * sa) as i32).to_le_bytes()); buf[9] = 1;
+            buf[12..16].copy_from_slice(&(sw as i32).to_le_bytes());
+            buf[16..20].copy_from_slice(&((pn.z as f64 * 4.61 * ss.sqrt()) as f32).to_le_bytes());
+        } else if let Some(t) = NU_TABLE.get() {
+            let (mut sa, mut sw) = (0i32, 0i32);
+            for d in 0..self.dim { let off = 32 + if d % 2 == 0 { d / 2 } else { cb + d / 2 }; let w = buf[off] as i8 as i32; sa += w.abs(); sw += w; }
+            let big2 = 63 * sa + 64 * sw;
+            buf[4..8].copy_from_slice(&big2.to_le_bytes()); buf[8] = 1; buf[16..32].copy_from_slice(t);
+        }
+        // R85 H101 ANL：码空间真非对称 L2 = ‖x̂‖²/(2·sc) − Σw·c（+常数）。[10] = 1，[24..28) = 1/(2·sc)。NU 表占 [16..32)，不与 NU 同用。
+        if buf[8] != 1 && ANL.iter().any(|a| a.get().map(|st| st.dim == self.dim && st.proj_len == self.proj.len()).unwrap_or(false)) {
+            buf[10] = 1; buf[24..28].copy_from_slice(&(0.5 / sc).to_le_bytes());
+        }
+    }
+}
+
+/// R85 H101 ANL（ADQ norm-corrected L2）：每套码一份 ‖x̂‖²（x̂ = 码重建），按码地址换算行号。
+pub struct AnlState { pub base: usize, pub end: usize, pub stride: usize, pub norms: &'static [f32], pub dim: usize, pub proj_len: usize }
+pub static ANL: [std::sync::OnceLock<AnlState>; 2] = [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
+/// R85-16 ANL 快路径：首套码的区间与 norms 指针放成普通原子（免 OnceLock 遍历），配合邻居码预取一并预取 norms 行（anl_pf）。
+pub static ANL_B0: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+pub static ANL_E0: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static ANL_SH0: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static ANL_N0: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[inline(always)]
+fn anl_row(p: usize) -> Option<*const f32> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let b = ANL_B0.load(Relaxed);
+    if p >= b && p < ANL_E0.load(Relaxed) {
+        let sh = ANL_SH0.load(Relaxed);
+        let i = if sh != 0 { (p - b) >> sh } else { (p - b) / ANL[0].get().map(|st| st.stride).unwrap_or(1) };
+        return Some(unsafe { (ANL_N0.load(Relaxed) as *const f32).add(i) });
+    }
+    for a in ANL.iter().skip(1) {
+        if let Some(st) = a.get() {
+            if p >= st.base && p < st.end { return Some(unsafe { st.norms.as_ptr().add((p - st.base) / st.stride) }); }
+        }
+    }
+    None
+}
+/// 邻居码预取时顺带预取其 ‖x̂‖²（ANL 未开时只有一次原子读 + 比较）。
+#[inline(always)]
+pub unsafe fn anl_pf(p: *const i8) {
+    if ANL_B0.load(std::sync::atomic::Ordering::Relaxed) == usize::MAX { return; }
+    if let Some(r) = anl_row(p as usize) { crate::arch::prefetch_l1(r as *const i8); }
+}
+#[inline(always)]
+fn anl_add(qa: &[u8], qb: &[u8]) -> f32 {
+    if qa[10] != 1 { return 0.0; }
+    match anl_row(qb.as_ptr() as usize) {
+        Some(r) => (unsafe { *r }) * f32::from_le_bytes([qa[24], qa[25], qa[26], qa[27]]),
+        None => 0.0,
+    }
+}
+impl SQ4Dataset {
+    /// R85 H101：‖x̂‖²（4 bit：x̂_d = min_d + c_d·scale_d；有 PNR 低 nibble 时 c8 = 16h + l，scale = 8 bit 步长）。
+    pub fn anl_norms(&self, lo: Option<&[u8]>) -> Vec<f32> {
+        let (dim, cb) = (self.params.dim, self.code_bytes);
+        (0..self.n).map(|i| {
+            let row = &self.codes[i * cb..(i + 1) * cb];
+            let mut s = 0f64;
+            for d in 0..dim {
+                let b = row[d / 2]; let h = if d % 2 == 0 { b & 15 } else { b >> 4 };
+                let c = match lo { Some(l) => { let lb = l[i * cb + d / 2]; let ll = if d % 2 == 0 { lb & 15 } else { lb >> 4 }; 16.0 * h as f64 + ll as f64 } None => h as f64 };
+                let x = self.params.min[d] as f64 + c * self.params.scale[d] as f64; s += x * x;
+            }
+            s as f32
+        }).collect()
+    }
+    /// 登记本码集的 ANL（RAVEN_ADQ_L2=1 时由 pipeline 调用）；返回是否登记成功。
+    pub fn anl_register(&self, lo: Option<&[u8]>) -> bool {
+        let norms: &'static [f32] = Box::leak(self.anl_norms(lo).into_boxed_slice());
+        let st = AnlState { base: self.codes.as_ptr() as usize, end: self.codes.as_ptr() as usize + self.n * self.code_bytes, stride: self.code_bytes, norms, dim: self.params.dim, proj_len: self.params.proj.len() };
+        for (j, a) in ANL.iter().enumerate() {
+            if a.get().is_none() {
+                let (b, e, cb, np) = (st.base, st.end, st.stride, st.norms.as_ptr() as usize);
+                let ok = a.set(st).is_ok();
+                if ok && j == 0 {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    ANL_SH0.store(if cb.is_power_of_two() { cb.trailing_zeros() as usize } else { 0 }, SeqCst);
+                    ANL_N0.store(np, SeqCst); ANL_E0.store(e, SeqCst); ANL_B0.store(b, SeqCst);
+                }
+                return ok;
+            }
+        }
+        false
+    }
+}
+
+impl SQ4Dataset {
+    /// R84 H86：按逐维（截断）范围做 8 bit 均匀码，主码换成高 nibble，低 nibble 存入返回的数组（同布局同 code_bytes）。
+    /// params.scale ← 8 bit 步长（w = q·st8 使 Σ w·c8 = Σ w·(16h + l)）。调用方须把返回数组常驻并登记 PNR。
+    pub fn pnr_reencode(&mut self, rows: &dyn Fn(usize) -> Vec<f32>, clip: f32) -> Vec<u8> {
+        let dim = self.params.dim; let n = self.n; let cb = self.code_bytes;
+        let st = (n / 50000).max(1);
+        let samp: Vec<f32> = (0..n).step_by(st).flat_map(|i| rows(i)).collect();
+        let p0 = SQ4Params::fit_range(&samp, dim, clip);
+        let mut hi = vec![0u8; n * cb]; let mut lo = vec![0u8; n * cb];
+        let st8: Vec<f32> = (0..dim).map(|d| ((p0.max[d] - p0.min[d]) / 255.0).max(1e-12)).collect();
+        for i in 0..n {
+            let r = rows(i);
+            for d in 0..dim {
+                let c = ((r[d] - p0.min[d]) / st8[d]).round().clamp(0.0, 255.0) as u8;
+                let (h, l) = (c >> 4, c & 15);
+                if d % 2 == 0 { hi[i * cb + d / 2] = h; lo[i * cb + d / 2] = l; } else { hi[i * cb + d / 2] |= h << 4; lo[i * cb + d / 2] |= l << 4; }
+            }
+        }
+        self.codes = hi.into();
+        for d in 0..dim { self.params.min[d] = p0.min[d]; self.params.scale[d] = st8[d]; }
+        lo
+    }
+}
+
+/// R84 H85c：共享非均匀 16 级（Lloyd–Max，按逐维标准化后的样本拟合）的 7 bit 整数级表；进程全局，`nu_reencode` 设置一次。
+pub static NU_TABLE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+
+impl SQ4Dataset {
+    /// R84 H85c：用逐维均值/标准差 + 共享 Lloyd–Max 16 级重编码（只给 ADQ 链用；对称核在此码上无意义）。
+    /// `rows(i)` 返回第 i 个（码维序的）向量。params.min ← 均值，params.scale ← 标准差 × 级距单位（使 w = q·scale 与级表一致）。
+    /// R85 H102 NER（norm-equalized rounding）：对每点只改少数几维的取整方向（就近 ↔ 次近），使 ‖x̂‖² ≈ 全局目标（样本中位数），
+    /// 于是 ADQ 只算内积 −q·x̂ 与码空间真 L2 只差常数——零查询开销替代 ANL。按"每单位范数改变的 MSE 代价"贪心挑维。原地改码（保留补齐）。
+    pub fn ner_reencode(&mut self, rows: &(dyn Fn(usize) -> Vec<f32> + Sync)) -> (f32, f64, f64, f64) {
+        use rayon::prelude::*;
+        let (dim, n, cb) = (self.params.dim, self.n, self.code_bytes);
+        let pm = &self.params;
+        let code_of = |codes: &[u8], i: usize, d: usize| -> u8 { let b = codes[i * cb + d / 2]; if d % 2 == 0 { b & 15 } else { b >> 4 } };
+        let norm = |codes: &[u8], i: usize| -> f64 { (0..dim).map(|d| { let x = pm.min[d] as f64 + code_of(codes, i, d) as f64 * pm.scale[d] as f64; x * x }).sum() };
+        let st = (n / 20000).max(1);
+        let mut samp: Vec<f64> = (0..n).step_by(st).map(|i| norm(&self.codes, i)).collect();
+        samp.sort_by(|a, b| a.total_cmp(b));
+        let t = samp[samp.len() / 2];
+        let old: Vec<u8> = self.codes.to_vec();
+        let mut out = old.clone();
+        let stats: (f64, f64, f64) = out.par_chunks_mut(cb).enumerate().map(|(i, row)| {
+            let r = rows(i);
+            let mut c: Vec<u8> = (0..dim).map(|d| code_of(&old, i, d)).collect();
+            let mut nn = 0f64; for d in 0..dim { let x = pm.min[d] as f64 + c[d] as f64 * pm.scale[d] as f64; nn += x * x; }
+            let d0 = (t - nn).abs();
+            let mut rem = t - nn;
+            let mut cand: Vec<(f64, usize, u8, f64)> = Vec::with_capacity(dim);
+            for d in 0..dim {
+                let u = r[d].mul_add(pm.inv_scale[d], pm.neg_min_div[d]) as f64; let cd = c[d] as f64;
+                let alt = if u > cd { cd + 1.0 } else { cd - 1.0 };
+                if !(0.0..=15.0).contains(&alt) { continue; }
+                let (xa, xh) = (pm.min[d] as f64 + alt * pm.scale[d] as f64, pm.min[d] as f64 + cd * pm.scale[d] as f64);
+                let dn = xa * xa - xh * xh;
+                if dn == 0.0 || dn.signum() != rem.signum() { continue; }
+                let cost = (pm.scale[d] as f64).powi(2) * (1.0 - 2.0 * (u - cd).abs().min(0.5));
+                cand.push((cost / dn.abs(), d, alt as u8, dn));
+            }
+            cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut flips = 0f64;
+            for &(_, d, alt, dn) in &cand { if (rem - dn).abs() < rem.abs() { rem -= dn; c[d] = alt; flips += 1.0; } }
+            for d in 0..dim { let v = c[d]; if d % 2 == 0 { row[d / 2] = (row[d / 2] & 0xF0) | v; } else { row[d / 2] = (row[d / 2] & 0x0F) | (v << 4); } }
+            (flips, d0, rem.abs())
+        }).reduce(|| (0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+        self.codes = out.into();
+        (t as f32, stats.0 / n as f64, stats.1 / n as f64, stats.2 / n as f64)
+    }
+    pub fn nu_reencode(&mut self, rows: &dyn Fn(usize) -> Vec<f32>) {
+        let dim = self.params.dim; let n = self.n;
+        let st = (n / 20000).max(1);
+        let mut mean = vec![0f64; dim]; let mut sq = vec![0f64; dim]; let mut cnt = 0f64;
+        let samp: Vec<Vec<f32>> = (0..n).step_by(st).map(|i| rows(i)).collect();
+        for r in &samp { for d in 0..dim { mean[d] += r[d] as f64; sq[d] += (r[d] as f64).powi(2); } cnt += 1.0; }
+        let mean: Vec<f32> = mean.iter().map(|m| (m / cnt) as f32).collect();
+        let sd: Vec<f32> = (0..dim).map(|d| ((sq[d] / cnt - (mean[d] as f64).powi(2)).max(1e-24)).sqrt() as f32).collect();
+        let mut z: Vec<f32> = Vec::with_capacity(samp.len() * dim);
+        for r in &samp { for d in 0..dim { z.push((r[d] - mean[d]) / sd[d]); } }
+        z.sort_by(|a, b| a.total_cmp(b));
+        let mut c: Vec<f32> = (0..16).map(|j| z[((j as f32 + 0.5) / 16.0 * z.len() as f32) as usize]).collect();
+        for _ in 0..40 {
+            let b: Vec<f32> = (0..15).map(|j| 0.5 * (c[j] + c[j + 1])).collect();
+            let (mut s, mut k) = ([0f64; 16], [0f64; 16]);
+            let mut j = 0;
+            for &x in &z { while j < 15 && x > b[j] { j += 1; } s[j] += x as f64; k[j] += 1.0; }
+            for j in 0..16 { if k[j] > 0.0 { c[j] = (s[j] / k[j]) as f32; } }
+        }
+        let lmax = c.iter().fold(0f32, |m, &x| m.max(x.abs())).max(1e-12);
+        let mut t = [0u8; 16];
+        for j in 0..16 { t[j] = ((c[j] / lmax * 63.0).round() as i32 + 64).clamp(1, 127) as u8; }
+        let lv: Vec<f32> = t.iter().map(|&x| (x as f32 - 64.0) * lmax / 63.0).collect(); // 实际使用的级（整数化后）
+        let b: Vec<f32> = (0..15).map(|j| 0.5 * (lv[j] + lv[j + 1])).collect();
+        let cb = self.code_bytes;
+        let mut codes = vec![0u8; n * cb];
+        for i in 0..n {
+            let r = rows(i);
+            for d in 0..dim {
+                let zz = (r[d] - mean[d]) / sd[d];
+                let code = b.iter().take_while(|&&bb| zz > bb).count() as u8;
+                if d % 2 == 0 { codes[i * cb + d / 2] = code; } else { codes[i * cb + d / 2] |= code << 4; }
+            }
+        }
+        self.codes = codes.into();
+        // w_d = q_d · sd_d · (lmax/63) 时 Σ w (T−64) = Σ q_d sd_d lv(c_d)
+        for d in 0..dim { self.params.min[d] = mean[d]; self.params.scale[d] = sd[d] * lmax / 63.0; }
+        let _ = NU_TABLE.set(t);
+        eprintln!("R84 NU re-encode: levels {:?}", lv.iter().map(|x| (x * 100.0).round() / 100.0).collect::<Vec<_>>());
+    }
+}
+
+/// R84 H86 PNR（渐进嵌套精化导航）：8 bit 逐维码拆成高 nibble（= 导航码，常驻主码数组）与低 nibble（另一数组，地址按偏移对应）。
+pub struct PnrState { pub hi_base: usize, pub lo_base: usize, pub z: f32, pub dim: usize, pub proj_len: usize }
+// R84-17 修复：PNR 只属于一套码（dim + proj 长度识别）；LPX 两段管线（LP 码 + 全维码）里全维查询码不得打 PNR 头（曾致 landmark 段错误 rc=139）。
+pub static PNR: std::sync::OnceLock<PnrState> = std::sync::OnceLock::new();
+pub static PNR_CNT: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+#[inline(always)]
+fn pnr_lo_(qb: &[u8]) -> &[u8] {
+    let p = PNR.get().unwrap();
+    unsafe { std::slice::from_raw_parts((p.lo_base + (qb.as_ptr() as usize - p.hi_base)) as *const u8, qb.len()) }
+}
+#[inline(always)]
+fn adq_sum(qa: &[u8], qb: &[u8]) -> i32 {
+    #[cfg(target_arch = "x86_64")]
+    { if adq_vnni() { return unsafe { adq_vnni512(qa.as_ptr(), qb.as_ptr(), qb.len()) }; }
+      if is_sq4_avx2_supported() { return unsafe { adq_avx2(qa.as_ptr(), qb.as_ptr(), qb.len()) }; } }
+    adq_scalar(qa, qb)
+}
+
+/// R84 H85d：AVX-512 VNNI 核（vpdpbusd：u8 码 × i8 权重，4 积累加进 i32；每 64 B 码 2 条）。RAVEN_ADQ_VNNI=0 关。
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn adq_vnni() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vnni")
+        && std::is_x86_feature_detected!("avx512vl") && std::env::var("RAVEN_ADQ_VNNI").map(|v| v != "0").unwrap_or(true))
+}
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni,avx512vl,avx2")]
+#[inline]
+unsafe fn adq_vnni512(q: *const u8, code: *const u8, n: usize) -> i32 {
+    let m = _mm512_set1_epi8(0x0F);
+    let (wl, wh) = (q.add(32), q.add(32 + n));
+    let mut acc = _mm512_setzero_si512();
+    let chunks = n / 64;
+    for c in 0..chunks {
+        let o = c * 64;
+        let b = _mm512_loadu_si512(code.add(o) as *const _);
+        let lo = _mm512_and_si512(b, m); let hi = _mm512_and_si512(_mm512_srli_epi16(b, 4), m);
+        acc = _mm512_dpbusd_epi32(acc, lo, _mm512_loadu_si512(wl.add(o) as *const _));
+        acc = _mm512_dpbusd_epi32(acc, hi, _mm512_loadu_si512(wh.add(o) as *const _));
+    }
+    let mut s = _mm512_reduce_add_epi32(acc);
+    let mut o = chunks * 64;
+    if n - o >= 32 {
+        let m2 = _mm256_set1_epi8(0x0F);
+        let b = _mm256_loadu_si256(code.add(o) as *const __m256i);
+        let lo = _mm256_and_si256(b, m2); let hi = _mm256_and_si256(_mm256_srli_epi16(b, 4), m2);
+        let a = _mm256_dpbusd_epi32(_mm256_setzero_si256(), lo, _mm256_loadu_si256(wl.add(o) as *const __m256i));
+        let a = _mm256_dpbusd_epi32(a, hi, _mm256_loadu_si256(wh.add(o) as *const __m256i));
+        let x = _mm_add_epi32(_mm256_castsi256_si128(a), _mm256_extracti128_si256::<1>(a));
+        let x = _mm_add_epi32(x, _mm_shuffle_epi32::<0x4E>(x)); let x = _mm_add_epi32(x, _mm_shuffle_epi32::<0x01>(x));
+        s += _mm_cvtsi128_si32(x); o += 32;
+    }
+    while o < n { let cb = *code.add(o); s += (cb & 0x0F) as i32 * (*wl.add(o) as i8 as i32) + (cb >> 4) as i32 * (*wh.add(o) as i8 as i32); o += 1; }
+    s
+}
+pub fn pnr_lo(qb: &[u8]) -> &[u8] { pnr_lo_(qb) }
+#[inline(always)] pub fn pnr_zs(qa: &[u8]) -> f32 { f32::from_le_bytes([qa[16], qa[17], qa[18], qa[19]]) }
+/// 阶段 1：(d1 中点估计, S_hi)
+#[inline(always)] pub fn pnr_stage1(qa: &[u8], qb: &[u8]) -> (f32, i32) {
+    crate::diag_count!(QUANT_DIST);
+    let big = i32::from_le_bytes([qa[4], qa[5], qa[6], qa[7]]); let sw = i32::from_le_bytes([qa[12], qa[13], qa[14], qa[15]]);
+    let sh = adq_sum(qa, qb); ((big - 16 * sh) as f32 - 7.5 * sw as f32 + anl_add(qa, qb), sh)
+}
+/// 阶段 2：精确 8 bit 距离
+#[inline(always)] pub fn pnr_stage2(qa: &[u8], qb: &[u8], sh: i32) -> f32 {
+    let big = i32::from_le_bytes([qa[4], qa[5], qa[6], qa[7]]); (big - 16 * sh - adq_sum(qa, pnr_lo_(qb))) as f32 + anl_add(qa, qb)
+}
+/// 无条件精化（导航层、种子等少量调用）：big8 − (16·S_hi + S_lo)
+#[inline(always)]
+fn adq_pnr_full(qa: &[u8], qb: &[u8]) -> f32 {
+    let big = i32::from_le_bytes([qa[4], qa[5], qa[6], qa[7]]);
+    (big - 16 * adq_sum(qa, qb) - adq_sum(qa, pnr_lo_(qb))) as f32 + anl_add(qa, qb)
+}
+/// 带门槛：中点估计 d1 = big8 − 16·S_hi − 7.5·Σw；d1 − zσ > thr 时直接返回 d1（必被池拒绝），否则读低 nibble 精化。
+#[inline(always)]
+pub fn adq_pnr_dist(qa: &[u8], qb: &[u8], thr: f32) -> f32 {
+    crate::diag_count!(QUANT_DIST);
+    let big = i32::from_le_bytes([qa[4], qa[5], qa[6], qa[7]]);
+    let sw = i32::from_le_bytes([qa[12], qa[13], qa[14], qa[15]]);
+    let zs = f32::from_le_bytes([qa[16], qa[17], qa[18], qa[19]]);
+    let sh = adq_sum(qa, qb);
+    let an = anl_add(qa, qb);
+    let d1 = (big - 16 * sh) as f32 - 7.5 * sw as f32 + an;
+    if d1 - zs > thr { if cfg!(feature = "diag_counters") { PNR_CNT[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed); } return d1; }
+    if cfg!(feature = "diag_counters") { PNR_CNT[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    (big - 16 * sh - adq_sum(qa, pnr_lo_(qb))) as f32 + an
+}
+
+#[inline(always)]
+pub fn adq_dist(qa: &[u8], qb: &[u8]) -> f32 {
+    if qa[9] == 1 { return adq_pnr_full(qa, qb); }
+    crate::diag_count!(QUANT_DIST);
+    let n = qb.len();
+    debug_assert!(qa.len() >= 32 + 2 * n);
+    let big = i32::from_le_bytes([qa[4], qa[5], qa[6], qa[7]]);
+    #[cfg(target_arch = "x86_64")]
+    { if qa[8] != 1 && adq_vnni() { return (big - unsafe { adq_vnni512(qa.as_ptr(), qb.as_ptr(), n) }) as f32 + anl_add(qa, qb); }
+      if is_sq4_avx2_supported() { return (big - unsafe { if qa[8] == 1 { adq_nu_avx2(qa.as_ptr(), qb.as_ptr(), n) } else { adq_avx2(qa.as_ptr(), qb.as_ptr(), n) } }) as f32 + anl_add(qa, qb); } }
+    (big - if qa[8] == 1 { adq_nu_scalar(qa, qb) } else { adq_scalar(qa, qb) }) as f32 + anl_add(qa, qb)
+}
+
+pub fn adq_nu_scalar(qa: &[u8], qb: &[u8]) -> i32 {
+    let n = qb.len(); let t = &qa[16..32]; let mut s = 0i32;
+    for i in 0..n {
+        s += t[(qb[i] & 0x0F) as usize] as i32 * (qa[32 + i] as i8 as i32) + t[(qb[i] >> 4) as usize] as i32 * (qa[32 + n + i] as i8 as i32);
+    }
+    s
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn adq_nu_avx2(q: *const u8, code: *const u8, n: usize) -> i32 {
+    let m = _mm256_set1_epi8(0x0F); let ones = _mm256_set1_epi16(1);
+    let t128 = _mm_loadu_si128(q.add(16) as *const __m128i);
+    let t = _mm256_broadcastsi128_si256(t128);
+    let (wl, wh) = (q.add(32), q.add(32 + n));
+    let mut acc = _mm256_setzero_si256();
+    let chunks = n / 32;
+    for c in 0..chunks {
+        let o = c * 32;
+        let b = _mm256_loadu_si256(code.add(o) as *const __m256i);
+        let lo = _mm256_shuffle_epi8(t, _mm256_and_si256(b, m)); let hi = _mm256_shuffle_epi8(t, _mm256_and_si256(_mm256_srli_epi16(b, 4), m));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(lo, _mm256_loadu_si256(wl.add(o) as *const __m256i)), ones));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(hi, _mm256_loadu_si256(wh.add(o) as *const __m256i)), ones));
+    }
+    let mut x = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256::<1>(acc));
+    let mut o = chunks * 32;
+    if n - o >= 16 {
+        let m1 = _mm_set1_epi8(0x0F); let o1 = _mm_set1_epi16(1);
+        let b = _mm_loadu_si128(code.add(o) as *const __m128i);
+        let lo = _mm_shuffle_epi8(t128, _mm_and_si128(b, m1)); let hi = _mm_shuffle_epi8(t128, _mm_and_si128(_mm_srli_epi16(b, 4), m1));
+        x = _mm_add_epi32(x, _mm_madd_epi16(_mm_maddubs_epi16(lo, _mm_loadu_si128(wl.add(o) as *const __m128i)), o1));
+        x = _mm_add_epi32(x, _mm_madd_epi16(_mm_maddubs_epi16(hi, _mm_loadu_si128(wh.add(o) as *const __m128i)), o1));
+        o += 16;
+    }
+    let x = _mm_add_epi32(x, _mm_shuffle_epi32::<0x4E>(x));
+    let x = _mm_add_epi32(x, _mm_shuffle_epi32::<0x01>(x));
+    let mut s = _mm_cvtsi128_si32(x);
+    let tb = q.add(16);
+    while o < n { let cb = *code.add(o); s += *tb.add((cb & 0x0F) as usize) as i32 * (*wl.add(o) as i8 as i32) + *tb.add((cb >> 4) as usize) as i32 * (*wh.add(o) as i8 as i32); o += 1; }
+    s
+}
+
+pub fn adq_scalar(qa: &[u8], qb: &[u8]) -> i32 {
+    let n = qb.len(); let mut s = 0i32;
+    for i in 0..n {
+        let lo = (qb[i] & 0x0F) as i32; let hi = (qb[i] >> 4) as i32;
+        s += lo * (qa[32 + i] as i8 as i32) + hi * (qa[32 + n + i] as i8 as i32);
+    }
+    s
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn adq_avx2(q: *const u8, code: *const u8, n: usize) -> i32 {
+    let m = _mm256_set1_epi8(0x0F); let ones = _mm256_set1_epi16(1);
+    let (wl, wh) = (q.add(32), q.add(32 + n));
+    let mut acc = _mm256_setzero_si256();
+    let chunks = n / 32;
+    for c in 0..chunks {
+        let o = c * 32;
+        let b = _mm256_loadu_si256(code.add(o) as *const __m256i);
+        let lo = _mm256_and_si256(b, m); let hi = _mm256_and_si256(_mm256_srli_epi16(b, 4), m);
+        let p = _mm256_add_epi16(_mm256_maddubs_epi16(lo, _mm256_loadu_si256(wl.add(o) as *const __m256i)),
+                                 _mm256_maddubs_epi16(hi, _mm256_loadu_si256(wh.add(o) as *const __m256i)));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(p, ones));
+    }
+    let x = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256::<1>(acc));
+    let mut o = chunks * 32;
+    let mut x = x;
+    if n - o >= 16 {
+        let m1 = _mm_set1_epi8(0x0F);
+        let b = _mm_loadu_si128(code.add(o) as *const __m128i);
+        let lo = _mm_and_si128(b, m1); let hi = _mm_and_si128(_mm_srli_epi16(b, 4), m1);
+        let p = _mm_add_epi16(_mm_maddubs_epi16(lo, _mm_loadu_si128(wl.add(o) as *const __m128i)),
+                              _mm_maddubs_epi16(hi, _mm_loadu_si128(wh.add(o) as *const __m128i)));
+        x = _mm_add_epi32(x, _mm_madd_epi16(p, _mm_set1_epi16(1)));
+        o += 16;
+    }
+    let x = _mm_add_epi32(x, _mm_shuffle_epi32::<0x4E>(x));
+    let x = _mm_add_epi32(x, _mm_shuffle_epi32::<0x01>(x));
+    let mut s = _mm_cvtsi128_si32(x);
+    while o < n { let cb = *code.add(o); s += (cb & 0x0F) as i32 * (*wl.add(o) as i8 as i32) + (cb >> 4) as i32 * (*wh.add(o) as i8 as i32); o += 1; }
+    s
+}
+
+#[cfg(test)]
+mod adq_tests {
+    use super::*;
+    #[test]
+    fn adq_matches_scalar_and_ip() {
+        let dim = 200; let n = 300;
+        let mut st = 12345u64; let mut r = || { st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); ((st >> 33) as f32 / (1u64 << 31) as f32) - 0.5 };
+        let mut data: Vec<f32> = (0..n * dim).map(|_| r()).collect();
+        for i in 0..n { let s: f32 = data[i*dim..(i+1)*dim].iter().map(|x| x*x).sum::<f32>().sqrt(); for x in &mut data[i*dim..(i+1)*dim] { *x /= s; } }
+        let mut ds = SQ4Dataset::build(&data, dim); ds.pad_codes(32);
+        let q: Vec<f32> = data[0..dim].to_vec();
+        let mut qb = Vec::new(); ds.params.encode_adq_into(&q, ds.code_bytes, &mut qb);
+        let sc = f32::from_le_bytes([qb[0], qb[1], qb[2], qb[3]]); let big = i32::from_le_bytes([qb[4], qb[5], qb[6], qb[7]]);
+        for i in 0..n {
+            let a = adq_dist(&qb, ds.code(i)); let s = (big - adq_scalar(&qb, ds.code(i))) as f32;
+            assert_eq!(a, s, "i={i}");
+            #[cfg(target_arch = "x86_64")]
+            if adq_vnni() { assert_eq!(unsafe { adq_vnni512(qb.as_ptr(), ds.code(i).as_ptr(), ds.code_bytes) }, adq_scalar(&qb, ds.code(i))); }
+            let xh = ds.params.decode(&ds.code(i)[..dim.div_ceil(2)]);
+            let ip: f32 = (0..dim).map(|d| q[d] * (xh[d] - ds.params.min[d])).sum();
+            let est = (big as f32 - a) * sc;
+            assert!((est - ip).abs() < 0.02 * ip.abs().max(1.0), "i={i} est={est} ip={ip}");
+        }
+    }
+    #[test]
+    fn adq_nu_matches_scalar_and_ip() {
+        let dim = 200; let n = 400;
+        let mut st = 777u64; let mut r = || { st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); ((st >> 33) as f32 / (1u64 << 31) as f32) - 0.5 };
+        let mut data: Vec<f32> = (0..n * dim).map(|_| r() + r() + r()).collect();
+        for i in 0..n { let s: f32 = data[i*dim..(i+1)*dim].iter().map(|x| x*x).sum::<f32>().sqrt(); for x in &mut data[i*dim..(i+1)*dim] { *x /= s; } }
+        let mut ds = SQ4Dataset::build(&data, dim); ds.pad_codes(32);
+        let dd = data.clone(); ds.nu_reencode(&|i| dd[i*dim..(i+1)*dim].to_vec());
+        let t = *NU_TABLE.get().unwrap();
+        let q: Vec<f32> = data[dim..2*dim].to_vec();
+        let mut qb = Vec::new(); ds.params.encode_adq_into(&q, ds.code_bytes, &mut qb);
+        assert_eq!(qb[8], 1);
+        let sc = f32::from_le_bytes([qb[0], qb[1], qb[2], qb[3]]); let big = i32::from_le_bytes([qb[4], qb[5], qb[6], qb[7]]);
+        let mut sw = 0i32; for i in 0..2*ds.code_bytes { sw += qb[32+i] as i8 as i32; }
+        let mut err = 0f64; let mut ipn = 0f64;
+        for i in 0..n {
+            let a = adq_dist(&qb, ds.code(i)); let s = (big - adq_nu_scalar(&qb, ds.code(i))) as f32;
+            assert_eq!(a, s, "i={i}"); assert!(a >= 0.0);
+            // 估计内积（去掉 q·mean 常数）vs 真实 q·(x − mean)
+            let est = ((adq_nu_scalar(&qb, ds.code(i)) - 64 * sw) as f32) * sc;
+            let ip: f32 = (0..dim).map(|d| q[d] * (data[i*dim+d] - ds.params.min[d])).sum();
+            err += ((est - ip) as f64).powi(2); ipn += (ip as f64).powi(2);
+            let _ = t;
+        }
+        assert!(err / ipn < 0.05, "rel err {}", err / ipn);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// R97 H176 A（RAVEN_L0B=1）：L0 每跳批量打分。一批最多 16 个邻居码（批内按指针 gather），按 64 B 维块外层、码内层循环：
+// 每个维块的查询权重（i8，wl/wh）只装一次、在 16 个独立累加器间复用（GINGER TurboQuantScoringInt8BatchDims 式的"批×维块"顺序），
+// 16 个码的访存同时在飞。NU（qa[8]=1）用 vpshufb 查共享级表 T（u8 ∈[1,127]）后 vpdpbusd；非 NU 直接 nibble × i8。
+// 整数和精确 → 与 adq_dist 逐位一致（调用方保证 qa[9]≠1（PNR 关）、qa[10]≠1（ANL 关））。
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn adq_batch_ok(qa: &[u8]) -> bool { qa.len() > 10 && qa[9] != 1 && qa[10] != 1 && adq_vnni() }
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub fn adq_batch_ok(_qa: &[u8]) -> bool { false }
+
+/// SAFETY：codes[..cnt] 指向长 n 的码；q 为 encode_adq_into 缓冲（长 32+2n）；cnt ≤ 16；需 adq_vnni()。
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vnni,avx512vl,avx2")]
+pub unsafe fn adq_batch16(q: *const u8, codes: &[*const u8; 16], cnt: usize, n: usize, out: &mut [f32; 16]) {
+    let m = _mm512_set1_epi8(0x0F);
+    let nu = *q.add(8) == 1;
+    let t = _mm512_broadcast_i32x4(_mm_loadu_si128(q.add(16) as *const __m128i));
+    let (wl, wh) = (q.add(32), q.add(32 + n));
+    let big = i32::from_le_bytes([*q.add(4), *q.add(5), *q.add(6), *q.add(7)]);
+    let mut acc: [__m512i; 16] = [_mm512_setzero_si512(); 16];
+    let mut o = 0usize;
+    while o < n {
+        let rem = n - o;
+        let mk: u64 = if rem >= 64 { u64::MAX } else { (1u64 << rem) - 1 };
+        let a = _mm512_maskz_loadu_epi8(mk, wl.add(o) as *const i8);
+        let b = _mm512_maskz_loadu_epi8(mk, wh.add(o) as *const i8);
+        for j in 0..16 {
+            if j >= cnt { break; }
+            let c = _mm512_maskz_loadu_epi8(mk, (*codes.get_unchecked(j)).add(o) as *const i8);
+            let mut lo = _mm512_and_si512(c, m); let mut hi = _mm512_and_si512(_mm512_srli_epi16(c, 4), m);
+            if nu { lo = _mm512_shuffle_epi8(t, lo); hi = _mm512_shuffle_epi8(t, hi); }
+            let x = _mm512_dpbusd_epi32(*acc.get_unchecked(j), lo, a);
+            *acc.get_unchecked_mut(j) = _mm512_dpbusd_epi32(x, hi, b);
+        }
+        o += 64;
+    }
+    for j in 0..cnt { *out.get_unchecked_mut(j) = (big - _mm512_reduce_add_epi32(*acc.get_unchecked(j))) as f32; }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod h176_batch_tests {
+    use super::*;
+    #[test]
+    fn batch16_matches_adq_dist() {
+        if !adq_vnni() { return; }
+        for &dim in &[100usize, 200, 384, 768] {
+            let n = 64;
+            let mut st = 99u64 + dim as u64; let mut r = || { st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); ((st >> 33) as f32 / (1u64 << 31) as f32) - 0.5 };
+            let data: Vec<f32> = (0..n * dim).map(|_| r()).collect();
+            let mut ds = SQ4Dataset::build(&data, dim); ds.pad_codes(32);
+            let q: Vec<f32> = (0..dim).map(|_| r()).collect();
+            let mut qb = Vec::new(); ds.params.encode_adq_into(&q, ds.code_bytes, &mut qb);
+            for nu in [false, true] {
+                let mut qq = qb.clone();
+                if nu { qq[8] = 1; for j in 0..16 { qq[16 + j] = (1 + j * 8) as u8; }
+                    let (mut sa, mut sw) = (0i32, 0i32); for i in 0..2 * ds.code_bytes { let w = qq[32 + i] as i8 as i32; sa += w.abs(); sw += w; }
+                    qq[4..8].copy_from_slice(&(63 * sa + 64 * sw).to_le_bytes()); }
+                for cnt in [1usize, 7, 16] {
+                    let mut ptrs = [std::ptr::null::<u8>(); 16];
+                    for j in 0..cnt { ptrs[j] = ds.code(j * 3).as_ptr(); }
+                    let mut out = [0f32; 16];
+                    unsafe { adq_batch16(qq.as_ptr(), &ptrs, cnt, ds.code_bytes, &mut out); }
+                    for j in 0..cnt { assert_eq!(out[j], adq_dist(&qq, ds.code(j * 3)), "dim={dim} nu={nu} j={j}"); }
+                }
+            }
         }
     }
 }

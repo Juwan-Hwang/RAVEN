@@ -19,6 +19,8 @@ pub static NAV_DIST: AtomicU64 = AtomicU64::new(0);
 pub static QUANT_PARTIAL: AtomicU64 = AtomicU64::new(0);
 /// H07：提前放弃的 SQ4 距离实际处理的维度总数（NDC 折算 = 维度数 / dim）
 pub static QUANT_PARTIAL_DIMS: AtomicU64 = AtomicU64::new(0);
+/// H173b：ADQ 底层每跳读取的邻接项数（有效度数之和）
+pub static EDGES: AtomicU64 = AtomicU64::new(0);
 /// 底层扩展节点数
 pub static HOPS: AtomicU64 = AtomicU64::new(0);
 
@@ -39,6 +41,7 @@ pub fn reset() {
     NAV_DIST.store(0, Ordering::Relaxed);
     QUANT_PARTIAL.store(0, Ordering::Relaxed);
     QUANT_PARTIAL_DIMS.store(0, Ordering::Relaxed);
+    EDGES.store(0, Ordering::Relaxed);
 }
 
 /// H07：提前放弃快照 (次数, 已处理维度总数)

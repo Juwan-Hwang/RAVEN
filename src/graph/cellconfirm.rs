@@ -58,7 +58,7 @@ impl Default for HrParams {
     // R35：两平台统一映射 v2（P 上限 0.30·ef + 耐心早停 2/0.3）。x86 R34 证实；ARM R35 配对 v2 对 v1 6/6 +7…+26%（steal<5%）
     // R36 合并候选 B2：S2C sa 8、su 2、sc 5，P 上限 0.64·ef（sc 4 的 c1 在 ef ≥ 280 同 ef 召回比 v2 低 >0.003，sc 5 两平台守住），待档位门控 (a)(b) 逐平台判定
     fn default() -> Self {
-        // R41 合并候选：两平台默认回到 v2（sa 0 = 不走 S2C 分段确认，P 上限 0.30·ef），与主线行为相同；
+        // R41 合并候选：两平台默认回到 v2（sa 0 = 不走 S2C 分段确认，P 上限 0.30·ef），与 主线 R35 行为相同；
         // B2（sa 8/su 2/sc 5/P 0.64·ef）x86 (a) 五批全负（R40）→ 留在叠加池，RAVEN_HR_SA/SU/SC/PR 可开。
         HrParams { gate: 200, er: 0.37, pr: 0.30, margin: 1.0, pat: 2, pminr: 0.3, sa: 0, su: 2, ss: 0, sc: 5, saf: 0.0, rk: 0, rmg: 1.02, pg: 0, stat: false, ek: true, c8: 0.0 }
     }
@@ -127,7 +127,7 @@ pub struct CcScratch {
 }
 
 /// 一个 searcher 上启用的 HR 计划（Copy，挂在 GraphSearcher 上）。
-/// R42b：只留热字段（与主线相同的 5 个），R35/R36 的分段确认/RH 覆盖参数移到 [`CcScratch::ext`]（已装箱，冷数据），
+/// R42b：只留热字段（与 主线 R35 相同的 5 个），R35/R36 的分段确认/RH 覆盖参数移到 [`CcScratch::ext`]（已装箱，冷数据），
 /// 避免 GraphSearcher 变大改变原路径布局（R43 接力测得 x86 GloVe 未启用档 −3…−6%、ARM HR 档 −4%）。
 #[derive(Clone, Copy)]
 pub struct CcActive<'a> {
@@ -177,7 +177,7 @@ pub fn default_nl(n: usize) -> usize {
     p
 }
 
-/// 采样 k-means（与 raven_eval 中 sv3_kmeans 同算法：nl·64 个等距采样点、10 轮 Lloyd、angular 时中心归一化），
+/// 采样 k-means（与 R31/R32 raven_eval sv3_kmeans 同算法：nl·64 个等距采样点、10 轮 Lloyd、angular 时中心归一化），
 /// 最后对全部点做一次分配。vectors 为内部序 n×dim。
 pub fn kmeans(vectors: &[f32], dim: usize, nl: usize, angular: bool) -> (Vec<f32>, Vec<u32>) {
     use rayon::prelude::*;
@@ -660,6 +660,142 @@ mod tests {
             for w in sc.top.windows(2) { assert!(w[0].0 <= w[1].0); }
             for x in sc.top.iter() { assert_eq!(x.0, crate::distance::l2_simd(&q, &v[x.1 as usize * d..(x.1 as usize + 1) * d])); }
             assert!(sc.top[9].0 <= seed[9].0);
+        }
+    }
+}
+
+/// R68：ADC16 v3 独立搜索链专用的逐字拷贝（让上面 主线 的原函数保持单调用者、代码生成不变）
+impl CellConfirm {
+    #[inline]
+    pub fn confirm_pat_r68(&self, q: &[f32], vectors: &[f32], k: usize, pp: usize, mm: f32, pat: usize, pminr: f32, sc: &mut CcScratch) {
+        let dim = self.dim; let nl = self.nl; let bc = &self.bc;
+        let row = |id: u32| -> &[f32] { &vectors[id as usize * dim..(id as usize + 1) * dim] };
+        let top = &mut sc.top;
+        let mut thr = if top.len() >= k { top[k - 1].0.min(sc.thr0) } else { sc.thr0 };
+        rotate(&bc.rot, bc.dpad, q, &mut sc.qr);
+        bc.prepare_query_into(&sc.qr, &mut sc.lut);
+        // 单元打分
+        let cs = &mut sc.cs;
+        if self.use_i8 {
+            #[cfg(target_arch = "x86_64")] {
+                let mut q8 = [0u8; 128];
+                let qm = q.iter().fold(0f32, |m, &x| m.max(x.abs())).max(1e-12); let qs8 = 63.0 / qm;
+                for d in 0..128 { q8[d] = if d < dim { ((q[d] * qs8).round().clamp(-63.0, 63.0) as i32 + 64) as u8 } else { 64 }; }
+                unsafe { cdot8_avx2(&self.cent8, nl, &q8, &mut sc.sc_i); }
+                let inv = 1.0 / (self.cs8 * qs8);
+                for j in 0..nl { cs[j] = (bc.cn2[j] - 2.0 * ((sc.sc_i[j] - 64 * self.csum[j]) as f32) * inv, j as u32); }
+            }
+        } else {
+            for j in 0..nl { cs[j] = (crate::distance::l2_simd(q, &bc.cent[j * dim..(j + 1) * dim]), j as u32); }
+        }
+        let pp2 = pp.min(nl);
+        cs[..nl].select_nth_unstable_by(pp2 - 1, |a, b| a.0.total_cmp(&b.0));
+        cs[..pp2].sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let sqd = (bc.dpad as f32).sqrt();
+        let sur = &mut sc.sur; sur.clear();
+        bc.prefetch_cell(cs[0].1 as usize, 2);
+        let pmin = ((pminr * pp2 as f32).round() as usize).max(1);
+        let mut dry = 0usize;
+        let pg = self.params.pg;
+        let mut done = 0usize; let mut nins = 0u64; let mut ncell = 0usize;
+        // 精算 sur[from..] 并入 top，收紧 thr
+        fn conf(sur: &[u32], from: usize, bc: &BitCells, vectors: &[f32], dim: usize, q: &[f32], k: usize, top: &mut Vec<(f32, u32)>, thr: &mut f32, nins: &mut u64) {
+            const PFD: usize = 8;
+            let row = |id: u32| -> &[f32] { &vectors[id as usize * dim..(id as usize + 1) * dim] };
+            for &so in sur[from..].iter().take(PFD) { prefetch_row(row(bc.ids[so as usize])); }
+            for i in from..sur.len() {
+                if i + PFD < sur.len() { prefetch_row(row(bc.ids[sur[i + PFD] as usize])); }
+                let id = bc.ids[sur[i] as usize];
+                let d = crate::distance::l2_simd(q, row(id));
+                if d < *thr && !top.iter().any(|x| x.1 == id) {
+                    let pos = top.partition_point(|x| x.0 <= d); top.insert(pos, (d, id)); top.truncate(k);
+                    if top.len() == k { *thr = top[k - 1].0; }
+                    *nins += 1;
+                }
+            }
+        }
+        // R43 C8：先 8-bit 槽序码过滤（qq = q − min），通过者再精算
+        fn conf8(sur: &[u32], from: usize, cc: &CellConfirm, vectors: &[f32], q16: &[i16], q: &[f32], k: usize, top: &mut Vec<(f32, u32)>, thr: &mut f32, nins: &mut u64, n8: &mut u64) {
+            const PFD: usize = 8;
+            let dim = cc.dim; let s8 = cc.c8_s; let slack = 1.0 + cc.params.c8;
+            let crow = |so: u32| -> &[u8] { &cc.c8[so as usize * dim..(so as usize + 1) * dim] };
+            for &so in sur[from..].iter().take(PFD) { prefetch_u8(crow(so)); }
+            for i in from..sur.len() {
+                if i + PFD < sur.len() { prefetch_u8(crow(sur[i + PFD])); }
+                let so = sur[i];
+                let c = crow(so);
+                // 整数 SSD（可向量化）：d8 = s²·Σ(c − q16)²
+                let mut acc = 0i32;
+                for t in 0..dim { let e = c[t] as i32 - q16[t] as i32; acc += e * e; }
+                let d8 = s8 * s8 * acc as f32;
+                if top.len() >= k && d8 > *thr * slack { continue; }
+                *n8 += 1;
+                let id = cc.bc.ids[so as usize];
+                let d = crate::distance::l2_simd(q, &vectors[id as usize * dim..(id as usize + 1) * dim]);
+                if d < *thr && !top.iter().any(|x| x.1 == id) {
+                    let pos = top.partition_point(|x| x.0 <= d); top.insert(pos, (d, id)); top.truncate(k);
+                    if top.len() == k { *thr = top[k - 1].0; }
+                    *nins += 1;
+                }
+            }
+        }
+        let use8 = !self.c8.is_empty();
+        // 旋转查询缓冲在 LUT 准备后已不再需要，复用为 qq = q − min（C8 开时）
+        let mut q16: Vec<i16> = Vec::new();
+        if use8 { q16.extend((0..dim).map(|t| ((q[t] - self.c8_min[t]) / self.c8_s).round().clamp(-32000.0, 32000.0) as i16)); }
+        let mut n8 = 0u64;
+        macro_rules! confirm_batch { ($from:expr) => {
+            if use8 { conf8(sur, $from, self, vectors, &q16, q, k, top, &mut thr, &mut nins, &mut n8); }
+            else { conf(sur, $from, bc, vectors, dim, q, k, top, &mut thr, &mut nins); }
+        } }
+        for ci in 0..pp2 {
+            let j = cs[ci].1 as usize;
+            if ci + 1 < pp2 { bc.prefetch_cell(cs[ci + 1].1 as usize, 2); }
+            let qc2 = if !self.use_i8 { cs[ci].0 } else { crate::distance::l2_simd(q, &bc.cent[j * dim..(j + 1) * dim]) };
+            let mc = mm * 2.0 * qc2.sqrt() / sqd;
+            let n0 = sur.len();
+            bc.scan_cell(j, &sc.lut, thr - qc2, mc, sur);
+            if self.params.stat {
+                // R44 oracle（仅统计模式）：块级幸存者分布 + 三角不等式下界的可剪比例
+                use std::sync::atomic::Ordering::Relaxed;
+                let (a, b) = (bc.offs[j], bc.offs[j + 1]); let blk = crate::quant::bitcell::BLK;
+                let nb = (b - a) / blk; let mut hit = vec![false; nb];
+                for &so in &sur[n0..] { hit[(so as usize - a) / blk] = true; }
+                let nh = hit.iter().filter(|&&h| h).count();
+                let dqc = qc2.max(0.0).sqrt(); let c = &bc.cent[j * dim..(j + 1) * dim];
+                let (mut npt, mut ntri, mut nzero) = (0u64, 0u64, 0u64);
+                for so in a..b { let id = bc.ids[so]; if id == u32::MAX { continue; } npt += 1;
+                    let r = crate::distance::l2_simd(row(id), c).max(0.0).sqrt(); let lb = (dqc - r).abs();
+                    if lb * lb > thr { ntri += 1; }
+                    if !hit[(so - a) / blk] { nzero += 1; } }
+                HR_STAT[5].fetch_add(nb as u64, Relaxed); HR_STAT[6].fetch_add(nh as u64, Relaxed); HR_STAT[7].fetch_add(npt, Relaxed);
+                HR_STAT[8].fetch_add(ntri, Relaxed); HR_STAT[9].fetch_add(nzero, Relaxed);
+                if self.orm > 0 {
+                    let m = self.orm; let pq: Vec<f32> = (0..m).map(|r| self.orproj[r * dim..(r + 1) * dim].iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f32>()).collect();
+                    let (mut npr, mut nbs) = (0u64, 0u64);
+                    for bi in 0..nb { let (mut all, mut cnt) = (true, 0u64);
+                        for so in a + bi * blk..a + (bi + 1) * blk { let id = bc.ids[so]; if id == u32::MAX { continue; } cnt += 1;
+                            let lb = crate::distance::l2_simd(&pq, &self.orp[id as usize * m..(id as usize + 1) * m]);
+                            if lb > thr { npr += 1; } else { all = false; } }
+                        if all { nbs += cnt; } }
+                    HR_STAT[10].fetch_add(npr, Relaxed); HR_STAT[11].fetch_add(nbs, Relaxed);
+                }
+            }
+            ncell = ci + 1;
+            if pg > 0 && (ci + 1) % pg == 0 && sur.len() > done {
+                confirm_batch!(done); done = sur.len();
+            }
+            if pat > 0 {
+                if sur.len() == n0 { dry += 1; } else { dry = 0; }
+                if dry >= pat && ci + 1 >= pmin { break; }
+            }
+        }
+        confirm_batch!(done);
+        sc.ncell = ncell as u32;
+        if self.params.stat {
+            use std::sync::atomic::Ordering::Relaxed;
+            HR_STAT[0].fetch_add(1, Relaxed); HR_STAT[1].fetch_add(ncell as u64, Relaxed);
+            HR_STAT[2].fetch_add(sur.len() as u64, Relaxed); HR_STAT[3].fetch_add(nins, Relaxed); HR_STAT[4].fetch_add(n8, Relaxed);
         }
     }
 }

@@ -114,6 +114,14 @@ impl VamanaGraph {
     ) -> Self {
         let n = vectors.len() / dim;
         assert_eq!(vectors.len(), n * dim);
+        // R88：RAVEN_BUILD=nnd → SQ4 码空间 NN-descent + 出∪入 α-RNG 一次剪枝（缺省不变）
+        if crate::build::nnd::enabled() {
+            return Self::build_nnd(vectors, dim, config);
+        }
+        // R94：RAVEN_BUILD=pipnn → 随机球划分 + 叶内多对多 top-k + α-RNG（缺省不变）
+        if crate::build::pipnn::enabled() {
+            return Self::build_pipnn(vectors, dim, config);
+        }
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
 
         info!("[build] rayon threads: {}", rayon::current_num_threads());
@@ -230,6 +238,179 @@ impl VamanaGraph {
             None
         };
 
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav }
+    }
+
+    /// R94 分块多对多建图（RAVEN_BUILD=pipnn），见 `crate::build::pipnn`。入口 = medoid，其余同 build_nnd。
+    pub fn build_pipnn(vectors: &[f32], dim: usize, config: &VamanaBuildConfig) -> Self {
+        let n = vectors.len() / dim;
+        let t0 = std::time::Instant::now();
+        // R95：RAVEN_PIP_G=1 → GINGER 一致化模式（crate::build::pipg），否则 R94 pipnn
+        // R97 NV-3 低维路由：128 ≤ dim < 256 的单位范数稠密有符号集 → R≥96、GMD=128（见 pipeline::lowd_route；RAVEN_LOWD_ROUTE=0 关）
+        let mut cfg_r = config.clone();
+        let route = crate::build::pipg::enabled() && crate::pipeline::lowd_route(vectors, dim);
+        if route { cfg_r.r_max = cfg_r.r_max.max(std::env::var("RAVEN_LOWD_R").ok().and_then(|x| x.parse().ok()).unwrap_or(96)); }
+        let config = &cfg_r;
+        let mut adj = if crate::build::pipg::enabled() {
+            let mut g = crate::build::pipg::GParams::from_env(config.r_max);
+            if route && std::env::var("RAVEN_PIP_GMD").is_err() { g.md = std::env::var("RAVEN_LOWD_GMD").ok().and_then(|x| x.parse().ok()).unwrap_or(128); }
+            // R98 H187：高维（d ≥ RAVEN_PIP_GKD，缺省 384）缺省走叶内 top-K=4 + 遮挡预剪 GOCC=1.0。依据 R98 同轮 ABBA：ccnews-768 k4o @0.99
+            // 1.19–1.34×、建图 29.2–29.6 vs G 36.2–38.2 s；yahoo-384 k4o @0.99 1.28–1.40×（建图 ×0.95）；glove-200 GK3/4 建图 84–100 s vs G 60–65 s
+            // ——低维不开。显式 RAVEN_PIP_GK / RAVEN_PIP_GOCC 优先；RAVEN_PIP_GKD=0 关掉此自动档。
+            let gkd: usize = std::env::var("RAVEN_PIP_GKD").ok().and_then(|x| x.parse().ok()).unwrap_or(384);
+            if !route && gkd > 0 && dim >= gkd {
+                if std::env::var("RAVEN_PIP_GK").is_err() { g.k = 4; }
+                if std::env::var("RAVEN_PIP_GOCC").is_err() { g.occ = 1.0; }
+                eprintln!("[pipg] H187 auto: dim={} >= {} -> GK={} GOCC={}", dim, gkd, g.k, g.occ);
+            }
+            crate::build::pipg::build(vectors, dim, &g)
+        } else {
+            let p = crate::build::pipnn::PipParams::from_env(config.alpha, config.r_max);
+            crate::build::pipnn::build(vectors, dim, &p)
+        };
+        let ep_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let t_adj = t0.elapsed().as_secs_f64();
+        let entry_point = Self::compute_medoid(vectors, dim, n);
+        // R95 H148：RAVEN_MDB_LEARN=<learn.fbin> → 训练查询漏检驱动桥边（缺省关），见 `crate::build::mdb`
+        if crate::build::mdb::enabled() {
+            crate::build::mdb::augment(vectors, dim, &mut adj, entry_point, config.r_max);
+        }
+        let t_mdb = t0.elapsed().as_secs_f64();
+        let mut storage = HybridBlockedCsr::new(n, config.r_max);
+        for (u, l) in adj.iter().enumerate() { storage.set_neighbors(u as u32, l); }
+        drop(adj);
+        let t_csr = t0.elapsed().as_secs_f64();
+        eprintln!("[build_pipnn] timing adj={t_adj:.1} mdb={t_mdb:.1} csr={t_csr:.1} epoch_ms={}", ep_ms());
+        let build_config = BuildConfig::default();
+        let metadata = BuildMetadata::from_config(&build_config, n, dim);
+        // R98 H184：建图期导航层（k=r/2，单线程顺序插入，glove R96 上 ~25 s）在 searcher→pipeline::prepare 里会被
+        // nav_rebuild_m=32/k=16 无条件重建、从不使用 → 缺省不建（RAVEN_BUILD_NAV=1 恢复）。prepare 在 nav 缺失时总会建。
+        let build_nav = std::env::var("RAVEN_BUILD_NAV").map(|v| v == "1").unwrap_or(false);
+        let layered_nav = if config.enable_layered_nav && n > 0 && build_nav {
+            Some(LayeredNavigation::build(vectors, dim, &storage, entry_point, config.nav_m, config.r_max / 2))
+        } else { None };
+        eprintln!("[build_pipnn] done {:.1}s entry={} epoch_ms={}", t0.elapsed().as_secs_f64(), entry_point, ep_ms());
+        VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav }
+    }
+
+    /// R88 码空间建图（RAVEN_BUILD=nnd）：邻接来自 `crate::build::nnd::build`（已按 float 距离升序），
+    /// 入口 = medoid、分层导航与元数据与 Vamana 路径相同。
+    pub fn build_nnd(vectors: &[f32], dim: usize, config: &VamanaBuildConfig) -> Self {
+        let n = vectors.len() / dim;
+        let t0 = std::time::Instant::now();
+        let p = crate::build::nnd::NndParams::from_env(config.alpha, config.r_max);
+        eprintln!("[build_nnd] n={} dim={} params={:?}", n, dim, p);
+        let envf = |k: &str, d: f64| -> f64 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) };
+        let hard = envf("RAVEN_NND_HARD", 0.0);
+        let hdump = std::env::var("RAVEN_NND_HDUMP").ok();
+        let need_h = hard > 0.0 || hdump.is_some();
+        const HK: usize = 10;
+        let (adj, knnh) = crate::build::nnd::build(vectors, dim, &p, if need_h { HK } else { 0 });
+        let ep_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let t_adj = t0.elapsed().as_secs_f64();
+        let mut storage = HybridBlockedCsr::new(n, config.r_max);
+        for (u, l) in adj.iter().enumerate() { storage.set_neighbors(u as u32, l); }
+        drop(adj);
+        let t_csr = t0.elapsed().as_secs_f64();
+        let entry_point = Self::compute_medoid(vectors, dim, n);
+        let t_med = t0.elapsed().as_secs_f64();
+        eprintln!("[build_pipnn] timing adj={t_adj:.1} csr={t_csr:.1} medoid={t_med:.1} epoch_ms={}", ep_ms());
+        // R90 H140（缺省关）：难搜点。每点以自身向量在 NND 图上自查询（L=RAVEN_NND_HL，缺省 32，float 贪心），
+        // 分数 = 2·[自身在结果中] + |码空间 kNN10 ∩ 结果|/10（越低越难）。RAVEN_NND_HDUMP=路径 写出 n 个 f32 分数；
+        // RAVEN_NND_HFILE=路径 改用外部分数（n 个 f32，越低越难，如 learn 查询路径统计）。
+        // RAVEN_NND_HARD=frac（0<frac<1）+ RAVEN_NND_VL>0：热启动 Vamana 补搜只对分数最低的 frac·n 个点做
+        // （RAVEN_NND_HNB=m 再加每个难点的前 m 条出边邻居），其余同 R88-3c（双向插入、final_prune、可选 out∪in 再剪枝）。
+        let mut sel: Option<Vec<bool>> = None;
+        if need_h {
+            let th = std::time::Instant::now();
+            let hl: usize = envf("RAVEN_NND_HL", 32.0) as usize;
+            let score: Vec<f32> = if let Ok(hf) = std::env::var("RAVEN_NND_HFILE") {
+                let b = std::fs::read(&hf).expect("RAVEN_NND_HFILE read");
+                assert_eq!(b.len(), n * 4, "RAVEN_NND_HFILE size");
+                b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+            } else {
+                let st = &storage; let knnh = &knnh;
+                (0..n as u32).into_par_iter().map_init(|| VisitedTracker::new(n, hl), |visited, u| {
+                    let q = &vectors[u as usize * dim..(u as usize + 1) * dim];
+                    let res = Self::greedy_search_vec_build(vectors, dim, st, entry_point, q, hl, visited);
+                    let me = res.iter().any(|t| t.0 == u);
+                    let kk = &knnh[u as usize * HK..(u as usize + 1) * HK];
+                    let tot = kk.iter().filter(|&&v| v != u32::MAX).count().max(1);
+                    let hit = kk.iter().filter(|&&v| v != u32::MAX && res.iter().any(|t| t.0 == v)).count();
+                    (if me { 2.0 } else { 0.0 }) + hit as f32 / tot as f32
+                }).collect()
+            };
+            let selfmiss = score.iter().filter(|&&x| x < 2.0).count();
+            let lt = |t: f32| score.iter().filter(|&&x| x < t).count() as f64 / n as f64;
+            eprintln!("[build_nnd] hard-score HL={} {:.1}s selfmiss {:.4} | lrec<1 {:.4} <0.9 {:.4} <0.8 {:.4} <0.5 {:.4} (score<2+t)",
+                hl, th.elapsed().as_secs_f64(), selfmiss as f64 / n as f64, lt(3.0), lt(2.9), lt(2.8), lt(2.5));
+            if let Some(hp) = &hdump {
+                let mut b = Vec::with_capacity(n * 4); for &x in &score { b.extend_from_slice(&x.to_le_bytes()); }
+                std::fs::write(hp, b).expect("RAVEN_NND_HDUMP write");
+            }
+            if hard > 0.0 && hard < 1.0 {
+                let m = ((hard * n as f64).ceil() as usize).min(n);
+                let mut idx: Vec<u32> = (0..n as u32).collect();
+                // 同分按 id 散列打乱，避免偏向小 id
+                let hsh = |u: u32| (u as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 32;
+                idx.sort_unstable_by(|&a, &b| score[a as usize].total_cmp(&score[b as usize]).then(hsh(a).cmp(&hsh(b))));
+                let mut f = vec![false; n];
+                for &u in &idx[..m] { f[u as usize] = true; }
+                let hnb: usize = envf("RAVEN_NND_HNB", 0.0) as usize;
+                if hnb > 0 { for &u in &idx[..m] { for &v in storage.neighbors(u).iter().take(hnb) { f[v as usize] = true; } } }
+                let cnt = f.iter().filter(|&&x| x).count();
+                eprintln!("[build_nnd] hard frac={} → {} hard (+HNB={} → {} selected, {:.4} of n), score cut {:.3}", hard, m, hnb, cnt, cnt as f64 / n as f64, score[idx[m - 1] as usize]);
+                sel = Some(f);
+            }
+        }
+        // R88-3c（缺省关，RAVEN_NND_VL=L>0）：以 NND 图为初始图跑一遍 Vamana 搜索-插入（L、config.alpha、r_max、双向插入），
+        // 候选 = 搜索访问集 ∪ 当前出边（保留 kNN 派生边，R87-D ref64 的教训）；之后可选 out∪in 再剪枝
+        // （RAVEN_NND_VA2 / RAVEN_NND_VCAP，即库内 H134 步；VA2=0 跳过）。
+        let vl: usize = std::env::var("RAVEN_NND_VL").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        if vl > 0 {
+            let tv = std::time::Instant::now();
+            let mut rng = ChaCha8Rng::seed_from(43);
+            let mut order = Self::permutation(n, &mut rng);
+            if let Some(f) = &sel { order.retain(|&u| f[u as usize]); }
+            let alpha = config.alpha;
+            for chunk in order.chunks(10_000) {
+                let st = &storage;
+                let new_neighbors: Vec<(u32, Vec<u32>)> = chunk.par_iter().map_init(
+                    || VisitedTracker::new(n, vl),
+                    |visited, &node_id| {
+                        let query = &vectors[node_id as usize * dim..(node_id as usize + 1) * dim];
+                        let _ = Self::greedy_search_vec_build(vectors, dim, st, entry_point, query, vl, visited);
+                        let mut cand: Vec<u32> = visited.visited_nodes().to_vec();
+                        let (m, o) = st.neighbors_full(node_id);
+                        cand.extend_from_slice(m); cand.extend_from_slice(o);
+                        cand.sort_unstable(); cand.dedup(); cand.retain(|&v| v != node_id);
+                        let pruned = prune_dispatch(config.prune_strategy, &cand, node_id, vectors, dim, alpha, config.r_max,
+                            config.saturate && alpha > 1.0);
+                        (node_id, pruned)
+                    }).collect();
+                for (node_id, pruned) in new_neighbors {
+                    Self::connect_bidirectional(&mut storage, node_id, &pruned, vectors, dim, alpha, config);
+                }
+            }
+            Self::final_prune(&mut storage, vectors, dim, config.alpha, config.r_max, config.saturate, config.prune_strategy);
+            let tvp = tv.elapsed().as_secs_f64();
+            let va2: f32 = std::env::var("RAVEN_NND_VA2").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            if va2 > 0.0 {
+                let vcap: usize = std::env::var("RAVEN_NND_VCAP").ok().and_then(|v| v.parse().ok()).unwrap_or(config.r_max).min(config.r_max);
+                let out: Vec<Vec<u32>> = (0..n as u32).map(|u| { let (m, o) = storage.neighbors_full(u); let mut v = m.to_vec(); v.extend_from_slice(o); v }).collect();
+                let pr = crate::build::nnd::prune_out_in(vectors, dim, &out, va2, p.cm, vcap, p.threads);
+                for (u, l) in pr.iter().enumerate() { storage.set_neighbors(u as u32, l); }
+            }
+            Self::sort_all_neighbors(&mut storage, vectors, dim);
+            let deg: usize = (0..n as u32).map(|u| storage.neighbors(u).len()).sum();
+            eprintln!("[build_nnd] vpass L={} alpha={} nodes={} {:.1}s (+reprune va2={} {:.1}s) avgdeg {:.2}", vl, alpha, order.len(), tvp, va2, tv.elapsed().as_secs_f64() - tvp, deg as f64 / n as f64);
+        }
+        let build_config = BuildConfig::default();
+        let metadata = BuildMetadata::from_config(&build_config, n, dim);
+        let layered_nav = if config.enable_layered_nav && n > 0 {
+            Some(LayeredNavigation::build(vectors, dim, &storage, entry_point, config.nav_m, config.r_max / 2))
+        } else { None };
+        eprintln!("[build_nnd] done {:.1}s entry={}", t0.elapsed().as_secs_f64(), entry_point);
         VamanaGraph { storage, entry_point, dim, n, metadata: Some(metadata), layered_nav }
     }
 
@@ -2344,12 +2525,18 @@ edge_size += is_new as usize;
             let x = &base[u * dim..(u + 1) * dim];
             let mut row: Vec<(f32, u32)> = self.storage().neighbors(u as u32).iter().filter(|&&v| v != crate::SENTINEL && v as usize != u)
                 .map(|&v| (l2(x, &base[v as usize * dim..(v as usize + 1) * dim]), v)).collect();
+            // H110 填充保序：RAVEN_FILL_ORDER=1 时原图（剪枝/多样）边按距离排在前，kNN 填充边按距离排在后，
+            // 使 sd 截断优先保留原图多样边（默认 0 = 旧行为：全部按距离混排）
+            let n_orig = row.len();
             if row.len() < d {
                 let have: std::collections::HashSet<u32> = row.iter().map(|e| e.1).collect();
                 let r = s.search(x, ef);
                 for &(v, _) in r.iter() { if row.len() >= d { break; } if v as usize != u && !have.contains(&v) { row.push((l2(x, &base[v as usize * dim..(v as usize + 1) * dim]), v)); } }
             }
-            row.sort_by(|a, b| a.0.total_cmp(&b.0)); row.truncate(d);
+            if std::env::var("RAVEN_FILL_ORDER").map(|v| v == "1").unwrap_or(false) {
+                row[..n_orig].sort_by(|a, b| a.0.total_cmp(&b.0)); row[n_orig..].sort_by(|a, b| a.0.total_cmp(&b.0));
+            } else { row.sort_by(|a, b| a.0.total_cmp(&b.0)); }
+            row.truncate(d);
             row.into_iter().map(|e| e.1).collect()
         }).collect();
         let rm = d.max(self.storage().r_max());
@@ -2655,6 +2842,9 @@ pub struct GraphSearcher<'a> {
     /// R33 HR 模式（ef ≥ gate 时由 Prepared::searcher 挂上；None = 原路径，逐位一致）
     cc: Option<crate::graph::cellconfirm::CcActive<'a>>,
     cc_scratch: Option<Box<crate::graph::cellconfirm::CcScratch>>,
+    /// R95 LPRR-C：LP 导航后用全维 SQ4 码（LPX 码 + 其维序）给宽池重排，只对第 k 名附近做 f32（None = 关，缺省）
+    pub(crate) rr_full: Option<(&'a SQ4Dataset, &'a [usize])>,
+    pub(crate) rr_code_buf: Vec<u8>,
 }
 
 /// H09：上层导航搜索侧选项（仅 `search_sq4` 生效）。
@@ -2777,6 +2967,8 @@ impl<'a> GraphSearcher<'a> {
             query_perm_buf: Vec::new(),
             cc: None,
             cc_scratch: None,
+            rr_full: None,
+            rr_code_buf: Vec::new(),
         }
     }
 
@@ -2823,6 +3015,8 @@ impl<'a> GraphSearcher<'a> {
             query_perm_buf: Vec::new(),
             cc: None,
             cc_scratch: None,
+            rr_full: None,
+            rr_code_buf: Vec::new(),
         }
     }
 
@@ -2870,6 +3064,12 @@ impl<'a> GraphSearcher<'a> {
     }
 
     /// H07：设置 SQ4 维度置换（`sq4` 须由 `SQ4Dataset::build_permuted(.., perm)` 构建）
+    /// R95 LPRR-C：挂全维码（及其维序，空 = 不置换）作精排前的中间级
+    pub fn with_rr_full(&mut self, f: &'a SQ4Dataset, perm: &'a [usize]) -> &mut Self {
+        self.rr_full = Some((f, perm));
+        self
+    }
+
     pub fn with_sq4_perm(&mut self, perm: &'a [usize]) -> &mut Self {
         self.sq4_perm = Some(perm);
         self
@@ -3166,7 +3366,7 @@ impl<'a> GraphSearcher<'a> {
             // 轨迹全部保持 visited；按 SQ4 距离取前 carry 个作种子
             let t = &mut self.nav_trace;
             // R27 S1：无 visited 的前提——导航层标记过的节点（= 全部轨迹）都作为种子提供（未截断、无 oracle 注入）
-            let nv = novis_on() && t.len() <= opts.carry && ORACLE_SEEDS.with(|o| o.borrow().is_empty());
+            let nv = novis_on_ef(ef) && t.len() <= opts.carry && ORACLE_SEEDS.with(|o| o.borrow().is_empty());
             t.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
             t.truncate(opts.carry);
             // H39 oracle 上界实验：注入查询专属种子（raven_eval RAVEN_ORACLE），默认空
@@ -3996,6 +4196,9 @@ n_jumps: 0,
             alpha: 1.2, l_build: 40, r_max: 16, r_soft: 24, max_iterations: 1, saturate: false,
             enable_layered_nav: true, nav_m: 8, prune_strategy: Default::default(), n_jumps: 0,
         };
+        // R102 RC1：pipdef（R99-13）后 VamanaGraph::build 缺省走 pipnn（无 layered nav）；本测试测的是 Vamana 路径，显式指定。
+        // 其它并行测试在 vamana/pipnn 两种建图下都通过（cf6870c7 vamana 缺省 240/240），故进程级 set_var 无害。
+        std::env::set_var("RAVEN_BUILD", "vamana");
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         assert!(graph.layered_nav().is_some());
         let sq4 = SQ4Dataset::build(&vectors, dim);
@@ -4061,6 +4264,9 @@ n_jumps: 0,
             alpha: 1.2, l_build: 60, r_max: 24, r_soft: 36, max_iterations: 1, saturate: false,
             enable_layered_nav: true, nav_m: 8, prune_strategy: Default::default(), n_jumps: 0,
         };
+        // R102 RC1：pipdef（R99-13）后 VamanaGraph::build 缺省走 pipnn（无 layered nav）；本测试测的是 Vamana 路径，显式指定。
+        // 其它并行测试在 vamana/pipnn 两种建图下都通过（cf6870c7 vamana 缺省 240/240），故进程级 set_var 无害。
+        std::env::set_var("RAVEN_BUILD", "vamana");
         let graph = VamanaGraph::build(&vectors, dim, &config, &mut rng);
         assert!(graph.layered_nav().is_some());
         let sq4 = SQ4Dataset::build(&vectors, dim);
@@ -4299,6 +4505,7 @@ pub static PF_LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 #[inline(always)]
 unsafe fn pf_code_lines(p: *const i8, lines: usize) {
     crate::arch::prefetch_l1(p);
+    crate::quant::sq4::anl_pf(p);
     let mut l = 1; while l < lines { crate::arch::prefetch_l1(p.wrapping_add(l * 64)); l += 1; }
 }
 /// R12-ORX oracle（仅 diag 构建）：L0 池键改用精确 f32 距离（查询指针 / 向量基址 / dim），量化噪声对 ef 需求的上界
@@ -4378,10 +4585,32 @@ pub fn novis_mode() -> u8 {
 #[inline(always)]
 pub fn novis_on() -> bool { novis_mode() > 0 }
 pub fn set_novis(mode: u8) { NOVIS.store(mode.min(2), std::sync::atomic::Ordering::Relaxed); }
+/// R97 H175b（NOVIS_EFMAX）：无 visited 模式只在 ef ≤ 门限时生效；ef 更大时该查询回退到 visited 位图路径（结果逐位一致，只是更快）。
+/// 依据（R97 XVII，测试机 Zen5，glove-200 g0，k=100，同召回，py96q = 有损 NvRf 过滤）：NOVIS=2 对 NOVIS=0 在 ef40/80 +13%/+9%、ef120 +5%、ef160 ＝、
+/// ef200 −3…−6%、ef300 −12%、ef700 −45%、ef1500 −65%（近期过滤表 2^11 在高 ef 下失效 → 重复候选重算距离，代价超线性）。
+/// RAVEN_NOVIS_EFMAX=N 覆盖（0 = 不设门限 = R96 行为）。缺省见 NOVIS_EFMAX_DEFAULT。
+static NOVIS_EFMAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+#[cfg(target_arch = "x86_64")]
+const NOVIS_EFMAX_DEFAULT: usize = 192;
+#[cfg(not(target_arch = "x86_64"))]
+const NOVIS_EFMAX_DEFAULT: usize = 0;
+#[inline(always)]
+pub fn novis_efmax() -> usize {
+    use std::sync::atomic::Ordering::Relaxed;
+    let v = NOVIS_EFMAX.load(Relaxed);
+    if v != usize::MAX { return v; }
+    let d = std::env::var("RAVEN_NOVIS_EFMAX").ok().and_then(|x| x.parse().ok()).unwrap_or(NOVIS_EFMAX_DEFAULT);
+    NOVIS_EFMAX.store(d, Relaxed);
+    d
+}
+pub fn set_novis_efmax(v: usize) { NOVIS_EFMAX.store(v, std::sync::atomic::Ordering::Relaxed); }
+/// 本查询（ef）是否走无 visited 路径
+#[inline(always)]
+pub fn novis_on_ef(ef: usize) -> bool { novis_on() && { let m = novis_efmax(); m == 0 || ef <= m } }
 /// R28 组合 1：建图后饱和填充的默认（度数, ef）。RAVEN_FILL=D,ef 覆盖，RAVEN_FILL=0 关。各平台默认按合并门槛判定后设置。
 /// aarch64：R28 C（c1j48，SIFT R48→64 填充 + novis2 + vh148，ef 40→25 / 45→28 等召回，3 轮 6/6：+16.0/+22.1/+25.0%、+21.7/+19.8/+18.3%；
 /// GloVe 组合 1 c1j +16.6/+10.7%）→ (64, 128)。x86：组合 1 SIFT 噪声大（c1j48 第 3 轮 −20%），待 R29 低噪声复测 → 关。
-/// R29（2026-11-02）：单图进程 ABAB 公平复测（4 轮正反序，等召回插值）：SIFT@0.95 +20.6/+12.1/+14.7/+12.4%（中位 +13.5%），
+/// R29（2026-11-02）：单图进程 ABAB 公平复测：SIFT@0.95 +20.6/+12.1/+14.7/+12.4%（中位 +13.5%），
 /// GloVe@0.8785 +3.3/−15.2/+4.3/+17.2%、@0.9083 +3.6/−3.0/+9.4/+5.9%（不同向）→ 按合并规则 aarch64 改回 None（两平台都关；RAVEN_FILL=64,128 可开）。
 /// R28 的 +16～25% 来自双图同进程 A/B（先载入的 A 图被拖慢），见 CHARTER 测量规则。
 /// R31（2026-11-02）x86：单图进程 ABAB 4 轮全档位合并测试：SIFT@0.95 +10.7/+0.6/+7.3/−9.8%（中位 +3.9%，3/4 正），
@@ -5479,3 +5708,8 @@ thread_local! { pub static CM: std::cell::RefCell<CmState> = std::cell::RefCell:
     q_dist: Vec::new(), q_isn: Vec::new(), q_acc2: Vec::new(), q_aoff: Vec::new(), q_fin: Vec::new() }); }
 #[inline(always)]
 pub fn cm_mix(x: u32) -> u32 { let mut h = x.wrapping_mul(0x85EB_CA6B); h ^= h >> 13; h = h.wrapping_mul(0xC2B2_AE35); h ^ (h >> 16) }
+
+/// R68 ADC16 v3：独立的非对称低维导航搜索链（缺省路径函数不变）
+mod adc16;
+/// R84 ADQ：任意码长非对称 SQ4 内积导航链（单位范数数据）
+pub(crate) mod adq;

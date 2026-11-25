@@ -94,6 +94,17 @@ impl LinearPool {
         self.cursor = 0;
     }
 
+    /// R95 LPRR：只加宽容量（精排池），不改 ef（扩展/终止仍按前 ef 名）。
+    /// 池内前 ef 名 = 原 ef 容量池内容（有界 top-ef 与更宽 top-(ef+extra) 的前缀相同）→ 导航序列不变；
+    /// 多出的 extra 名是"算过码距离但排在 ef 外"的候选，交给 f32 精排。extra = 0 时不做任何事。
+    #[inline]
+    pub fn widen(&mut self, extra: usize) {
+        if extra == 0 { return; }
+        let c = self.ef + extra;
+        if c + 4 > self.data.len() { self.data.resize(c + 4, (0, 0.0)); }
+        self.capacity = c;
+    }
+
     /// 中途扩容：增大 capacity 和 ef，保留现有数据与游标
     ///
     /// 用于运行时自适应 ef：搜索进行中判定 query 难度后，
@@ -802,3 +813,71 @@ impl LinearPool {
     }
 }
 
+/// R68：ADC16 v3 独立搜索链专用的逐字拷贝（让上面 主线 的原函数保持单调用者、代码生成不变）
+impl LinearPool {
+    #[inline]
+    pub fn merge_batch_dedup_r68(&mut self, ids: &[u32], ds: &[f32]) -> usize {
+        let n = ids.len();
+        debug_assert!(n <= 128 && ds.len() == n);
+        let w = if self.size == self.capacity { unsafe { self.data.get_unchecked(self.size - 1).1 } } else { f32::INFINITY };
+        // 幸存者缓冲不初始化（每跳省 1KB 置零）；只读写前 k 个
+        let mut svm: [std::mem::MaybeUninit<(f32, u32)>; 128] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+        let sv = svm.as_mut_ptr() as *mut (f32, u32);
+        let mut k = 0usize;
+        for j in 0..n {
+            let d = unsafe { *ds.get_unchecked(j) };
+            unsafe { *sv.add(k) = (d, *ids.get_unchecked(j)); }
+            k += (d < w) as usize;
+        }
+        if k == 0 { return 0; }
+        // 少量幸存者：逐个 insert_dedup（与批量语义相同，省去排序/归并的固定开销）
+        if k <= S2_SEQ_MAX {
+            let mut a = 0usize;
+            for j in 0..k { let (d, id) = unsafe { *sv.add(j) }; a += self.insert_dedup(id, d) as usize; }
+            return a;
+        }
+        let sv = unsafe { std::slice::from_raw_parts_mut(sv, k) };
+        // 稳定插入排序
+        for i in 1..k {
+            let x = sv[i];
+            let mut j = i;
+            while j > 0 && sv[j - 1].0 > x.0 { sv[j] = sv[j - 1]; j -= 1; }
+            sv[j] = x;
+        }
+        // 去重：反向协同扫描（sv 升序、池升序；池指针 i 单调下降）；重复者 id 置为 DUP 后压缩
+        const DUP: u32 = u32::MAX;
+        let mut i = self.size as isize - 1;
+        let mut ndup = 0usize;
+        for j in (0..k).rev() {
+            let (d, id) = sv[j];
+            while i >= 0 && unsafe { self.data.get_unchecked(i as usize).1 } > d { i -= 1; }
+            let mut t = i;
+            let mut dup = false;
+            while t >= 0 { let e = unsafe { *self.data.get_unchecked(t as usize) }; if e.1 != d { break; } if raw_id(e.0) == id { dup = true; break; } t -= 1; }
+            if !dup { let mut u = j; while u > 0 && sv[u - 1].0 == d { u -= 1; if sv[u].1 == id { dup = true; break; } } }
+            if dup { sv[j].1 = DUP; ndup += 1; }
+        }
+        if ndup > 0 { let mut m = 0usize; for j in 0..k { if sv[j].1 != DUP { sv[m] = sv[j]; m += 1; } } k = m; if k == 0 { return 0; } }
+        // 反向原地归并：先丢弃超出容量的最大者（并列时批元素在后 → 先丢批元素），再写回
+        let total = self.size + k;
+        let newsize = total.min(self.capacity);
+        let mut pi = self.size as isize - 1;
+        let mut bj = k as isize - 1;
+        let mut out = total as isize - 1;
+        let mut minpos = usize::MAX;
+        let mut added = 0usize;
+        while bj >= 0 {
+            let b = sv[bj as usize];
+            let take_b = pi < 0 || b.0 >= unsafe { self.data.get_unchecked(pi as usize).1 };
+            if (out as usize) < newsize {
+                if take_b { unsafe { *self.data.get_unchecked_mut(out as usize) = (b.1, b.0); } minpos = out as usize; added += 1; }
+                else { unsafe { *self.data.get_unchecked_mut(out as usize) = *self.data.get_unchecked(pi as usize); } }
+            }
+            if take_b { bj -= 1; } else { pi -= 1; }
+            out -= 1;
+        }
+        self.size = newsize;
+        if minpos < self.cursor { self.cursor = minpos; }
+        added
+    }
+}
