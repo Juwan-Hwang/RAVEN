@@ -7,13 +7,12 @@ From: base.sif
   CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.100.0 --no-modify-path
   export PATH=/opt/cargo/bin:$PATH CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup
 
-  # NOTE: commit 908f0d03313c0c52384cfca9b48c55ca00850171 is the library commit on raven-private branch rsi/vibe-ready; the public repo
-  # github.com/Juwan-Hwang/RAVEN must receive this tree (and this pin updated to its public hash) before the image builds.
+  # Public repository; the pin below is the library commit that adds the VIBE API.
   git clone https://github.com/Juwan-Hwang/RAVEN /RAVEN
   cd /RAVEN
   git config --global --add safe.directory /RAVEN
   # Pin: the library commit with the VIBE API (k parameter, array learn set / build_ood, build_threads, Searcher.plan).
-  git reset --hard 908f0d03313c0c52384cfca9b48c55ca00850171
+  git reset --hard fdd5841533e53c7736c40c569854ce5d3e7da3c9
 
   # The repository's .cargo/config.toml compiles with -C target-cpu=native: the image must be built on the node
   # (same CPU model) that runs the benchmark. Hot SIMD kernels are selected at compile time (AVX-512 vs AVX2),
