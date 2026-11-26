@@ -93,6 +93,20 @@ maturin develop --release --features python
 python test_pybinding.py
 ```
 
+### VIBE integration
+
+`vibe/algorithms/raven/` contains the adapter for the [VIBE](https://github.com/vector-index-bench/vibe) benchmark
+(`module.py`, `config.yml`, `image.def`). Copy the directory into `vibe/algorithms/` of a VIBE checkout and build the
+`raven` Singularity image from `image.def`. It uses the library's VIBE-facing API: the explicit `k` parameter,
+the in-memory OOD learn set (`Index.set_learn` / `build_ood` / `clear_learn` / `learn_info`), `build_threads`, and
+`Searcher.plan()`.
+
+The image must be built on a compute node of the same CPU model that runs the benchmark: `.cargo/config.toml`
+compiles with `-C target-cpu=native`, and the SIMD kernels (AVX-512 vs AVX2) are chosen at compile time, so a
+wheel built on a different CPU can be slower, produce different last-bit distances, or crash with SIGILL. If the
+image cannot be built on the compute node, set `RUSTFLAGS="-C target-cpu=x86-64-v4"` (AVX-512 nodes) before
+`maturin build` in `image.def` to override the native target.
+
 ### Rust API
 
 ```rust

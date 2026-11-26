@@ -112,16 +112,30 @@ impl VamanaGraph {
         config: &VamanaBuildConfig,
         rng: &mut ChaCha8Rng,
     ) -> Self {
+        Self::build_ex(vectors, dim, config, rng, None)
+    }
+
+    /// R109 vibe-ready：`build` + 可选的 OOD 学习查询（数组，行主序 f32）与 MDB 参数。`learn = None` 与 `build` 逐位相同。
+    /// 学习查询只在 pipnn/pipg 建图路径（缺省）上用于 MDB 桥边；其它建图路径忽略并告警。
+    pub fn build_ex(
+        vectors: &[f32],
+        dim: usize,
+        config: &VamanaBuildConfig,
+        rng: &mut ChaCha8Rng,
+        learn: Option<(&[f32], &crate::build::mdb::MdbParams)>,
+    ) -> Self {
         let n = vectors.len() / dim;
         assert_eq!(vectors.len(), n * dim);
         // R88：RAVEN_BUILD=nnd → SQ4 码空间 NN-descent + 出∪入 α-RNG 一次剪枝（缺省不变）
         if crate::build::nnd::enabled() {
+            if learn.is_some() { eprintln!("[mdb] WARNING: learn set ignored (RAVEN_BUILD=nnd has no MDB)"); }
             return Self::build_nnd(vectors, dim, config);
         }
         // R94：RAVEN_BUILD=pipnn → 随机球划分 + 叶内多对多 top-k + α-RNG（缺省不变）
         if crate::build::pipnn::enabled() {
-            return Self::build_pipnn(vectors, dim, config);
+            return Self::build_pipnn_ex(vectors, dim, config, learn);
         }
+        if learn.is_some() { eprintln!("[mdb] WARNING: learn set ignored (vamana build path has no MDB)"); }
         let mut storage = HybridBlockedCsr::new(n, config.r_max);
 
         info!("[build] rayon threads: {}", rayon::current_num_threads());
@@ -243,6 +257,11 @@ impl VamanaGraph {
 
     /// R94 分块多对多建图（RAVEN_BUILD=pipnn），见 `crate::build::pipnn`。入口 = medoid，其余同 build_nnd。
     pub fn build_pipnn(vectors: &[f32], dim: usize, config: &VamanaBuildConfig) -> Self {
+        Self::build_pipnn_ex(vectors, dim, config, None)
+    }
+
+    /// R109：`build_pipnn` + 可选数组学习查询（MDB）。数组优先于 RAVEN_MDB_LEARN 文件；两者都无时与旧路径逐位相同。
+    pub fn build_pipnn_ex(vectors: &[f32], dim: usize, config: &VamanaBuildConfig, learn: Option<(&[f32], &crate::build::mdb::MdbParams)>) -> Self {
         let n = vectors.len() / dim;
         let t0 = std::time::Instant::now();
         // R95：RAVEN_PIP_G=1 → GINGER 一致化模式（crate::build::pipg），否则 R94 pipnn
@@ -272,7 +291,10 @@ impl VamanaGraph {
         let t_adj = t0.elapsed().as_secs_f64();
         let entry_point = Self::compute_medoid(vectors, dim, n);
         // R95 H148：RAVEN_MDB_LEARN=<learn.fbin> → 训练查询漏检驱动桥边（缺省关），见 `crate::build::mdb`
-        if crate::build::mdb::enabled() {
+        if let Some((lq, mp)) = learn {
+            if crate::build::mdb::enabled() { eprintln!("[mdb] WARNING: array learn set given; RAVEN_MDB_LEARN file ignored"); }
+            crate::build::mdb::augment_with(vectors, dim, &mut adj, entry_point, config.r_max, lq, mp);
+        } else if crate::build::mdb::enabled() {
             crate::build::mdb::augment(vectors, dim, &mut adj, entry_point, config.r_max);
         }
         let t_mdb = t0.elapsed().as_secs_f64();

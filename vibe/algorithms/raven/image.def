@@ -1,0 +1,25 @@
+Bootstrap: localimage
+From: base.sif
+
+%post
+  # Rust toolchain pinned to the version used for the RAVEN measurements (rustc/cargo 1.100.0, profile minimal).
+  curl -fsSL --retry 5 https://sh.rustup.rs -o /tmp/rustup-init.sh
+  CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.100.0 --no-modify-path
+  export PATH=/opt/cargo/bin:$PATH CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup
+
+  # NOTE: commit 908f0d03313c0c52384cfca9b48c55ca00850171 is the library commit on raven-private branch rsi/vibe-ready; the public repo
+  # github.com/Juwan-Hwang/RAVEN must receive this tree (and this pin updated to its public hash) before the image builds.
+  git clone https://github.com/Juwan-Hwang/RAVEN /RAVEN
+  cd /RAVEN
+  git config --global --add safe.directory /RAVEN
+  # Pin: the library commit with the VIBE API (k parameter, array learn set / build_ood, build_threads, Searcher.plan).
+  git reset --hard 908f0d03313c0c52384cfca9b48c55ca00850171
+
+  # The repository's .cargo/config.toml compiles with -C target-cpu=native: the image must be built on the node
+  # (same CPU model) that runs the benchmark. Hot SIMD kernels are selected at compile time (AVX-512 vs AVX2),
+  # so a wheel built on another CPU can be slower, give different last-bit distances, or crash with SIGILL.
+  pip install --no-cache-dir maturin==1.16.0
+  maturin build --release --locked -o /tmp/wheels
+  pip install --no-cache-dir --no-deps /tmp/wheels/raven_py-*.whl
+  python3 -c "import raven, numpy as np; i = raven.Index('euclidean', 8, quantization='sq4', k=10, build_threads=1); i.build(np.random.default_rng(0).standard_normal((2000, 8), dtype=np.float32)); s = i.searcher(); s.set_ef(32); print('raven ok', s.plan()[1])"
+  rm -rf /tmp/wheels /RAVEN/target /opt/cargo/registry

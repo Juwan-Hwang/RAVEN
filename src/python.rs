@@ -44,6 +44,34 @@ struct PyIndex {
     rerank: usize,
     threads: usize,
     adaptive_ef: bool,
+    /// R109：评测 k（None → RAVEN_K → 10），构建期计划（KL 大 k、HR/LPX/SDX 标定、LP 保真度门）按此 k
+    k: Option<usize>,
+    /// R109：build()/searcher() 用的线程数（0 = 旧行为：rayon 全局池 + available_parallelism；VIBE 用 1）
+    build_threads: usize,
+    /// R109：OOD 学习查询（前 nl 行，行主序 f32）与 MDB 参数；Some 时 build() 走数组 MDB
+    learn: Option<(Vec<f32>, crate::build::mdb::MdbParams)>,
+}
+
+/// R109：评测 k 的解析顺序：显式参数 > 环境变量 RAVEN_K > 10
+fn resolve_k(explicit: Option<usize>) -> usize {
+    let env_k: Option<usize> = std::env::var("RAVEN_K").ok().and_then(|v| v.parse().ok());
+    match (explicit, env_k) {
+        (Some(k), Some(e)) if e != k => { eprintln!("[raven] k={k} given explicitly; RAVEN_K={e} ignored"); k }
+        (Some(k), _) => k,
+        (None, Some(e)) => e,
+        (None, None) => 10,
+    }
+}
+
+/// R109：在固定线程数的 rayon 池里运行 f，并把构建期自管线程数（pipeline::PREP_NT）设为同值；nt = 0 → 旧行为（直接运行）
+fn with_threads<R: Send>(nt: usize, f: impl FnOnce() -> R + Send) -> PyResult<R> {
+    if nt == 0 { return Ok(f()); }
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(nt).build()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let prev = crate::pipeline::PREP_NT.swap(nt, std::sync::atomic::Ordering::Relaxed);
+    let r = pool.install(f);
+    crate::pipeline::PREP_NT.store(prev, std::sync::atomic::Ordering::Relaxed);
+    Ok(r)
 }
 
 #[pymethods]
@@ -55,7 +83,9 @@ impl PyIndex {
     ///   quantization="sq8" (default) 或 "sq4"
     ///   rerank_factor=5 (默认，SQ4/SQ8 均适用)
     #[new]
-    #[pyo3(signature = (metric, dim, r=40, l=384, alpha=1.2, alpha_core=1.0, nav_m=32, directional=true, quantization="sq8", rerank_factor=5, threads=0, adaptive_ef=false))]
+    ///
+    /// R109 新增：`k`（评测 k；None → RAVEN_K → 10）、`build_threads`（build/searcher 线程数；0 = 旧行为，VIBE 用 1）。
+    #[pyo3(signature = (metric, dim, r=40, l=384, alpha=1.2, alpha_core=1.0, nav_m=32, directional=true, quantization="sq8", rerank_factor=5, threads=0, adaptive_ef=false, k=None, build_threads=0))]
     fn new(
         metric: &str,
         dim: usize,
@@ -69,7 +99,10 @@ impl PyIndex {
         rerank_factor: usize,
         threads: usize,
         adaptive_ef: bool,
+        k: Option<usize>,
+        build_threads: usize,
     ) -> PyResult<Self> {
+        if k == Some(0) { return Err(pyo3::exceptions::PyValueError::new_err("k must be >= 1")); }
         let _ = metric; // L2 only
         let quant = match quantization.to_lowercase().as_str() {
             "sq8" => Quant::Sq8,
@@ -96,7 +129,53 @@ impl PyIndex {
             rerank: rerank_factor,
             threads,
             adaptive_ef,
+            k,
+            build_threads,
+            learn: None,
         })
+    }
+
+    /// R109：设置 OOD 学习查询（VIBE `fit_ood` 的 X_learn），之后的 build() 用它跑 MDB 漏检驱动桥边（与 RAVEN_MDB_LEARN 文件路径同一段代码）。
+    /// learn: (nl, dim) float32；只保留前 nl 行。参数解析：显式参数 > 同名环境变量 RAVEN_MDB_* > 数组路径缺省
+    /// （yandex 便宜档：nl=50000 efl=100 efg=250 q8=True rounds=1 km=100 add=8 mode="ER" minv=1 a2=1.44 normalize=True）。
+    /// normalize=True 时在库内把学习查询单位化（角度/余弦集）；欧氏集应传 normalize=False。
+    #[pyo3(signature = (learn, nl=None, efl=None, efg=None, km=None, add=None, mode=None, minv=None, a2=None, rounds=None, normalize=None, q8=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_learn(&mut self, learn: PyReadonlyArray2<f32>, nl: Option<usize>, efl: Option<usize>, efg: Option<usize>, km: Option<usize>, add: Option<usize>,
+                 mode: Option<String>, minv: Option<u32>, a2: Option<f32>, rounds: Option<usize>, normalize: Option<bool>, q8: Option<bool>) -> PyResult<()> {
+        let a = learn.as_array();
+        let (ln, d) = (a.shape()[0], a.shape()[1]);
+        if d != self.dim {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("learn dim mismatch: expected {}, got {}", self.dim, d)));
+        }
+        let mut p = crate::build::mdb::MdbParams::array_default().env_override();
+        if let Some(v) = nl { p.nl = v; } if let Some(v) = efl { p.efl = v; } if let Some(v) = efg { p.efg = v; }
+        if let Some(v) = km { p.km = v; } if let Some(v) = add { p.add = v; } if let Some(v) = mode { p.mode = v; }
+        if let Some(v) = minv { p.minv = v; } if let Some(v) = a2 { p.a2 = v; } if let Some(v) = rounds { p.rounds = v; }
+        if let Some(v) = normalize { p.norm = v; } if let Some(v) = q8 { p.q8 = v; }
+        let rows = p.nl.min(ln);
+        if rows == 0 { self.learn = None; return Ok(()); }
+        let sub = a.slice(numpy::ndarray::s![..rows, ..]);
+        let v: Vec<f32> = sub.as_standard_layout().to_owned().into_raw_vec();
+        self.learn = Some((v, p));
+        Ok(())
+    }
+
+    /// R109：清除学习查询（之后的 build() 不跑数组 MDB）
+    fn clear_learn(&mut self) { self.learn = None; }
+
+    /// R109：当前学习查询的 (行数, MDB 参数字符串)；未设置时 None
+    fn learn_info(&self) -> Option<(usize, String)> {
+        self.learn.as_ref().map(|(v, p)| (v.len() / self.dim.max(1), format!("{:?}", p)))
+    }
+
+    /// R109：OOD 建图 = set_learn(learn, **kw) + build(x)
+    #[pyo3(signature = (x, learn, nl=None, efl=None, efg=None, km=None, add=None, mode=None, minv=None, a2=None, rounds=None, normalize=None, q8=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn build_ood(&mut self, x: PyReadonlyArray2<f32>, learn: PyReadonlyArray2<f32>, nl: Option<usize>, efl: Option<usize>, efg: Option<usize>, km: Option<usize>, add: Option<usize>,
+                 mode: Option<String>, minv: Option<u32>, a2: Option<f32>, rounds: Option<usize>, normalize: Option<bool>, q8: Option<bool>) -> PyResult<()> {
+        self.set_learn(learn, nl, efl, efg, km, add, mode, minv, a2, rounds, normalize, q8)?;
+        self.build(x)
     }
 
     /// 构建索引
@@ -143,11 +222,14 @@ impl PyIndex {
         };
 
         let mut rng = ChaCha8Rng::seed_from(42);
+        let dim = self.dim;
+        let learn = self.learn.as_ref().map(|(v, p)| (v.as_slice(), p));
         let graph = if zc {
             let xs = x.as_slice().map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-            VamanaGraph::build(xs, self.dim, &config, &mut rng)
+            with_threads(self.build_threads, || VamanaGraph::build_ex(xs, dim, &config, &mut rng, learn))?
         } else {
-            VamanaGraph::build(&self.vectors, self.dim, &config, &mut rng)
+            let vs = &self.vectors;
+            with_threads(self.build_threads, || VamanaGraph::build_ex(vs, dim, &config, &mut rng, learn))?
         };
         self.graph = Some(graph);
         Ok(())
@@ -156,7 +238,10 @@ impl PyIndex {
     /// 创建搜索器（移动 graph + vectors 到 Searcher，启用量化搜索）
     ///
     /// 根据 quantization 参数构建 SQ8 或 SQ4 数据集。
-    fn searcher(&mut self, py: Python<'_>) -> PyResult<PySearcher> {
+    /// R109：k（评测 k）解析顺序 = 本参数 > Index(k=…) > RAVEN_K > 10。
+    #[pyo3(signature = (k=None))]
+    fn searcher(&mut self, py: Python<'_>, k: Option<usize>) -> PyResult<PySearcher> {
+        if k == Some(0) { return Err(pyo3::exceptions::PyValueError::new_err("k must be >= 1")); }
         if self.vectors.is_empty() {
             if let Some(src) = self.src.take() {
                 let a: PyReadonlyArray2<f32> = src.bind(py).extract()?;
@@ -174,12 +259,16 @@ impl PyIndex {
         if use_pipe {
             let mut o = crate::pipeline::PipelineOpts::default();
             o.rerank = self.rerank;
-            // R43-3：评测 k（VIBE k=100）告知构建期（KL 大 k 计划、HR/LPX 标定）；RAVEN_K 覆盖，默认 10
-            if let Some(k) = std::env::var("RAVEN_K").ok().and_then(|v| v.parse().ok()) { o.k = k; }
+            // R43-3：评测 k（VIBE k=100）告知构建期（KL 大 k 计划、HR/LPX 标定）。
+            // R109：k 为正式参数（searcher(k) > Index(k) > RAVEN_K > 10），库内一律经 PipelineOpts.k 传递
+            o.k = resolve_k(k.or(self.k));
             if let Some(sd) = std::env::var("RAVEN_SD").ok().and_then(|v| v.parse().ok()) { o.search_degree = Some(sd); }
-            // R28 组合 1：平台默认的建图后饱和填充（RAVEN_FILL 覆盖，=0 关）
-            let graph = match crate::graph::vamana::fill_default() { Some((d, ef)) => graph.saturate_fill(&vectors, self.dim, d, ef), None => graph };
-            let p = crate::pipeline::prepare(graph, vectors, self.dim, &o);
+            let dim = self.dim;
+            let p = with_threads(self.build_threads, move || {
+                // R28 组合 1：平台默认的建图后饱和填充（RAVEN_FILL 覆盖，=0 关）
+                let graph = match crate::graph::vamana::fill_default() { Some((d, ef)) => graph.saturate_fill(&vectors, dim, d, ef), None => graph };
+                crate::pipeline::prepare(graph, vectors, dim, &o)
+            })?;
             return Ok(PySearcher {
                 vectors: Vec::new(), dim: self.dim, graph: None, sq8: None, sq4: None,
                 ef: 50, po: 16, rerank: self.rerank, threads: self.threads,
@@ -264,6 +353,7 @@ impl PyIndex {
             src: None,
             dim, r: 48, l: 200, alpha: 1.2, alpha_core: 1.0, nav_m: 32, directional: true,
             quant, rerank: rerank_factor, threads, adaptive_ef: false,
+            k: None, build_threads: 0, learn: None,
         })
     }
 
@@ -287,6 +377,9 @@ impl PyIndex {
             rerank: 3,
             threads: 0,
             adaptive_ef: false,
+            k: None,
+            build_threads: 0,
+            learn: None,
         })
     }
 }
@@ -402,6 +495,11 @@ impl PySearcher {
     /// 设置 prefetch offset
     fn set_po(&mut self, po: usize) {
         self.po = po;
+    }
+
+    /// R109：构建期计划 (PLAN 字符串, FNV-1a 64 哈希十六进制)；非流水线路径返回 None。用于核对两次构建/两种入口逐位一致。
+    fn plan(&self) -> Option<(String, String)> {
+        self.pipe.as_ref().map(|p| (p.plan_string(), format!("{:016x}", p.plan_hash())))
     }
 
     /// R80 N1：search() 内 L2 归一化开关（angular 数据集用；batch_search 不受影响）

@@ -18,6 +18,17 @@ use crate::graph::VamanaGraph;
 use crate::quant::SQ4Dataset;
 use std::time::Instant;
 
+/// R109 vibe-ready：构建期（prepare）自管线程（`std::thread::scope`：lp_auto 协方差、project_all、lp_fidelity）的线程数覆盖。
+/// 0 = 旧行为（`available_parallelism()`，受进程 CPU 亲和性影响）；>0 = 固定线程数（Python `Index(build_threads=…)` 在 build/searcher 期间设置）。
+/// 注意 lp_auto 的协方差按线程分块累加（f32 块内 → f64 块间），线程数不同 → 投影矩阵末位可能不同；固定线程数让结果与机器核数、亲和性无关。
+pub static PREP_NT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 构建期自管线程数：PREP_NT > 0 时用它，否则 `available_parallelism()`（旧行为）
+pub fn prep_threads() -> usize {
+    let o = PREP_NT.load(std::sync::atomic::Ordering::Relaxed);
+    if o > 0 { o } else { std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1) }
+}
+
 #[derive(Clone, Debug)]
 pub struct PipelineOpts {
     pub nav_rebuild_m: usize,
@@ -357,7 +368,7 @@ pub fn prepare(mut graph: VamanaGraph, vectors: Vec<f32>, dim: usize, o: &Pipeli
         graph.set_layered_nav(nav);
     }
     // R37 LP：RAVEN_LP_FILE=<m×dim f32 行主序投影矩阵>，RAVEN_LP_M=m → SQ4 建在投影空间
-    let (proj, proj_m) = load_lp_v(dim, &vectors, o.sq4_clip);
+    let (proj, proj_m) = load_lp_v(dim, &vectors, o.sq4_clip, o.k);
     let (perm, sq4) = if proj_m > 0 {
         let pb = project_all(&vectors, dim, &proj, proj_m);
         let rank: usize = std::env::var("RAVEN_LP_RANK").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -1405,7 +1416,7 @@ pub fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
 /// R97 H178：缓存行 LP 档选中时置位，prepare 据此不建 LPX 全维码。
 pub static H178_NOLPX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn load_lp(dim: usize) -> (Vec<f32>, usize) { load_lp_v(dim, &[], -1.0) }
+fn load_lp(dim: usize) -> (Vec<f32>, usize) { load_lp_v(dim, &[], -1.0, 10) }
 
 /// R37 LP：自动投影。RAVEN_LP=auto（或 =m 指定维数）时在库内由样本协方差的子空间迭代求前 m 主子空间，
 /// 再乘随机正交阵均衡各维方差；门控：dim ≥ RAVEN_LP_MINDIM(256) 且前 m 维方差占比 ≥ RAVEN_LP_FRAC(0.90)。
@@ -1413,7 +1424,7 @@ fn load_lp(dim: usize) -> (Vec<f32>, usize) { load_lp_v(dim, &[], -1.0) }
 /// 比较 LP-m 码与全维 SQ4 码"真 top-k ∈ 近似 top-4k"的比例，相对保真度 ≥ RAVEN_LP_FIDTHR（默认 0.98；Python 校准：fashion LP128 0.9925、gist LP192 0.986、arxiv LP192 0.9925 开，nytimes ≤0.93 关）取最小 m。
 /// 方差占比只是代理（VIBE arxiv-768：varfrac(256)=0.896 被 0.90 门槛误关，而 LP192 保真度 0.9925 与 fashion LP128 同档）。
 #[cold] #[inline(never)] // R102 coldcal: prepare-time only, keep out of hot .text
-fn load_lp_v(dim: usize, vectors: &[f32], clip: f32) -> (Vec<f32>, usize) {
+fn load_lp_v(dim: usize, vectors: &[f32], clip: f32, k: usize) -> (Vec<f32>, usize) {
     H178_NOLPX.store(false, std::sync::atomic::Ordering::Relaxed);
     // R41：x86_64 默认 RAVEN_LP=auto（方差占比门控；测试机 门控 (b)：fashion +35%、mnist +64…+87%、gist ≈3.7× @0.95；
     // dim<256 的集合与 nytimes 不进入，逐位不变）；aarch64 默认仍关。RAVEN_LP=0 可关。
@@ -1440,7 +1451,7 @@ fn load_lp_v(dim: usize, vectors: &[f32], clip: f32) -> (Vec<f32>, usize) {
                         let thr: f64 = std::env::var("RAVEN_LP_FIDTHR").ok().and_then(|x| x.parse().ok()).unwrap_or(0.98);
                         let (p, frac) = lp_auto(vectors, dim, m);
                         if frac < floor { eprintln!("R40 LP fid-gate m={m} varfrac={frac:.3} < floor {floor} -> skip ({:.1}s)", t.elapsed().as_secs_f64()); continue; }
-                        let (fl, ff) = lp_fidelity(vectors, dim, &p, m, clip);
+                        let (fl, ff) = lp_fidelity(vectors, dim, &p, m, clip, k);
                         let rel = if ff > 0.0 { fl / ff } else { 0.0 };
                         let on = rel >= thr;
                         eprintln!("R40 LP fid-gate m={m} varfrac={frac:.3} fid_lp={fl:.4} fid_full={ff:.4} rel={rel:.4} thr={thr} -> {} ({:.1}s)", if on { "ON" } else { "off" }, t.elapsed().as_secs_f64());
@@ -1455,7 +1466,7 @@ fn load_lp_v(dim: usize, vectors: &[f32], clip: f32) -> (Vec<f32>, usize) {
                     let band: f64 = std::env::var("RAVEN_LP_BAND").ok().and_then(|x| x.parse().ok()).unwrap_or(0.03);
                     let on = if band > 0.0 && (frac - fth).abs() < band {
                         let thr: f64 = std::env::var("RAVEN_LP_FIDTHR").ok().and_then(|x| x.parse().ok()).unwrap_or(0.98);
-                        let (fl, ff) = lp_fidelity(vectors, dim, &p, m, clip);
+                        let (fl, ff) = lp_fidelity(vectors, dim, &p, m, clip, k);
                         let rel = if ff > 0.0 { fl / ff } else { 0.0 };
                         eprintln!("R97 LP band m={m} varfrac={frac:.3} thr={fth}±{band} -> fid_lp={fl:.4} fid_full={ff:.4} rel={rel:.4} thr={thr}");
                         rel >= thr
@@ -1497,13 +1508,14 @@ fn load_lp_v(dim: usize, vectors: &[f32], clip: f32) -> (Vec<f32>, usize) {
     (all[..m * dim].to_vec(), m)
 }
 
-/// R40 保真度：返回 (LP-m 码保真度, 全维 SQ4 码保真度)，保真度 = 真 top-k 落入近似 top-4k 的比例（k = RAVEN_K 或 10）。
+/// R40 保真度：返回 (LP-m 码保真度, 全维 SQ4 码保真度)，保真度 = 真 top-k 落入近似 top-4k 的比例（k = 评测 k，R109 起由
+/// `PipelineOpts.k` 传入；旧版在此读 RAVEN_K，缺省 10——Python/raven_eval 入口已把 RAVEN_K 解析进 opts.k，结果逐位相同）。
 /// 查询 = 200 个库内点（与候选子样本错位，避开自身）；候选 = ≤10 万行等距子样本上精确 top-C（C = max(20k, 2000)）。确定性。
 #[cold] #[inline(never)] // R102 coldcal: prepare-time only, keep out of hot .text
-pub fn lp_fidelity(v: &[f32], dim: usize, proj: &[f32], m: usize, clip: f32) -> (f64, f64) {
+pub fn lp_fidelity(v: &[f32], dim: usize, proj: &[f32], m: usize, clip: f32, k: usize) -> (f64, f64) {
     use crate::quant::sq4::SQ4Params;
     let n = v.len() / dim;
-    let k: usize = std::env::var("RAVEN_K").ok().and_then(|x| x.parse().ok()).unwrap_or(10);
+    let k = k.max(1);
     let ns = n.min(100_000); let step = (n / ns).max(1);
     let sidx: Vec<usize> = (0..ns).map(|i| i * step).collect();
     let nq = 200usize.min(n / 2);
@@ -1519,7 +1531,7 @@ pub fn lp_fidelity(v: &[f32], dim: usize, proj: &[f32], m: usize, clip: f32) -> 
     let st = pl0.scale.iter().cloned().fold(1e-12f32, f32::max);
     let lmin: Vec<f32> = (0..m).map(|d| 0.5 * (pl0.min[d] + pl0.max[d]) - 7.5 * st).collect();
     let deq = |x: f32, mn: f32, sc: f32| -> f32 { let c = ((x - mn) / sc).round().clamp(0.0, 15.0); mn + c * sc };
-    let nt = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).min(16);
+    let nt = prep_threads().min(16);
     let per = nq.div_ceil(nt);
     let (hl, hf): (usize, usize) = std::thread::scope(|sc| {
         let hs: Vec<_> = qidx.chunks(per).map(|qs| { let (xs, ps, pf, lmin, sidx) = (&xs, &ps, &pf, &lmin, &sidx); sc.spawn(move || {
@@ -1552,7 +1564,7 @@ pub fn lp_fidelity(v: &[f32], dim: usize, proj: &[f32], m: usize, clip: f32) -> 
 fn project_all(v: &[f32], dim: usize, proj: &[f32], m: usize) -> Vec<f32> {
     let n = v.len() / dim;
     let mut out = vec![0f32; n * m];
-    let nt = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
+    let nt = prep_threads();
     let rows = n.div_ceil(nt).max(1);
     std::thread::scope(|sc| {
         for (ci, chunk) in out.chunks_mut(rows * m).enumerate() {
@@ -1582,7 +1594,7 @@ pub fn lp_auto(v: &[f32], dim: usize, m: usize) -> (Vec<f32>, f64) {
     let mut x = vec![0f32; ns * dim];
     for (r, &i) in idx.iter().enumerate() { for d in 0..dim { x[r * dim + d] = (v[i * dim + d] as f64 - mu[d]) as f32; } }
     // 协方差 C = XᵀX / ns（按行块并行累加）
-    let nt = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+    let nt = prep_threads();
     let rows = ns.div_ceil(nt);
     let parts: Vec<Vec<f64>> = std::thread::scope(|sc| {
         let hs: Vec<_> = x.chunks(rows * dim).map(|blk| sc.spawn(move || {

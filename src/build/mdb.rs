@@ -11,7 +11,8 @@
 //!    每点累计至多 ADD 条、且不超过 r_max；ROUNDS>1 时在加边后的图上重搜，只修剩余漏检。
 //! 5. 每行按 float 距离重排（RAVEN SD 读前 SD 槽）。
 //!
-//! 只有失败的搜索产生边，增量度数 ≤ ADD（缺省 8）。环境变量：RAVEN_MDB_LEARN RAVEN_MDB_NL=200000 RAVEN_MDB_EFL=150
+//! 只有失败的搜索产生边，增量度数 ≤ ADD（缺省 8）。R109：数组路径（Python `Index.set_learn`/`build_ood`）见 [`augment_with`]，
+//! 缺省 = [`MdbParams::array_default`]；文件路径环境变量：RAVEN_MDB_LEARN RAVEN_MDB_NL=200000 RAVEN_MDB_EFL=150
 //! RAVEN_MDB_EFG=400 RAVEN_MDB_KM=100 RAVEN_MDB_ADD=8 RAVEN_MDB_MODE=ER RAVEN_MDB_MINV=1 RAVEN_MDB_A2=1.44
 //! RAVEN_MDB_ROUNDS=1 RAVEN_MDB_NORM=1（learn 查询单位化；角度/余弦集，库向量已在外部单位化）。
 use rayon::prelude::*;
@@ -68,24 +69,68 @@ fn beam_g<D: Fn(u32) -> f32, P: Fn(u32)>(adj: &[Vec<u32>], ep: u32, ef: usize, c
     }
 }
 
+/// R109 vibe-ready：MDB 参数。`from_env()` = 文件路径（RAVEN_MDB_LEARN）的历史缺省（NL 20 万 EFL150 EFG400、f32 束），
+/// `array_default()` = 数组路径（Python `Index.set_learn` / `build_ood`）的缺省 = yandex「便宜 MDB」档
+/// （R99 y101 n5l / R105 y105 benv：Q8=1 NL=5 万 EFL=100 EFG=250 ROUNDS=1，其余同文件路径）。两者都以同名环境变量为覆盖。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdbParams {
+    pub nl: usize, pub efl: usize, pub efg: usize, pub km: usize, pub add: usize, pub mode: String,
+    pub minv: u32, pub a2: f32, pub rounds: usize, pub norm: bool, pub q8: bool,
+}
+
+impl MdbParams {
+    /// 文件路径历史缺省（与 R95–R108 `RAVEN_MDB_LEARN` 行为逐位相同）
+    pub fn file_default() -> Self {
+        MdbParams { nl: 200_000, efl: 150, efg: 400, km: 100, add: 8, mode: "ER".to_string(), minv: 1, a2: 1.44, rounds: 1, norm: true, q8: false }
+    }
+    /// 数组路径缺省（yandex 便宜 MDB 档，见类型注释）
+    pub fn array_default() -> Self {
+        MdbParams { nl: 50_000, efl: 100, efg: 250, q8: true, ..Self::file_default() }
+    }
+    /// 以环境变量覆盖 `self` 的各字段（未设置的保持不变）
+    pub fn env_override(mut self) -> Self {
+        self.nl = env("RAVEN_MDB_NL", self.nl); self.efl = env("RAVEN_MDB_EFL", self.efl); self.efg = env("RAVEN_MDB_EFG", self.efg);
+        self.km = env("RAVEN_MDB_KM", self.km); self.add = env("RAVEN_MDB_ADD", self.add); self.mode = env("RAVEN_MDB_MODE", self.mode.clone());
+        self.minv = env("RAVEN_MDB_MINV", self.minv); self.a2 = env("RAVEN_MDB_A2", self.a2); self.rounds = env("RAVEN_MDB_ROUNDS", self.rounds);
+        self.norm = env::<u32>("RAVEN_MDB_NORM", self.norm as u32) > 0; self.q8 = env::<u32>("RAVEN_MDB_Q8", self.q8 as u32) > 0;
+        self
+    }
+    /// 文件路径实际使用的参数（历史缺省 + 环境变量）
+    pub fn from_env() -> Self { Self::file_default().env_override() }
+}
+
+/// 文件路径入口（RAVEN_MDB_LEARN=<learn.fbin>，fbin = u32 行数、u32 维数、行主序 f32）。行为与 R95–R108 逐位相同。
 pub fn augment(x: &[f32], dim: usize, adj: &mut [Vec<u32>], ep: u32, r_max: usize) {
     let t0 = Instant::now();
-    let n = adj.len();
     let lf = std::env::var("RAVEN_MDB_LEARN").unwrap();
-    let nl: usize = env("RAVEN_MDB_NL", 200_000); let efl: usize = env("RAVEN_MDB_EFL", 150); let efg: usize = env("RAVEN_MDB_EFG", 400);
-    let km: usize = env("RAVEN_MDB_KM", 100); let add: usize = env("RAVEN_MDB_ADD", 8); let mode: String = env("RAVEN_MDB_MODE", "ER".to_string());
-    let minv: u32 = env("RAVEN_MDB_MINV", 1); let a2: f32 = env("RAVEN_MDB_A2", 1.44); let rounds: usize = env("RAVEN_MDB_ROUNDS", 1);
-    let norm = env::<u32>("RAVEN_MDB_NORM", 1) > 0;
-    let (me, mr) = (mode.contains('E'), mode.contains('R'));
+    let p = MdbParams::from_env();
     let b = std::fs::read(&lf).expect("RAVEN_MDB_LEARN read");
     let (ln, ld) = (u32::from_le_bytes(b[0..4].try_into().unwrap()) as usize, u32::from_le_bytes(b[4..8].try_into().unwrap()) as usize);
     assert_eq!(ld, dim, "learn dim mismatch");
-    let nl = nl.min(ln).min((b.len() - 8) / (4 * dim));
-    let mut lq: Vec<f32> = b[8..8 + nl * dim * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let nl = p.nl.min(ln).min((b.len() - 8) / (4 * dim));
+    let lq: Vec<f32> = b[8..8 + nl * dim * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
     drop(b);
+    augment_core(x, dim, adj, ep, r_max, lq, &p, t0);
+}
+
+/// R109 数组路径入口：`learn` = 行主序 f32（行数 = learn.len()/dim），只取前 `p.nl` 行；其后与文件路径走同一段代码。
+pub fn augment_with(x: &[f32], dim: usize, adj: &mut [Vec<u32>], ep: u32, r_max: usize, learn: &[f32], p: &MdbParams) {
+    let t0 = Instant::now();
+    assert!(dim > 0 && learn.len() % dim == 0, "learn length must be a multiple of dim");
+    let nl = p.nl.min(learn.len() / dim);
+    let lq: Vec<f32> = learn[..nl * dim].to_vec();
+    augment_core(x, dim, adj, ep, r_max, lq, p, t0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn augment_core(x: &[f32], dim: usize, adj: &mut [Vec<u32>], ep: u32, r_max: usize, mut lq: Vec<f32>, p: &MdbParams, t0: Instant) {
+    let n = adj.len();
+    let nl = lq.len() / dim;
+    let (efl, efg, km, add, mode, minv, a2, rounds, norm) = (p.efl, p.efg, p.km, p.add, p.mode.clone(), p.minv, p.a2, p.rounds, p.norm);
+    let (me, mr) = (mode.contains('E'), mode.contains('R'));
     if norm { lq.par_chunks_mut(dim).for_each(|v| { let s = v.iter().map(|a| a * a).sum::<f32>().sqrt().max(1e-30); v.iter_mut().for_each(|a| *a /= s); }); }
     let xr = |i: u32| &x[i as usize * dim..(i as usize + 1) * dim];
-    let useq = env::<u32>("RAVEN_MDB_Q8", 0) > 0;
+    let useq = p.q8;
     let tq = Instant::now();
     let q8 = if useq { Some(crate::build::pipg::Q8::new(x, dim)) } else { None };
     let lqc: Vec<(Vec<i8>, i32)> = match &q8 { Some(qd) => lq.par_chunks(dim).map(|v| qd.quant(v)).collect(), None => Vec::new() };
